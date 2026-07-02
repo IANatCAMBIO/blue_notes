@@ -121,6 +121,17 @@ gboolean on_note_deserialize(GtkTextBuffer *buffer, const guint8 *data,
                              gsize len);
 
 /* ---------------------------------------------------------------------------
+ * on_note_deserialize_scaled() — like on_note_deserialize(), but images
+ * are DECODED at no more than `max_img_px` on their longest side (0 =
+ * full resolution).  For consumers that only render small previews
+ * (grid thumbnails), this avoids inflating multi-megapixel bitmaps that
+ * are immediately shrunk to card size.
+ * ------------------------------------------------------------------------- */
+gboolean on_note_deserialize_scaled(GtkTextBuffer *buffer,
+                                    const guint8 *data, gsize len,
+                                    gint max_img_px);
+
+/* ---------------------------------------------------------------------------
  * on_buffer_first_line() — extract the note title: the text of the first
  * non-empty line, or "New Note" if the buffer is empty.
  *   buffer — buffer to inspect.

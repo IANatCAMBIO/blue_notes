@@ -348,7 +348,10 @@ render_note_thumb(OnLibrary *lw, OnNoteMeta *m)
     gsize   blob_len = 0;            /* stored blob size                    */
     guint8 *blob = on_db_note_load(lw->app->db, m->id, &blob_len);
     if (blob != NULL) {
-        on_note_deserialize(buf, blob, blob_len);
+        /* Cap image decode at 512px: the card preview is at most ~256
+         * physical pixels wide, so full-resolution decode (potentially
+         * tens of MB per screenshot) is pure waste here.                   */
+        on_note_deserialize_scaled(buf, blob, blob_len, 512);
         g_free(blob);
     }
 

@@ -384,8 +384,34 @@ migrate_legacy_checkboxes(GtkTextBuffer *buffer)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * on_size_prepared() — GdkPixbufLoader callback capping decode size:
+ * shrink to at most `max_px` (passed via user_data) on the longest side,
+ * preserving aspect ratio.  Never upscales.
+ * ------------------------------------------------------------------------- */
+static void
+on_size_prepared(GdkPixbufLoader *loader, gint width, gint height,
+                 gpointer user_data)
+{
+    gint max_px = GPOINTER_TO_INT(user_data);
+    gint longest = MAX(width, height);
+    if (longest > max_px) {
+        gdouble scale = (gdouble)max_px / longest;
+        gdk_pixbuf_loader_set_size(loader,
+                                   MAX(1, (gint)(width * scale)),
+                                   MAX(1, (gint)(height * scale)));
+    }
+}
+
 gboolean
 on_note_deserialize(GtkTextBuffer *buffer, const guint8 *data, gsize len)
+{
+    return on_note_deserialize_scaled(buffer, data, len, 0);
+}
+
+gboolean
+on_note_deserialize_scaled(GtkTextBuffer *buffer, const guint8 *data,
+                           gsize len, gint max_img_px)
 {
     on_buffer_ensure_tags(buffer);
     gtk_text_buffer_set_text(buffer, "", -1);
@@ -437,6 +463,10 @@ on_note_deserialize(GtkTextBuffer *buffer, const guint8 *data, gsize len)
              * Widgets (for on-screen display) are attached separately by
              * the editor; offscreen consumers just read the anchor data.   */
             GdkPixbufLoader *loader = gdk_pixbuf_loader_new();
+            if (max_img_px > 0)
+                g_signal_connect(loader, "size-prepared",
+                                 G_CALLBACK(on_size_prepared),
+                                 GINT_TO_POINTER(max_img_px));
             GError *err = NULL;
             if (gdk_pixbuf_loader_write(loader, data + pos, n, &err) &&
                 gdk_pixbuf_loader_close(loader, &err)) {
