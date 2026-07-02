@@ -159,6 +159,50 @@ static void    on_action_toolbar_style_changed(GtkToolbar *toolbar,
                                                gpointer user_data);
 
 /* ===========================================================================
+ * scroll preservation
+ * =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * ScrollKeep — one vadjustment position being restored after a model
+ * rebuild (clearing a store zeroes its view's scrollbar).  The restore
+ * runs at idle so the rebuilt view has re-validated its height first.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    GtkAdjustment *adj;              /* the scrollbar to restore (owned ref)*/
+    gdouble        value;            /* position before the rebuild         */
+} ScrollKeep;
+
+/* scroll_keep_restore() — idle callback: put the scrollbar back.            */
+static gboolean
+scroll_keep_restore(gpointer user_data)
+{
+    ScrollKeep *k = user_data;
+    gtk_adjustment_set_value(k->adj, k->value);  /* clamps to the range     */
+    g_object_unref(k->adj);
+    g_free(k);
+    return G_SOURCE_REMOVE;
+}
+
+/* scroll_keep_queue() — schedule `adj` to be put back at `value`.           */
+static void
+scroll_keep_queue(GtkAdjustment *adj, gdouble value)
+{
+    ScrollKeep *k = g_new(ScrollKeep, 1);
+    k->adj   = g_object_ref(adj);
+    k->value = value;
+    g_idle_add(scroll_keep_restore, k);
+}
+
+/* view_vadjustment() — the vadjustment of the scrolled window holding
+ * `view` (every scrollable view here sits directly in one).                 */
+static GtkAdjustment *
+view_vadjustment(GtkWidget *view)
+{
+    return gtk_scrolled_window_get_vadjustment(
+        GTK_SCROLLED_WINDOW(gtk_widget_get_parent(view)));
+}
+
+/* ===========================================================================
  * sidebar population
  * =========================================================================== */
 
@@ -209,6 +253,12 @@ refresh_sidebar(OnLibrary *lw)
 {
     gint   want_kind = lw->sel_kind; /* selection to restore                */
     gint64 want_id   = lw->sel_id;
+
+    /* Clearing the store zeroes the sidebar scrollbar; a sidebar rebuild
+     * is never a navigation (counts changed, a folder was added, …), so
+     * the position is always put back.                                     */
+    GtkAdjustment *vadj = view_vadjustment(GTK_WIDGET(lw->sidebar));
+    gdouble scroll_pos = gtk_adjustment_get_value(vadj);
 
     lw->populating++;
     gtk_tree_store_clear(lw->sidebar_store);
@@ -329,6 +379,9 @@ refresh_sidebar(OnLibrary *lw)
                 GTK_TREE_MODEL(lw->sidebar_store), &iter))
             gtk_tree_selection_select_iter(sel, &iter);
     }
+
+    if (scroll_pos > 0)
+        scroll_keep_queue(vadj, scroll_pos);
 }
 
 /* ===========================================================================
@@ -481,27 +534,6 @@ get_note_thumb(OnLibrary *lw, OnNoteMeta *m)
 }
 
 /* ---------------------------------------------------------------------------
- * ScrollKeep — one vadjustment position being restored after a notes
- * model rebuild (clearing the store zeroes the scrollbar).  The restore
- * runs at idle so the rebuilt view has re-validated its height first.
- * ------------------------------------------------------------------------- */
-typedef struct {
-    GtkAdjustment *adj;              /* the notes-pane scrollbar (owned ref)*/
-    gdouble        value;            /* position before the rebuild         */
-} ScrollKeep;
-
-/* scroll_keep_restore() — idle callback: put the scrollbar back.            */
-static gboolean
-scroll_keep_restore(gpointer user_data)
-{
-    ScrollKeep *k = user_data;
-    gtk_adjustment_set_value(k->adj, k->value);  /* clamps to the range     */
-    g_object_unref(k->adj);
-    g_free(k);
-    return G_SOURCE_REMOVE;
-}
-
-/* ---------------------------------------------------------------------------
  * refresh_notes() — repopulate the notes model from the current sidebar
  * selection (a folder's notes, or a tag's notes).  When the selection is
  * the same one already shown — a content refresh (autosave, editor
@@ -563,12 +595,8 @@ refresh_notes(OnLibrary *lw)
 
     lw->shown_kind = lw->sel_kind;
     lw->shown_id   = lw->sel_id;
-    if (keep_scroll && scroll_pos > 0) {
-        ScrollKeep *k = g_new(ScrollKeep, 1);
-        k->adj   = g_object_ref(vadj);
-        k->value = scroll_pos;
-        g_idle_add(scroll_keep_restore, k);
-    }
+    if (keep_scroll && scroll_pos > 0)
+        scroll_keep_queue(vadj, scroll_pos);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1624,6 +1652,22 @@ library_notify_notes_changed(OnApp *app)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * library_notify_note_saved() — installed as app->notify_note_saved; the
+ * light editor-save refresh: titles and modified times in the notes pane
+ * only.  Editing a note can't change folder counts, so the sidebar (and
+ * its scroll position) is deliberately left alone; a save that changed
+ * the note's tag set uses the full notify_notes_changed instead.
+ * ------------------------------------------------------------------------- */
+static void
+library_notify_note_saved(OnApp *app)
+{
+    OnLibrary *lw =                  /* library state stashed on the window */
+        g_object_get_data(G_OBJECT(app->library_window), "on-library");
+    if (lw != NULL)
+        refresh_notes(lw);
+}
+
 void
 on_library_apply_native_menubar(OnApp *app, gboolean native)
 {
@@ -2065,6 +2109,7 @@ on_library_window_create(OnApp *app)
 
     app->library_window       = lw->window;
     app->notify_notes_changed = library_notify_notes_changed;
+    app->notify_note_saved    = library_notify_note_saved;
 
     g_signal_connect(lw->window, "key-press-event",
                      G_CALLBACK(on_library_key_press), lw);

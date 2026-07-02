@@ -132,7 +132,14 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 10. Inline typing follows `ed->inline_flags` (word-processor model),
     enforced in the after-handler of `insert-text` for insertions ≤2
     chars (longer pastes keep their own tags).
-11. **Emoji padding is macOS-only** (`#ifdef __APPLE__` in
+11. **Clearing a tree/list store zeroes its view's scrollbar.** Every
+    model rebuild (refresh_sidebar, refresh_notes) must capture the
+    scrolled window's vadjustment value first and restore it via
+    `scroll_keep_queue()` (idle-deferred so the rebuilt view re-validates
+    its height before the value is clamped). The sidebar always
+    restores; the notes pane only when re-showing the same selection
+    (`shown_kind/shown_id`) so navigation still starts at the top.
+12. **Emoji padding is macOS-only** (`#ifdef __APPLE__` in
     `tag_emoji_in_range`): Apple Color Emoji draws wider than its Pango
     advance, so emoji get an editor-only letter-spacing tag (self + the
     following char, since Pango splits spacing half-per-side at run
@@ -147,8 +154,24 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   updated_at, so without the gate the edited note re-rendered on every
   autosave.
 - Sidebar counts come from two GROUP BY maps (`on_db_note_count_map` /
-  `on_db_tag_count_map`), not per-row COUNTs — refresh_sidebar runs per
-  autosave and per-query latency hurts on shared/network DBs.
+  `on_db_tag_count_map`), not per-row COUNTs — per-query latency hurts
+  on shared/network DBs.
+- Editor saves use the LIGHT notify (`app->notify_note_saved` →
+  refresh_notes only): editing a note can't change folder counts, so
+  the sidebar isn't rebuilt per autosave/close. The full
+  `notify_notes_changed` (sidebar + notes) fires only when the save
+  changed the note's tag set — tracked LIVE by `ed->tags_modified`
+  (set in tag_capture_end / on_tag_row_activated on creation, the
+  before-handler on delete-range when the doomed range touches an
+  on-tag span, and the insert after-handler when typing inside one) —
+  never by scanning the buffer at save time. note_tags is rewritten
+  only when that flag is set. Create/move/delete run in the library,
+  which refreshes itself directly; db switch/restore use the full
+  notify.
+- `ed->dirty` (set by editor_queue_autosave, cleared by editor_save)
+  gates the close-time flush: closing a window whose last autosave
+  already ran skips serialization entirely — for image-heavy notes the
+  final save otherwise re-encodes every PNG, which is the "slow close".
 - code_buttons_rebuild has a fast path: when block-start offsets match
   the existing buttons' marks, it only repositions (no widget churn per
   keystroke).

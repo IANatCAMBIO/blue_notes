@@ -92,6 +92,16 @@
  *   popup_x/popup_y — text-window coordinates of the last right click,
  *                     used by the populate-popup handler to find the
  *                     image (if any) under the pointer.
+ *   dirty           — TRUE while the note has edits the database hasn't
+ *                     seen (set whenever an autosave is queued, cleared
+ *                     by editor_save); closing a window with no unsaved
+ *                     edits skips the final save entirely.
+ *   tags_modified   — TRUE when an edit created, renamed or deleted a
+ *                     styled #tag since the last save.  Maintained LIVE
+ *                     by the tag-capture/insert/delete handlers, so
+ *                     editor_save knows — without any buffer scan —
+ *                     whether note_tags and the library's tag sidebar
+ *                     need updating.
  * ------------------------------------------------------------------------- */
 typedef struct {
     OnApp          *app;
@@ -117,6 +127,8 @@ typedef struct {
     gint            popup_y;
 
     GtkWidget      *search_entry;
+    gboolean        dirty;
+    gboolean        tags_modified;
 } OnEditor;
 
 /* ---------------------------------------------------------------------------
@@ -1929,6 +1941,7 @@ tag_capture_end(OnEditor *ed, gboolean apply)
             gtk_text_buffer_apply_tag_by_name(ed->buffer, ON_TAGNAME_TAG,
                                               &start, &end);
             ed->internal_change--;
+            ed->tags_modified = TRUE;    /* a tag was created               */
             editor_queue_autosave(ed);
         }
     }
@@ -1981,6 +1994,7 @@ on_tag_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
     gtk_text_buffer_delete_mark(ed->buffer, ed->tag_start);
     ed->tag_start = NULL;
     tag_popup_hide(ed);
+    ed->tags_modified = TRUE;        /* a tag was created                   */
     editor_queue_autosave(ed);
     gtk_widget_grab_focus(GTK_WIDGET(ed->view));
 }
@@ -2148,6 +2162,18 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
     tag_emoji_in_range(ed, end_off - (gint)n_chars, end_off);
     gtk_text_buffer_get_iter_at_offset(ed->buffer, location, end_off);
 
+    /* Typing INSIDE an existing styled #tag renames it — flag the tag set
+     * as changed so the next save updates note_tags and the sidebar.       */
+    if (!ed->tags_modified) {
+        GtkTextIter ins_s;           /* first inserted character            */
+        gtk_text_buffer_get_iter_at_offset(buffer, &ins_s,
+                                           end_off - (gint)n_chars);
+        GtkTextTag *ttag = gtk_text_tag_table_lookup(
+            gtk_text_buffer_get_tag_table(buffer), ON_TAGNAME_TAG);
+        if (ttag != NULL && gtk_text_iter_has_tag(&ins_s, ttag))
+            ed->tags_modified = TRUE;
+    }
+
     /* --- job 1: make typed text obey the current inline style ---------- */
     if (n_chars <= 2) {
         GtkTextIter span_s;          /* start of the inserted span          */
@@ -2200,6 +2226,37 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
         /* Multi-char insertion (paste) during capture: just end it.        */
         tag_capture_end(ed, TRUE);
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * on_buffer_delete_range_before() — runs BEFORE a deletion is carried out
+ * (afterwards the removed text is unknowable): if the doomed range
+ * touches a styled #tag, a tag is being deleted or renamed, so flag the
+ * tag set as changed for the next save.
+ * ------------------------------------------------------------------------- */
+static void
+on_buffer_delete_range_before(GtkTextBuffer *buffer, GtkTextIter *start,
+                              GtkTextIter *end, gpointer user_data)
+{
+    OnEditor *ed = user_data;        /* owning editor                       */
+    if (ed->internal_change > 0 || ed->tags_modified)
+        return;
+
+    GtkTextTag *tag = gtk_text_tag_table_lookup(
+        gtk_text_buffer_get_tag_table(buffer), ON_TAGNAME_TAG);
+    if (tag == NULL)
+        return;
+
+    if (gtk_text_iter_has_tag(start, tag) ||
+        gtk_text_iter_has_tag(end, tag)) {
+        ed->tags_modified = TRUE;    /* range starts or ends inside a tag   */
+        return;
+    }
+    /* Any tag toggle strictly inside the range?                            */
+    GtkTextIter it = *start;
+    if (gtk_text_iter_forward_to_tag_toggle(&it, tag) &&
+        gtk_text_iter_compare(&it, end) < 0)
+        ed->tags_modified = TRUE;
 }
 
 /* ---------------------------------------------------------------------------
@@ -2524,9 +2581,12 @@ on_search_stop(GtkSearchEntry *entry, gpointer user_data)
  * =========================================================================== */
 
 /* ---------------------------------------------------------------------------
- * editor_save() — serialize the buffer and persist everything: content
- * blob, derived title, and the note's tag set.  Also refreshes the window
- * title and pokes the library window to update its lists.
+ * editor_save() — serialize the buffer and persist it: content blob,
+ * derived title, and — only when the live tags_modified flag says a #tag
+ * was created, renamed or deleted — the note's tag set.  Then pokes the
+ * library: the light notes-pane refresh normally (editing a note can
+ * never change folder counts), the full one (sidebar included) only for
+ * tag changes.
  * ------------------------------------------------------------------------- */
 static void
 editor_save(OnEditor *ed)
@@ -2542,10 +2602,16 @@ editor_save(OnEditor *ed)
     on_db_note_save(ed->app->db, ed->note_id, title, blob, blob_len, body);
     g_free(body);
 
-    /* Recompute the tag set from the text.                                 */
-    GList *tags = on_buffer_collect_tags(ed->buffer);
-    on_db_note_set_tags(ed->app->db, ed->note_id, tags);
-    g_list_free_full(tags, g_free);
+    /* Rewrite note_tags only when the tag set actually changed — flagged
+     * live while editing, so the common save does no tag work at all.      */
+    gboolean tags_changed = ed->tags_modified;
+    if (tags_changed) {
+        GList *tags = on_buffer_collect_tags(ed->buffer);
+        on_db_note_set_tags(ed->app->db, ed->note_id, tags);
+        g_list_free_full(tags, g_free);
+        ed->tags_modified = FALSE;
+    }
+    ed->dirty = FALSE;
 
     /* Window title mirrors the note title.                                 */
     if (ed->window != NULL) {
@@ -2557,8 +2623,13 @@ editor_save(OnEditor *ed)
     g_free(title);
     g_free(blob);
 
-    if (ed->app->notify_notes_changed != NULL)
-        ed->app->notify_notes_changed(ed->app);
+    if (tags_changed) {
+        if (ed->app->notify_notes_changed != NULL)
+            ed->app->notify_notes_changed(ed->app);
+    } else {
+        if (ed->app->notify_note_saved != NULL)
+            ed->app->notify_note_saved(ed->app);
+    }
 }
 
 /* on_autosave_timeout() — the debounce timer fired: save now.               */
@@ -2579,6 +2650,7 @@ editor_queue_autosave(OnEditor *ed)
 {
     if (ed->app->read_only)
         return;
+    ed->dirty = TRUE;                /* there is now something to save      */
     if (ed->autosave_source != 0)
         g_source_remove(ed->autosave_source);
     ed->autosave_source = g_timeout_add(AUTOSAVE_DELAY_MS,
@@ -2611,7 +2683,11 @@ on_editor_destroy(GtkWidget *widget, gpointer user_data)
     ed->code_buttons = NULL;
 
     ed->window = NULL;               /* don't touch the dying window        */
-    editor_save(ed);                 /* buffer is kept alive by our ref     */
+    if (ed->dirty)
+        editor_save(ed);             /* flush edits the autosave missed
+                                        (buffer kept alive by our ref);
+                                        a clean note closes instantly —
+                                        no serialize, no PNG encoding      */
 
     if (ed->tag_popup != NULL)
         gtk_widget_destroy(ed->tag_popup);
@@ -2876,6 +2952,8 @@ on_editor_window_open(OnApp *app, gint64 note_id)
     /* --- signals (connected after load so loading doesn't autosave) ----- */
     g_signal_connect_after(ed->buffer, "insert-text",
                            G_CALLBACK(on_buffer_insert_text_after), ed);
+    g_signal_connect(ed->buffer, "delete-range",
+                     G_CALLBACK(on_buffer_delete_range_before), ed);
     g_signal_connect_after(ed->buffer, "delete-range",
                            G_CALLBACK(on_buffer_delete_range_after), ed);
     g_signal_connect(ed->buffer, "changed",

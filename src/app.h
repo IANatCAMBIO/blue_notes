@@ -23,9 +23,17 @@
  *                    (gint64* keys, GtkWindow* values).  An entry exists
  *                    exactly while that note's editor window is open.
  *   library_window — the (single) library window, or NULL before startup.
- *   notify_notes_changed — hook installed by the library window; editor
- *                    windows call it after every save so lists, titles
- *                    and the tag sidebar stay current.  May be NULL.
+ *   notify_notes_changed — hook installed by the library window: the
+ *                    FULL refresh (sidebar counts/tags + notes pane).
+ *                    For structural changes — notes created/moved/
+ *                    deleted, database switched/restored, tag set
+ *                    edited.  May be NULL.
+ *   notify_note_saved — lighter hook, also installed by the library
+ *                    window: refreshes only the notes pane (titles,
+ *                    modified times).  Editor saves use this unless the
+ *                    note's tag set changed — editing a note can never
+ *                    change folder counts, so the sidebar is left
+ *                    untouched (and its scrollbar unmoved).  May be NULL.
  *   toolbar_style  — how toolbar buttons render (text only, icons only,
  *                    or icons above text), kept separately for library
  *                    toolbars and editor toolbars.  Indexed by
@@ -59,6 +67,7 @@ typedef struct OnApp {
     GHashTable      *editors;
     GtkWidget       *library_window;
     void           (*notify_notes_changed)(struct OnApp *app);
+    void           (*notify_note_saved)(struct OnApp *app);
     GtkToolbarStyle  toolbar_style[ON_TOOLBAR_N_KINDS];
     GPtrArray       *toolbars[ON_TOOLBAR_N_KINDS];
     gchar           *icons_dir;
