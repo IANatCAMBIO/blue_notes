@@ -63,6 +63,7 @@ typedef struct OnApp {
     GPtrArray       *toolbars[ON_TOOLBAR_N_KINDS];
     gchar           *icons_dir;
     gboolean         code_copy_buttons;
+    gboolean         code_line_numbers;
     gchar           *db_dir;
 } OnApp;
 

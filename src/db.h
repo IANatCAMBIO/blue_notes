@@ -62,13 +62,15 @@ typedef struct {
  *   title      — display title, derived from the first line (owned string).
  *   sort_order — position among notes in the same folder.
  *   updated_at — UNIX timestamp of the last save.
+ *   pinned     — whether the note appears in the Pinned Notes section.
  * ------------------------------------------------------------------------- */
 typedef struct {
-    gint64  id;
-    gint64  folder_id;
-    gchar  *title;
-    gint    sort_order;
-    gint64  updated_at;
+    gint64   id;
+    gint64   folder_id;
+    gchar   *title;
+    gint     sort_order;
+    gint64   updated_at;
+    gboolean pinned;
 } OnNoteMeta;
 
 /* ---------------------------------------------------------------------------
@@ -173,6 +175,16 @@ GList *on_db_note_list(OnDatabase *db, gint64 folder_id);
  * on_db_note_list_free().                                                   */
 GList *on_db_note_list_all(OnDatabase *db);
 
+/* Set or clear a note's pinned flag. Returns TRUE on success.               */
+gboolean on_db_note_set_pinned(OnDatabase *db, gint64 id, gboolean pinned);
+
+/* List every pinned note, newest first.
+ * Returns a GList of OnNoteMeta*; free with on_db_note_list_free().         */
+GList *on_db_note_list_pinned(OnDatabase *db);
+
+/* Number of pinned notes.                                                   */
+gint on_db_note_count_pinned(OnDatabase *db);
+
 /* Persist an explicit ordering of notes within one folder.
  *   note_ids — array of note ids in the desired display order.
  *   n        — number of ids in the array.
@@ -190,6 +202,14 @@ void on_db_note_list_free(GList *notes);
 /* Look up tag `name`, creating it if missing. Returns the tag id, or 0
  * on failure.                                                               */
 gint64 on_db_tag_get_or_create(OnDatabase *db, const gchar *name);
+
+/* Look up tag `name` WITHOUT creating it. Returns its id, or 0.             */
+gint64 on_db_tag_find(OnDatabase *db, const gchar *name);
+
+/* Delete tag `id` (its note links go with it; the literal #text inside
+ * notes is untouched and will recreate the tag when such a note is saved
+ * again). Returns TRUE on success.                                          */
+gboolean on_db_tag_delete(OnDatabase *db, gint64 id);
 
 /* List every known tag, ordered by name.
  * Returns a GList of OnTag*; free with on_db_tag_list_free().               */

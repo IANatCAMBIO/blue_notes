@@ -33,6 +33,7 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 | `src/search_window.[ch]` | Search over titles + full text; scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles (library vs editor), code-copy-button toggle, native macOS menubar toggle |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
+| `src/cli.[ch]` | Headless subcommand interface (runs before GTK in main; tags/folders/notes CRUD, backup, export); folders by path, notes by id |
 | `icons/` | elementary SVG icons, loaded by basename; see icons/README.md |
 | `tools/gen_icon.c` | Regenerates `orange.png` (cairo drawing; keep it artifact-free — no lines/text over the fruit) |
 | `orange.png` | App logo: default window icon and the 64×64 About-dialog logo |
@@ -45,6 +46,13 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   TEXT records = styled runs (flag bits ↔ named GtkTextTags via one shared
   table). IMAGE records = full-resolution PNG + chosen display width.
   v1 (no display width) still parses.
+- **Task checkboxes are GtkTextChildAnchors** carrying their state as
+  object data (`on_anchor_set/is_checkbox`), rendered as native
+  GtkCheckButtons (ONBF v5 CHECK records).  A task line = anchor + space
+  + text under the on-list-check paragraph tag.  Legacy glyph-based
+  notes (⬜/✅/☐/☑ prefixes) are migrated to anchors on load
+  (`migrate_legacy_checkboxes`).  Like all anchors, copy/paste within a
+  note drops the widget/state.
 - **Images are GtkTextChildAnchors**, not pixbufs: the anchor carries the
   original pixbuf + display width as object data
   (`on_anchor_set_image/get_image`). The editor attaches a HiDPI-aware
@@ -116,6 +124,13 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 10. Inline typing follows `ed->inline_flags` (word-processor model),
     enforced in the after-handler of `insert-text` for insertions ≤2
     chars (longer pastes keep their own tags).
+11. **Emoji padding is macOS-only** (`#ifdef __APPLE__` in
+    `tag_emoji_in_range`): Apple Color Emoji draws wider than its Pango
+    advance, so emoji get an editor-only letter-spacing tag (self + the
+    following char, since Pango splits spacing half-per-side at run
+    edges). Linux emoji fonts fit their advance — the pass compiles to a
+    no-op there. The only other platform-specific code is the
+    HAVE_GTKOSX menubar integration; everything else is portable GTK3.
 
 ## Environment gotchas
 

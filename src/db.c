@@ -138,6 +138,13 @@ on_db_open(const gchar *path_override)
         on_db_close(db);
         return NULL;
     }
+
+    /* Migration: the pinned column arrived after the original schema.
+     * ALTER fails harmlessly when the column already exists.               */
+    sqlite3_exec(db->handle,
+                 "ALTER TABLE notes ADD COLUMN pinned INTEGER "
+                 "NOT NULL DEFAULT 0",
+                 NULL, NULL, NULL);
     return db;
 }
 
@@ -420,10 +427,14 @@ on_db_note_load(OnDatabase *db, gint64 id, gsize *out_len)
     return copy;
 }
 
+/* Column list shared by every note-metadata query, matching
+ * meta_from_row()'s expectations.                                           */
+#define NOTE_META_COLS \
+    "id, COALESCE(folder_id,0), title, sort_order, updated_at, pinned"
+
 /* ---------------------------------------------------------------------------
  * meta_from_row() — build one OnNoteMeta from the current result row of a
- * statement whose columns are (id, folder_id, title, sort_order,
- * updated_at) in that order.
+ * statement selecting NOTE_META_COLS in that order.
  * ------------------------------------------------------------------------- */
 static OnNoteMeta *
 meta_from_row(sqlite3_stmt *stmt)
@@ -434,6 +445,7 @@ meta_from_row(sqlite3_stmt *stmt)
     m->title      = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
     m->sort_order = sqlite3_column_int(stmt, 3);
     m->updated_at = sqlite3_column_int64(stmt, 4);
+    m->pinned     = sqlite3_column_int(stmt, 5) != 0;
     return m;
 }
 
@@ -441,7 +453,7 @@ OnNoteMeta *
 on_db_note_get(OnDatabase *db, gint64 id)
 {
     sqlite3_stmt *stmt = prepare(db,
-        "SELECT id, COALESCE(folder_id,0), title, sort_order, updated_at "
+        "SELECT " NOTE_META_COLS " "
         "FROM notes WHERE id=?");
     if (stmt == NULL)
         return NULL;
@@ -470,7 +482,7 @@ GList *
 on_db_note_list(OnDatabase *db, gint64 folder_id)
 {
     sqlite3_stmt *stmt = prepare(db,
-        "SELECT id, COALESCE(folder_id,0), title, sort_order, updated_at "
+        "SELECT " NOTE_META_COLS " "
         "FROM notes WHERE folder_id IS ? "
         "ORDER BY sort_order, updated_at DESC");
     if (stmt == NULL)
@@ -483,11 +495,50 @@ GList *
 on_db_note_list_all(OnDatabase *db)
 {
     sqlite3_stmt *stmt = prepare(db,
-        "SELECT id, COALESCE(folder_id,0), title, sort_order, updated_at "
+        "SELECT " NOTE_META_COLS " "
         "FROM notes ORDER BY folder_id, sort_order");
     if (stmt == NULL)
         return NULL;
     return run_meta_query(stmt);
+}
+
+gboolean
+on_db_note_set_pinned(OnDatabase *db, gint64 id, gboolean pinned)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE notes SET pinned=? WHERE id=?");
+    if (stmt == NULL)
+        return FALSE;
+    sqlite3_bind_int(stmt, 1, pinned ? 1 : 0);
+    sqlite3_bind_int64(stmt, 2, id);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+GList *
+on_db_note_list_pinned(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT " NOTE_META_COLS " "
+        "FROM notes WHERE pinned=1 ORDER BY updated_at DESC");
+    if (stmt == NULL)
+        return NULL;
+    return run_meta_query(stmt);
+}
+
+gint
+on_db_note_count_pinned(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT COUNT(*) FROM notes WHERE pinned=1");
+    if (stmt == NULL)
+        return 0;
+    gint count = 0;                  /* number of pinned notes              */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
 }
 
 gboolean
@@ -557,6 +608,32 @@ on_db_tag_get_or_create(OnDatabase *db, const gchar *name)
         tag_id = sqlite3_last_insert_rowid(db->handle);
     sqlite3_finalize(stmt);
     return tag_id;
+}
+
+gint64
+on_db_tag_find(OnDatabase *db, const gchar *name)
+{
+    sqlite3_stmt *stmt = prepare(db, "SELECT id FROM tags WHERE name=?");
+    if (stmt == NULL)
+        return 0;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+    gint64 tag_id = 0;               /* found id, or 0                      */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        tag_id = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return tag_id;
+}
+
+gboolean
+on_db_tag_delete(OnDatabase *db, gint64 id)
+{
+    sqlite3_stmt *stmt = prepare(db, "DELETE FROM tags WHERE id=?");
+    if (stmt == NULL)
+        return FALSE;
+    sqlite3_bind_int64(stmt, 1, id);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 GList *
@@ -643,7 +720,7 @@ on_db_notes_by_tag(OnDatabase *db, gint64 tag_id)
 {
     sqlite3_stmt *stmt = prepare(db,
         "SELECT n.id, COALESCE(n.folder_id,0), n.title, n.sort_order, "
-        "       n.updated_at "
+        "       n.updated_at, n.pinned "
         "FROM notes n JOIN note_tags nt ON nt.note_id = n.id "
         "WHERE nt.tag_id=? ORDER BY n.updated_at DESC");
     if (stmt == NULL)

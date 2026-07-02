@@ -43,6 +43,7 @@ endif
 # All C source files that make up the application.
 SRCS     := src/main.c \
             src/app.c \
+            src/cli.c \
             src/db.c \
             src/serialize.c \
             src/editor_window.c \

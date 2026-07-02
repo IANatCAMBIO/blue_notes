@@ -1,53 +1,94 @@
 # Orange Notes
 
 An Apple Notes–style notes application written in plain C with GTK3 and
-SQLite. Notes are rich text (WYSIWYG) with inline images, code blocks and
-`#tags`, organized into nested folders, and exportable to HTML or Markdown.
+SQLite. Notes are rich text (WYSIWYG) with inline images, code blocks,
+tables, task lists and `#tags`, organized into nested folders, and
+exportable to HTML or Markdown — from the GUI or the command line.
 
 ## Features
 
-- **Library window** — nested folder tree with per-folder note counts in
-  the sidebar, notes shown as a list or a grid of square thumbnail cards
-  (first image + text preview). Drag notes to reorder them within a
-  folder, or drag them onto a sidebar folder to move them. The sidebar
-  toolbar holds New/Rename/Delete Folder and Search; right-clicking a note
-  offers Open, Export as HTML/Markdown, and Delete.
-- **Search** — the sidebar Search button opens a search window that scans
-  titles and full note text, scoped to all notes or just the selected
-  folder/tag, with case-sensitive and regular-expression modes.
-- **Editor windows** — every note opens in its own window with a standard
-  titlebar (no GNOME header bars anywhere). Toolbar and shortcuts for
-  **bold** (Ctrl/Cmd+B), *italic* (Ctrl/Cmd+I), underline (Ctrl/Cmd+U),
-  strikethrough, two heading levels, bulleted and numbered lists.
-- **Settings** — *File → Settings…* holds the toolbar button styles
-  (text / icons / icons above text, separately for library and editor
-  windows). Changes apply live and persist. Toolbar icons are the
-  bundled elementary SVGs in `icons/` (they need
-  `sudo port install librsvg` to render) and any of them can be replaced
-  by dropping in a file — see `icons/README.md`.
-- **Sorting** — click the Title header for alphabetical order or the
-  Modified header for most-recent-first; drag-reordering works while the
-  list is unsorted.
-- **Folder context menu** — right-click a folder for New Subfolder,
-  Rename, Delete, and "Search Here…" (a search pre-scoped to it).
-- **Inline images** — paste an image from the clipboard straight into a
-  note (screenshots included), or use the *Image…* button. Images are
-  stored at full resolution; right-click one to copy it back out to the
-  clipboard, open it full size, or toggle its inline display between full
-  size and a thumbnail.
-- **Code blocks** — the *Code* button turns the current line/selection into
-  a monospaced, shaded code block; a floating clipboard button in each
-  block's upper-right corner copies the whole block.
-- **Tags** — type `#` in the editor and keep typing. A popup suggests
-  existing tags (arrow keys + Enter to pick); a space ends the tag, Escape
-  cancels it. All tags appear in the library sidebar with note counts;
-  selecting one shows its notes exactly like a folder does.
-- **Export** — *File → Export All as HTML…/Markdown…* writes every note to
-  a directory of your choice, mirroring the folder hierarchy. HTML embeds
-  images as data URIs; Markdown writes PNG files next to each note.
-  Individual notes export from their right-click menu.
-- **Autosave** — edits are saved to SQLite about a second after you stop
-  typing, and again when the window closes.
+### Library window
+
+- Nested folder tree with per-folder note counts, plus a tag list with
+  per-tag counts, in the sidebar. The sidebar toolbar holds New Folder,
+  Delete Folder and Search; renaming lives in the folder's right-click
+  menu (New Subfolder, Rename, Delete, and "Search Here…" — a search
+  pre-scoped to that folder or tag).
+- Notes display as a list or as a grid of square thumbnail cards (first
+  image + text preview, title underneath) — switch via *View → Notes as
+  List / Notes as Grid*. List rows alternate white/light-blue; clicking
+  the Title header sorts alphabetically, the Modified header sorts
+  most-recent-first (drag-reordering works while unsorted).
+- Multi-select (Cmd/Shift-click, rubber-band in grid) for bulk actions:
+  drag any selected note onto a sidebar folder to move the whole
+  selection, or use the right-click menu — Open, Export as
+  HTML/Markdown, Delete.
+- **Ctrl/Cmd+N** creates a note in the selected folder. The orange logo
+  at the toolbar's right edge opens the About dialog (program info plus
+  live database statistics).
+
+### Search
+
+The Search button (or a folder's "Search Here…") opens a search window
+scanning titles and full note text. Scope radios choose **All Notes** or
+**Selected Folder/Tag** — the latter resolves against whatever is
+selected in the library at the moment you press Search. Case-sensitive
+and regular-expression modes are available; double-click a result to
+open it.
+
+### Editor windows
+
+Every note opens in its own window with a standard titlebar (no GNOME
+header bars anywhere). The first line of the note becomes its title.
+
+- Inline styles — **bold** (Ctrl/Cmd+B), *italic* (Ctrl/Cmd+I),
+  underline (Ctrl/Cmd+U), strikethrough — plus two heading levels,
+  bulleted and numbered lists. Paragraph-style buttons toggle: clicking
+  one on lines that already have that style reverts them to body text.
+- **Task lists** — native checkboxes at the start of each item (click to
+  toggle; the pointer becomes a hand over them). Enter continues the
+  list unchecked; Enter on an empty item ends it.
+- **Tables** — the Table button inserts a 3×3 grid of cells that grow
+  with their content (multiline supported). Right-click any cell to add
+  or remove rows/columns, toggle a bold **header row**, or delete the
+  table.
+- **Code blocks** — monospaced, shaded blocks with a floating copy
+  button in the upper-right corner; optional per-block line numbers in a
+  slim painted gutter (numbers are never part of selection/copy).
+- **Inline images** — paste from the clipboard (screenshots included) or
+  insert from a file. Stored at full resolution, displayed as sharp
+  HiDPI thumbnails; right-click for Copy Image, Open Full Size, or
+  Display Full Size / as Thumbnail.
+- **Tags** — type `#` and keep typing; a popup suggests existing tags
+  (arrows + Enter to pick), space ends the tag, Escape cancels. Tags
+  appear in the sidebar and act like folders.
+- **Find in note** — the search box at the toolbar's right (Ctrl/Cmd+F)
+  highlights every match as you type; Enter or the ↑/↓ buttons jump
+  between matches with wrap-around.
+- **Autosave** — edits persist about a second after you stop typing, and
+  again when the window closes.
+
+### Settings (*File → Settings…*)
+
+- **Appearance** — toolbar button style (text / icons / icons above
+  text), set separately for library and editor windows (also available
+  by right-clicking any toolbar), and — when built with
+  gtk-mac-integration — a native macOS menu bar option.
+- **Editor** — show/hide the code-block copy button and code-block line
+  numbers.
+- **Database** — store the database in a custom folder (see Storage).
+
+All changes apply live and persist. Toolbar icons are elementary SVGs
+bundled in `icons/` — replaceable by dropping in files, see
+`icons/README.md`.
+
+### Export
+
+*File → Export All as HTML…/Markdown…* writes every note to a chosen
+directory, mirroring the folder hierarchy; single notes export from
+their right-click menu. HTML embeds images as data URIs and renders
+tables, task checkboxes and code blocks; Markdown writes sidecar PNGs,
+pipe tables and `- [ ]` task items.
 
 ## Storage
 
@@ -62,17 +103,21 @@ Everything lives in a single SQLite database:
   *File → Restore Database…* replaces the current data with a backup
   (keeping the old file as `notes.db.pre-restore`).
 
-Note content is stored as a compact binary blob ("ONBF") holding styled
-text runs and PNG image records — see `src/serialize.h` for the format.
+Note content is stored as a compact binary blob ("ONBF", currently
+version 5) holding styled text runs, PNG image records, tables and task
+checkboxes — see `src/serialize.h` for the format. Older versions load
+transparently.
 
 ## Building
 
-Requirements: a C compiler, GTK3 and SQLite3 development files, pkg-config.
+Requirements: a C compiler, GTK3 and SQLite3 development files,
+pkg-config, and librsvg (SVG icon rendering).
 
 macOS (MacPorts):
 
 ```sh
-sudo port install pkgconf gtk3 +quartz
+sudo port install pkgconf gtk3 +quartz librsvg
+sudo port install gtk-osx-application-gtk3   # optional: native menu bar
 make
 make run
 ```
@@ -80,19 +125,48 @@ make run
 Debian/Ubuntu:
 
 ```sh
-sudo apt install build-essential pkg-config libgtk-3-dev libsqlite3-dev
+sudo apt install build-essential pkg-config libgtk-3-dev libsqlite3-dev \
+                 librsvg2-common
 make
 make run
 ```
 
+The Makefile auto-detects `gtk-mac-integration-gtk3`; rebuild from clean
+(`make clean && make`) after installing it.
+
+## Command-line automation
+
+A recognized subcommand runs headless against the same database (including
+a configured shared location) and exits — no windows:
+
+```
+orange_notes tag list                         orange_notes tag delete NAME
+orange_notes folder list                      orange_notes folder add PATH
+orange_notes folder delete PATH               orange_notes note list [PATH|--all]
+orange_notes note new [--folder PATH] TEXT|-  orange_notes note delete ID [ID...]
+orange_notes note move ID [ID...] PATH        orange_notes backup FILE.db
+orange_notes export-md DIR                    orange_notes export-html DIR
+```
+
+Folders are addressed by path (`"Work/Projects"`, created like `mkdir -p`
+by `folder add`); notes by the ids `note list` prints. `note new` takes
+its content from the argument or stdin (`-`); the first line becomes the
+title. Output is tab-separated for easy scripting; exit codes: 0 success,
+1 usage, 2 failure. `orange_notes help` shows the full reference.
+
 ## Code layout
 
-| File                    | Purpose                                              |
-|-------------------------|------------------------------------------------------|
-| `src/main.c`            | GtkApplication entry point and app-context wiring    |
-| `src/app.h`             | Shared `OnApp` context passed to every window        |
-| `src/db.[ch]`           | SQLite layer: folders, notes, tags, ordering         |
-| `src/serialize.[ch]`    | ONBF binary format ⇄ GtkTextBuffer conversion        |
-| `src/editor_window.[ch]`| WYSIWYG editor: formatting, images, tags, autosave   |
-| `src/library_window.[ch]`| Folder/tag sidebar, list & grid views, drag & drop  |
-| `src/export.[ch]`       | HTML and Markdown exporters                          |
+| File                      | Purpose                                             |
+|---------------------------|-----------------------------------------------------|
+| `src/main.c`              | GtkApplication entry point; settings/config loading |
+| `src/app.[ch]`            | Shared `OnApp` context, icon loading, toolbar styles, DB switching/restore |
+| `src/cli.[ch]`            | Headless noun-verb command-line interface           |
+| `src/db.[ch]`             | SQLite layer: folders, notes, tags, settings, backup |
+| `src/serialize.[ch]`      | ONBF binary format ⇄ GtkTextBuffer conversion       |
+| `src/editor_window.[ch]`  | WYSIWYG editor: formatting, images, tables, tasks, code blocks, find-in-note |
+| `src/library_window.[ch]` | Sidebar, list & grid views, drag & drop, menus, About |
+| `src/search_window.[ch]`  | Cross-note search window                            |
+| `src/settings_window.[ch]`| The Settings window                                 |
+| `src/export.[ch]`         | HTML and Markdown exporters                         |
+| `icons/`                  | Bundled elementary icons (see its README)           |
+| `tools/gen_icon.c`        | Regenerates the `orange.png` app logo               |

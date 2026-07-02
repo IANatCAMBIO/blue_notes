@@ -47,6 +47,7 @@ enum {
     SB_KIND_FOLDER,                  /* a real folder                       */
     SB_KIND_TAGS_HEADER,             /* the "Tags" section header           */
     SB_KIND_TAG,                     /* one tag                             */
+    SB_KIND_PINNED,                  /* the "Pinned Notes" section          */
 };
 
 /* Sidebar GtkTreeStore columns.                                             */
@@ -243,6 +244,22 @@ refresh_sidebar(OnLibrary *lw)
     }
     on_db_tag_list_free(tags);
 
+    /* "Pinned Notes" below folders and tags — a live view, not a real
+     * location; notes stay in their folders.                               */
+    gint n_pinned = on_db_note_count_pinned(lw->app->db);
+    if (n_pinned > 0) {
+        gchar *label = g_strdup_printf("Pinned Notes (%d)", n_pinned);
+        GtkTreeIter iter;
+        gtk_tree_store_append(lw->sidebar_store, &iter, NULL);
+        gtk_tree_store_set(lw->sidebar_store, &iter,
+                           SB_KIND, SB_KIND_PINNED,
+                           SB_ID,   (gint64)0,
+                           SB_NAME, label,
+                           SB_RAW,  "Pinned Notes",
+                           -1);
+        g_free(label);
+    }
+
     gtk_tree_view_expand_all(lw->sidebar);
     lw->populating--;
 
@@ -332,12 +349,21 @@ render_note_thumb(OnLibrary *lw, OnNoteMeta *m)
             break;
     } while (gtk_text_iter_forward_char(&it));
 
-    /* Body text: everything after the title line, truncated for speed.     */
+    /* Body text: everything after the TITLE line.  The title is the first
+     * non-empty line (matching on_buffer_first_line, which derives the
+     * name shown under the card) — skipping only the literal first line
+     * used to leave the title duplicated inside the thumbnail whenever a
+     * note began with blank lines.                                         */
     GtkTextIter s, e;                /* full buffer bounds                  */
     gtk_text_buffer_get_bounds(buf, &s, &e);
     gchar *text = gtk_text_buffer_get_text(buf, &s, &e, FALSE);
-    const gchar *body = strchr(text, '\n');
-    body = (body != NULL) ? body + 1 : "";
+    const gchar *body = text;        /* start of the post-title content     */
+    while (*body == '\n')
+        body++;                      /* skip leading blank lines            */
+    const gchar *nl = strchr(body, '\n');
+    body = (nl != NULL) ? nl + 1 : "";
+    while (*body == '\n')
+        body++;                      /* don't lead the card with blanks     */
     gchar *body_cut = g_utf8_substring(
         body, 0, MIN(g_utf8_strlen(body, -1), 300));
 
@@ -443,6 +469,8 @@ refresh_notes(OnLibrary *lw)
     GList *notes;                    /* OnNoteMeta* list to display         */
     if (lw->sel_kind == SB_KIND_TAG)
         notes = on_db_notes_by_tag(lw->app->db, lw->sel_id);
+    else if (lw->sel_kind == SB_KIND_PINNED)
+        notes = on_db_note_list_pinned(lw->app->db);
     else
         notes = on_db_note_list(lw->app->db, lw->sel_id);
 
@@ -476,7 +504,9 @@ refresh_notes(OnLibrary *lw)
 static void
 persist_note_order(OnLibrary *lw)
 {
-    if (lw->sel_kind == SB_KIND_TAG)
+    /* Only real folder views own an ordering; tag and pinned views are
+     * assembled from elsewhere.                                            */
+    if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED)
         return;
 
     GArray *ids = g_array_new(FALSE, FALSE, sizeof(gint64));
@@ -1063,7 +1093,7 @@ on_about(GtkWidget *widget, gpointer user_data)
     g_free(icon_path);
     g_free(base);
 
-    const gchar *authors[] = { "Ian Campbell", NULL };
+    const gchar *authors[] = { "Ian Campbell", "Claude Sonnet 4.5", NULL };
 
     GtkWidget *dialog = gtk_about_dialog_new();
     gtk_window_set_transient_for(GTK_WINDOW(dialog),
@@ -1354,6 +1384,25 @@ on_note_ctx_delete(GtkMenuItem *item, gpointer user_data)
     g_array_free(ids, TRUE);
 }
 
+/* on_note_ctx_toggle_pin() — pin or unpin every selected note (the new
+ * state is the opposite of the clicked note's current state).               */
+static void
+on_note_ctx_toggle_pin(GtkMenuItem *item, gpointer user_data)
+{
+    OnLibrary *lw = user_data;       /* owning library window               */
+    gboolean pin =                   /* target state for the selection      */
+        GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item), "on-pin"));
+
+    GArray *ids = selected_note_ids(lw);
+    for (guint i = 0; i < ids->len; i++)
+        on_db_note_set_pinned(lw->app->db,
+                              g_array_index(ids, gint64, i), pin);
+    g_array_free(ids, TRUE);
+
+    refresh_sidebar(lw);             /* Pinned Notes count/section          */
+    refresh_notes(lw);               /* the pinned view may be showing      */
+}
+
 /* ---------------------------------------------------------------------------
  * show_note_context_menu() — build and pop up the per-note menu.
  *   lw      — the library window.
@@ -1369,8 +1418,14 @@ show_note_context_menu(OnLibrary *lw, gint64 note_id, GdkEventButton *event)
     g_signal_connect(menu, "selection-done",
                      G_CALLBACK(gtk_widget_destroy), NULL);
 
+    /* Pin/Unpin reflects the clicked note's current state.                 */
+    OnNoteMeta *meta = on_db_note_get(lw->app->db, note_id);
+    gboolean pinned = meta != NULL && meta->pinned;
+    on_db_note_meta_free(meta);
+
     struct { const gchar *label; GCallback cb; } items[] = {
         { "_Open",                          G_CALLBACK(on_note_ctx_open) },
+        { pinned ? "Un_pin" : "_Pin",       G_CALLBACK(on_note_ctx_toggle_pin) },
         { NULL,                             NULL /* separator */          },
         { "Export as _HTML\xe2\x80\xa6",    G_CALLBACK(on_note_ctx_export_html) },
         { "Export as _Markdown\xe2\x80\xa6",G_CALLBACK(on_note_ctx_export_md)   },
@@ -1387,6 +1442,9 @@ show_note_context_menu(OnLibrary *lw, gint64 note_id, GdkEventButton *event)
             *boxed = note_id;
             g_object_set_data_full(G_OBJECT(mi), "on-note-id",
                                    boxed, g_free);
+            if (items[i].cb == G_CALLBACK(on_note_ctx_toggle_pin))
+                g_object_set_data(G_OBJECT(mi), "on-pin",
+                                  GINT_TO_POINTER(!pinned));
             g_signal_connect(mi, "activate", items[i].cb, lw);
         }
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
@@ -1880,6 +1938,24 @@ on_action_toolbar_style_changed(GtkToolbar *toolbar,
     about_button_fit_style(GTK_TOOL_ITEM(user_data), style);
 }
 
+/* ---------------------------------------------------------------------------
+ * on_library_key_press() — window-level shortcuts: Ctrl/Cmd+N creates a
+ * note in the currently selected folder.
+ * ------------------------------------------------------------------------- */
+static gboolean
+on_library_key_press(GtkWidget *widget, GdkEventKey *event,
+                     gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    if ((event->state & (GDK_CONTROL_MASK | GDK_META_MASK)) &&
+        gdk_keyval_to_lower(event->keyval) == GDK_KEY_n) {
+        on_new_note(NULL, lw);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* library_free() — destructor for the OnLibrary attached to the window.     */
 static void
 library_free(gpointer data)
@@ -1911,6 +1987,9 @@ on_library_window_create(OnApp *app)
 
     app->library_window       = lw->window;
     app->notify_notes_changed = library_notify_notes_changed;
+
+    g_signal_connect(lw->window, "key-press-event",
+                     G_CALLBACK(on_library_key_press), lw);
 
     /* --- models -----------------------------------------------------------*/
     lw->sidebar_store = gtk_tree_store_new(SB_N_COLS,

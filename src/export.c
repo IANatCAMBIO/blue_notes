@@ -74,6 +74,7 @@ line_para_flag(GtkTextBuffer *buffer, const GtkTextIter *ls)
         { ON_FMT_CODEBLOCK,   ON_TAGNAME_CODEBLOCK   },
         { ON_FMT_LIST_BULLET, ON_TAGNAME_LIST_BULLET },
         { ON_FMT_LIST_NUMBER, ON_TAGNAME_LIST_NUMBER },
+        { ON_FMT_LIST_CHECK,  ON_TAGNAME_LIST_CHECK  },
     };
     GtkTextTagTable *table = gtk_text_buffer_get_tag_table(buffer);
     for (gsize i = 0; i < G_N_ELEMENTS(TAGS); i++) {
@@ -82,6 +83,75 @@ line_para_flag(GtkTextBuffer *buffer, const GtkTextIter *ls)
             return TAGS[i].f;
     }
     return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * line_is_checked() — for a task-list line, whether its leading glyph is
+ * the checked one (☑).
+ * ------------------------------------------------------------------------- */
+static gboolean
+line_is_checked(const GtkTextIter *ls)
+{
+    gboolean checked = FALSE;        /* the checkbox's state                */
+    GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(ls);
+    if (anchor != NULL && on_anchor_is_checkbox(anchor, &checked))
+        return checked;
+    /* Legacy glyph-based notes (not yet re-saved after migration).         */
+    on_char_is_checkbox(gtk_text_iter_get_char(ls), &checked);
+    return checked;
+}
+
+/* ---------------------------------------------------------------------------
+ * emit_table() — render an embedded table.
+ * HTML: a plain <table>.  Markdown: a pipe table whose first row is the
+ * header (as pipe tables require one).
+ * ------------------------------------------------------------------------- */
+static void
+emit_table(OnExportCtx *ctx, OnTable *table)
+{
+    if (ctx->format == ON_EXPORT_HTML) {
+        g_string_append(ctx->out, "<table>\n");
+        for (gint r = 0; r < table->rows; r++) {
+            /* Header rows use <th>.                                        */
+            const gchar *cell_tag =
+                (table->header && r == 0) ? "th" : "td";
+            g_string_append(ctx->out, "<tr>");
+            for (gint c = 0; c < table->cols; c++) {
+                gchar *esc = g_markup_escape_text(
+                    on_table_get(table, r, c), -1);
+                /* Multiline cells: newlines become <br>.                   */
+                gchar **lines = g_strsplit(esc, "\n", -1);
+                gchar *joined = g_strjoinv("<br>", lines);
+                g_strfreev(lines);
+                g_string_append_printf(ctx->out, "<%s>%s</%s>",
+                                       cell_tag, joined, cell_tag);
+                g_free(joined);
+                g_free(esc);
+            }
+            g_string_append(ctx->out, "</tr>\n");
+        }
+        g_string_append(ctx->out, "</table>\n");
+    } else {
+        g_string_append_c(ctx->out, '\n');
+        for (gint r = 0; r < table->rows; r++) {
+            for (gint c = 0; c < table->cols; c++) {
+                /* Pipe tables cannot hold raw newlines: use <br>.          */
+                gchar **lines = g_strsplit(on_table_get(table, r, c),
+                                           "\n", -1);
+                gchar *joined = g_strjoinv("<br>", lines);
+                g_strfreev(lines);
+                g_string_append_printf(ctx->out, "| %s ", joined);
+                g_free(joined);
+            }
+            g_string_append(ctx->out, "|\n");
+            if (r == 0) {            /* pipe tables require this row        */
+                for (gint c = 0; c < table->cols; c++)
+                    g_string_append(ctx->out, "| --- ");
+                g_string_append(ctx->out, "|\n");
+            }
+        }
+        g_string_append_c(ctx->out, '\n');
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -199,8 +269,24 @@ render_line_inline(OnExportCtx *ctx, GtkTextBuffer *buffer,
     guint32  run_flags = 0;              /* its style bits                  */
 
     while (gtk_text_iter_compare(&it, end) < 0) {
-        /* Images live on child anchors; raw pixbufs are also accepted.     */
+        /* Images and tables live on child anchors; raw pixbufs are also
+         * accepted.                                                        */
         GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&it);
+        if (anchor != NULL && on_anchor_is_checkbox(anchor, NULL)) {
+            /* Checkbox anchors are the line prefix, emitted at the block
+             * level — skip the placeholder character here.                 */
+            gtk_text_iter_forward_char(&it);
+            continue;
+        }
+        OnTable *table = (anchor != NULL)
+                         ? on_anchor_get_table(anchor) : NULL;
+        if (table != NULL) {
+            emit_text_run(ctx, run->str, run_flags, raw);
+            g_string_truncate(run, 0);
+            emit_table(ctx, table);
+            gtk_text_iter_forward_char(&it);
+            continue;
+        }
         GdkPixbuf *pixbuf = (anchor != NULL)
                             ? on_anchor_get_image(anchor, NULL)
                             : gtk_text_iter_get_pixbuf(&it);
@@ -240,6 +326,16 @@ static void
 strip_list_prefix_iter(GtkTextBuffer *buffer, GtkTextIter *start,
                        const GtkTextIter *end)
 {
+    /* Task lines: skip the checkbox anchor (+ separating space).           */
+    GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(start);
+    if (anchor != NULL && on_anchor_is_checkbox(anchor, NULL)) {
+        gtk_text_iter_forward_char(start);
+        if (gtk_text_iter_compare(start, end) < 0 &&
+            gtk_text_iter_get_char(start) == ' ')
+            gtk_text_iter_forward_char(start);
+        return;
+    }
+
     GtkTextIter probe_end = *start;  /* end of the probe window             */
     for (gint i = 0; i < 7 &&
          gtk_text_iter_compare(&probe_end, end) < 0; i++)
@@ -248,7 +344,9 @@ strip_list_prefix_iter(GtkTextBuffer *buffer, GtkTextIter *start,
     gchar *head = gtk_text_buffer_get_text(buffer, start, &probe_end,
                                            FALSE);
     glong skip = 0;                  /* characters to skip                  */
-    if (g_str_has_prefix(head, "\xe2\x80\xa2 ")) {
+    if (g_str_has_prefix(head, "\xe2\x80\xa2 ") ||
+        (on_char_is_checkbox(g_utf8_get_char(head), NULL) &&
+         g_utf8_get_char(g_utf8_next_char(head)) == ' ')) {
         skip = 2;
     } else {
         glong d = 0;                 /* leading digits                      */
@@ -274,7 +372,8 @@ close_block(OnExportCtx *ctx, guint32 open_block)
     if (ctx->format == ON_EXPORT_HTML) {
         if (open_block == ON_FMT_CODEBLOCK)
             g_string_append(ctx->out, "</code></pre>\n");
-        else if (open_block == ON_FMT_LIST_BULLET)
+        else if (open_block == ON_FMT_LIST_BULLET ||
+                 open_block == ON_FMT_LIST_CHECK)
             g_string_append(ctx->out, "</ul>\n");
         else if (open_block == ON_FMT_LIST_NUMBER)
             g_string_append(ctx->out, "</ol>\n");
@@ -294,6 +393,8 @@ open_block(OnExportCtx *ctx, guint32 block)
             g_string_append(ctx->out, "<pre><code>");
         else if (block == ON_FMT_LIST_BULLET)
             g_string_append(ctx->out, "<ul>\n");
+        else if (block == ON_FMT_LIST_CHECK)
+            g_string_append(ctx->out, "<ul class=\"tasks\">\n");
         else if (block == ON_FMT_LIST_NUMBER)
             g_string_append(ctx->out, "<ol>\n");
     } else {
@@ -325,7 +426,8 @@ render_note_body(OnExportCtx *ctx, GtkTextBuffer *buffer)
          * when the style changes.                                          */
         gboolean is_block = (para == ON_FMT_CODEBLOCK ||
                              para == ON_FMT_LIST_BULLET ||
-                             para == ON_FMT_LIST_NUMBER);
+                             para == ON_FMT_LIST_NUMBER ||
+                             para == ON_FMT_LIST_CHECK);
         if (open != 0 && (!is_block || para != open)) {
             close_block(ctx, open);
             open = 0;
@@ -358,6 +460,16 @@ render_note_body(OnExportCtx *ctx, GtkTextBuffer *buffer)
                 render_line_inline(ctx, buffer, &ls, &le, FALSE);
                 g_string_append(ctx->out, "</li>\n");
                 break;
+            case ON_FMT_LIST_CHECK: {
+                gboolean checked = line_is_checked(&ls);
+                strip_list_prefix_iter(buffer, &ls, &le);
+                g_string_append_printf(ctx->out,
+                    "<li><input type=\"checkbox\"%s disabled> ",
+                    checked ? " checked" : "");
+                render_line_inline(ctx, buffer, &ls, &le, FALSE);
+                g_string_append(ctx->out, "</li>\n");
+                break;
+            }
             default:
                 if (gtk_text_iter_compare(&ls, &le) < 0) {
                     g_string_append(ctx->out, "<p>");
@@ -388,6 +500,14 @@ render_note_body(OnExportCtx *ctx, GtkTextBuffer *buffer)
                 render_line_inline(ctx, buffer, &ls, &le, FALSE);
                 g_string_append_c(ctx->out, '\n');
                 break;
+            case ON_FMT_LIST_CHECK: {
+                gboolean checked = line_is_checked(&ls);
+                strip_list_prefix_iter(buffer, &ls, &le);
+                g_string_append(ctx->out, checked ? "- [x] " : "- [ ] ");
+                render_line_inline(ctx, buffer, &ls, &le, FALSE);
+                g_string_append_c(ctx->out, '\n');
+                break;
+            }
             case ON_FMT_LIST_NUMBER:
                 /* Keep the literal "N. " prefix — it is valid Markdown.    */
                 render_line_inline(ctx, buffer, &ls, &le, FALSE);
@@ -499,6 +619,9 @@ export_one(OnApp *app, OnNoteMeta *m, const gchar *note_dir,
             " border-radius: 6px; overflow-x: auto; }\n"
             "img { max-width: 100%%; }\n"
             ".tag { color: #c35a00; font-weight: 600; }\n"
+            "ul.tasks { list-style: none; padding-left: 1.2em; }\n"
+            "table { border-collapse: collapse; }\n"
+            "td { border: 1px solid #bbb; padding: 4px 8px; }\n"
             "</style>\n</head>\n<body>\n", esc_title);
         g_free(esc_title);
     }

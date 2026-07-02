@@ -1,0 +1,12 @@
+[Icon Theme]
+Name=Hicolor
+Comment=Orange Notes bundled scalable icons (elementary pan arrows for
+ crisp tree expanders on HiDPI displays)
+Directories=scalable/actions
+
+[scalable/actions]
+Context=Actions
+Size=16
+MinSize=8
+MaxSize=512
+Type=Scalable

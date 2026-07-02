@@ -7,7 +7,7 @@
  * ONBF layout (all integers little-endian):
  *
  *   [4 bytes]  magic "ONBF"
- *   [u32]      format version (currently 2; version 1 is still readable)
+ *   [u32]      format version (currently 5; 1–4 are still readable)
  *   ...records...
  *   [u8 0x00]  end marker
  *
@@ -15,6 +15,13 @@
  *   [u8 0x01]  TEXT  : [u32 flags] [u32 byte_len] [byte_len UTF-8 bytes]
  *   [u8 0x02]  IMAGE : [u32 display_width]            (version >= 2 only)
  *                      [u32 png_len] [png_len bytes of PNG data]
+ *   [u8 0x03]  TABLE : [u32 tflags]                   (version >= 4 only;
+ *                                                      bit 0 = header row)
+ *                      [u32 rows] [u32 cols]          (version >= 3)
+ *                      rows*cols x ([u32 len] [len UTF-8 bytes]) row-major
+ *   [u8 0x04]  CHECK : [u8 state]                     (version >= 5)
+ *                      a task-list checkbox (0 = unchecked, 1 = checked);
+ *                      rendered as a native GtkCheckButton in the editor
  *
  * IMAGE records always hold the image at its ORIGINAL resolution; the
  * display_width field records how wide the user chose to show it in the
@@ -48,7 +55,27 @@ typedef enum {
     ON_FMT_LIST_BULLET = 1 << 7,   /* bulleted list item (paragraph)        */
     ON_FMT_LIST_NUMBER = 1 << 8,   /* numbered list item (paragraph)        */
     ON_FMT_TAG         = 1 << 9,   /* inline #tag token                     */
+    ON_FMT_LIST_CHECK  = 1 << 10,  /* task-list item with checkbox (para)   */
 } OnFormatFlags;
+
+/* Task checkboxes are child anchors carrying their state as object data;
+ * the editor attaches a native GtkCheckButton at each.  Notes saved by
+ * older builds used literal glyphs instead — those are migrated to
+ * anchors while loading (see on_note_deserialize).                          */
+
+/* on_anchor_set_checkbox() — mark an anchor as a task checkbox with the
+ * given state.  on_anchor_is_checkbox() reads it back (returns FALSE for
+ * non-checkbox anchors; out_checked may be NULL).                           */
+void on_anchor_set_checkbox(GtkTextChildAnchor *anchor, gboolean checked);
+gboolean on_anchor_is_checkbox(GtkTextChildAnchor *anchor,
+                               gboolean *out_checked);
+
+/* on_char_is_checkbox() — is `c` one of the legacy checkbox glyphs
+ * (⬜/✅/☐/☑)?  Used by the load-time migration.                            */
+gboolean on_char_is_checkbox(gunichar c, gboolean *out_checked);
+
+/* Glyph shown as the Tasks toolbar icon fallback.                           */
+#define ON_CHECK_UNCHECKED "\xe2\xac\x9c"   /* ⬜ U+2B1C                     */
 
 /* Names of the GtkTextTags the editor registers on every note buffer.
  * serialize.c maps between these tags and the ON_FMT_* bits.               */
@@ -61,6 +88,7 @@ typedef enum {
 #define ON_TAGNAME_CODEBLOCK   "on-codeblock"
 #define ON_TAGNAME_LIST_BULLET "on-list-bullet"
 #define ON_TAGNAME_LIST_NUMBER "on-list-number"
+#define ON_TAGNAME_LIST_CHECK  "on-list-check"
 #define ON_TAGNAME_TAG         "on-tag"
 
 /* ---------------------------------------------------------------------------
@@ -127,6 +155,41 @@ GdkPixbuf *on_anchor_get_image(GtkTextChildAnchor *anchor,
 /* Default on-screen (logical) width for freshly inserted images — small
  * thumbnails by default; enlarge via the image's right-click menu.         */
 #define ON_IMAGE_DEFAULT_WIDTH 320
+
+/* ---------------------------------------------------------------------------
+ * OnTable — the data behind an embedded table anchor.
+ *
+ * Fields:
+ *   rows/cols — current dimensions.
+ *   header    — whether the first row is styled/exported as a header.
+ *   cells     — rows*cols owned strings, row-major (never NULL entries;
+ *               cell text may contain newlines).
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    gint       rows;
+    gint       cols;
+    gboolean   header;
+    GPtrArray *cells;
+} OnTable;
+
+/* on_table_new() — a rows×cols table of empty cells.                        */
+OnTable *on_table_new(gint rows, gint cols);
+
+/* on_table_free() — release a table and its cell strings.                   */
+void on_table_free(OnTable *table);
+
+/* on_table_get()/on_table_set() — cell access (row r, column c).            */
+const gchar *on_table_get(OnTable *table, gint r, gint c);
+void on_table_set(OnTable *table, gint r, gint c, const gchar *text);
+
+/* on_table_resize() — grow/shrink to rows×cols, preserving overlapping
+ * cells (new cells become empty; dimensions clamp to at least 1×1).         */
+void on_table_resize(OnTable *table, gint rows, gint cols);
+
+/* on_anchor_set_table() — attach `table` to an anchor (ownership passes
+ * to the anchor).  on_anchor_get_table() reads it back (borrowed).          */
+void on_anchor_set_table(GtkTextChildAnchor *anchor, OnTable *table);
+OnTable *on_anchor_get_table(GtkTextChildAnchor *anchor);
 
 /* ---------------------------------------------------------------------------
  * on_buffer_collect_tags() — collect the distinct #tag names present in

@@ -38,4 +38,11 @@ GtkWidget *on_editor_window_open(OnApp *app, gint64 note_id);
  * ------------------------------------------------------------------------- */
 void on_editor_rebuild_code_buttons_all(OnApp *app);
 
+/* ---------------------------------------------------------------------------
+ * on_editor_apply_line_numbers_all() — show/hide the code-block line
+ * number gutter in every open editor per app->code_line_numbers.  Called
+ * by the settings window when the preference changes.
+ * ------------------------------------------------------------------------- */
+void on_editor_apply_line_numbers_all(OnApp *app);
+
 #endif /* ORANGE_EDITOR_WINDOW_H */

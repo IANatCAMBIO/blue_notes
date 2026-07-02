@@ -10,6 +10,7 @@
 #include <gtk/gtk.h>
 
 #include "app.h"
+#include "cli.h"
 #include "db.h"
 #include "library_window.h"
 
@@ -41,6 +42,14 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     g_free(icon_path);
     g_free(base);
 
+    /* Bundled scalable theme icons (icons/theme/hicolor/...): provides
+     * SVG pan-*-symbolic arrows so tree expanders render crisply on
+     * HiDPI displays instead of GTK's built-in 1x raster fallbacks.        */
+    gchar *theme_dir = g_build_filename(app->icons_dir, "theme", NULL);
+    gtk_icon_theme_prepend_search_path(gtk_icon_theme_get_default(),
+                                       theme_dir);
+    g_free(theme_dir);
+
     on_library_window_create(app);
 
 #ifdef HAVE_GTKOSX
@@ -63,6 +72,12 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
 int
 main(int argc, char *argv[])
 {
+    /* Headless automation: a recognized subcommand runs and exits
+     * without ever creating windows (see cli.h for the command list).      */
+    int cli_status = on_cli_run(argc, argv);
+    if (cli_status >= 0)
+        return cli_status;
+
     /* Classic full-width scrollbars everywhere instead of the modern
      * overlay style (must be set before GTK initializes).                  */
     g_setenv("GTK_OVERLAY_SCROLLING", "0", TRUE);
@@ -115,6 +130,11 @@ main(int argc, char *argv[])
     gchar *ccb = on_db_setting_get(db, "code_copy_button");
     app.code_copy_buttons = g_strcmp0(ccb, "0") != 0;
     g_free(ccb);
+
+    /* Code-block line numbers are off unless explicitly enabled.           */
+    gchar *cln = on_db_setting_get(db, "code_line_numbers");
+    app.code_line_numbers = g_strcmp0(cln, "1") == 0;
+    g_free(cln);
 
     app.gtk_app = gtk_application_new("org.example.orange-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);

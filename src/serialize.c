@@ -20,13 +20,20 @@
 static const guint8 ONBF_MAGIC[4] = { 'O', 'N', 'B', 'F' };
 
 /* Current format version written by on_note_serialize().  Version 2 added
- * the display_width field to IMAGE records; version 1 is still readable.   */
-#define ONBF_VERSION 2u
+ * the display_width field to IMAGE records; version 3 added TABLE
+ * records; version 4 added the tflags field to TABLE records; version 5
+ * added CHECK records.  All older versions are still readable.              */
+#define ONBF_VERSION 5u
+
+/* TABLE record flag bits (the tflags field).                                */
+#define TABLE_FLAG_HEADER 1u         /* first row is a header row           */
 
 /* Record type bytes.                                                        */
 #define REC_END   0x00               /* end of document                     */
 #define REC_TEXT  0x01               /* formatted text run                  */
 #define REC_IMAGE 0x02               /* inline PNG image                    */
+#define REC_TABLE 0x03               /* embedded table of text cells        */
+#define REC_CHECK 0x04               /* task-list checkbox                  */
 
 /* ---------------------------------------------------------------------------
  * FLAG_TAG_NAMES — table pairing each ON_FMT_* bit with its tag name.
@@ -46,6 +53,7 @@ static const struct {
     { ON_FMT_CODEBLOCK,   ON_TAGNAME_CODEBLOCK   },
     { ON_FMT_LIST_BULLET, ON_TAGNAME_LIST_BULLET },
     { ON_FMT_LIST_NUMBER, ON_TAGNAME_LIST_NUMBER },
+    { ON_FMT_LIST_CHECK,  ON_TAGNAME_LIST_CHECK  },
     { ON_FMT_TAG,         ON_TAGNAME_TAG         },
 };
 
@@ -94,6 +102,10 @@ on_buffer_ensure_tags(GtkTextBuffer *buffer)
                                "indent",      -16,
                                NULL);
     gtk_text_buffer_create_tag(buffer, ON_TAGNAME_LIST_NUMBER,
+                               "left-margin", 32,
+                               "indent",      -16,
+                               NULL);
+    gtk_text_buffer_create_tag(buffer, ON_TAGNAME_LIST_CHECK,
                                "left-margin", 32,
                                "indent",      -16,
                                NULL);
@@ -176,9 +188,43 @@ on_note_serialize(GtkTextBuffer *buffer, gsize *out_len)
     guint32  run_flags = 0;                  /* formatting of the run       */
 
     while (!gtk_text_iter_is_end(&iter)) {
-        /* Images live on child anchors (raw pixbufs are also accepted for
-         * robustness against buffers built by other code paths).           */
+        /* Images and tables live on child anchors (raw pixbufs are also
+         * accepted for robustness against buffers built elsewhere).        */
         GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&iter);
+
+        /* Checkbox anchor?  Emit a CHECK record.                           */
+        gboolean checked;            /* the checkbox's state                */
+        if (anchor != NULL && on_anchor_is_checkbox(anchor, &checked)) {
+            flush_text_run(out, run, run_flags);
+            guint8 rec = REC_CHECK;
+            g_byte_array_append(out, &rec, 1);
+            guint8 state = checked ? 1 : 0;
+            g_byte_array_append(out, &state, 1);
+            gtk_text_iter_forward_char(&iter);
+            continue;
+        }
+
+        /* Table anchor?  Emit a TABLE record.                              */
+        OnTable *table = (anchor != NULL)
+                         ? on_anchor_get_table(anchor) : NULL;
+        if (table != NULL) {
+            flush_text_run(out, run, run_flags);
+            guint8 rec = REC_TABLE;
+            g_byte_array_append(out, &rec, 1);
+            put_u32(out, table->header ? TABLE_FLAG_HEADER : 0);
+            put_u32(out, (guint32)table->rows);
+            put_u32(out, (guint32)table->cols);
+            for (gint i = 0; i < table->rows * table->cols; i++) {
+                const gchar *cell =
+                    g_ptr_array_index(table->cells, i);
+                put_u32(out, (guint32)strlen(cell));
+                g_byte_array_append(out, (const guint8 *)cell,
+                                    strlen(cell));
+            }
+            gtk_text_iter_forward_char(&iter);
+            continue;
+        }
+
         GdkPixbuf *original = NULL;  /* full-resolution image to store      */
         gint display_width = 0;      /* the user's chosen display width     */
         if (anchor != NULL) {
@@ -294,6 +340,50 @@ insert_with_flags(GtkTextBuffer *buffer, const gchar *text, gssize n,
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * migrate_legacy_checkboxes() — notes saved by older builds carried task
+ * state as literal glyphs (⬜/✅/☐/☑) at the start of check-list lines;
+ * replace each with a checkbox anchor so the editor shows native
+ * GtkCheckButtons.  Runs once per successful load.
+ * ------------------------------------------------------------------------- */
+static void
+migrate_legacy_checkboxes(GtkTextBuffer *buffer)
+{
+    GtkTextTag *tag = gtk_text_tag_table_lookup(
+        gtk_text_buffer_get_tag_table(buffer), ON_TAGNAME_LIST_CHECK);
+    if (tag == NULL)
+        return;
+
+    gint n_lines = gtk_text_buffer_get_line_count(buffer);
+    for (gint line = 0; line < n_lines; line++) {
+        GtkTextIter ls;              /* line start                          */
+        gtk_text_buffer_get_iter_at_line(buffer, &ls, line);
+        if (!gtk_text_iter_has_tag(&ls, tag))
+            continue;
+
+        gboolean checked;            /* the glyph's state                   */
+        if (!on_char_is_checkbox(gtk_text_iter_get_char(&ls), &checked))
+            continue;
+
+        /* Swap the glyph character for a checkbox anchor.                  */
+        gint at = gtk_text_iter_get_offset(&ls);
+        GtkTextIter ge = ls;         /* just past the glyph                 */
+        gtk_text_iter_forward_char(&ge);
+        gtk_text_buffer_delete(buffer, &ls, &ge);
+
+        gtk_text_buffer_get_iter_at_offset(buffer, &ls, at);
+        GtkTextChildAnchor *anchor =
+            gtk_text_buffer_create_child_anchor(buffer, &ls);
+        on_anchor_set_checkbox(anchor, checked);
+
+        /* Keep the line uniformly tagged (anchor char included).           */
+        GtkTextIter ts, te;          /* the anchor's single character       */
+        gtk_text_buffer_get_iter_at_offset(buffer, &ts, at);
+        gtk_text_buffer_get_iter_at_offset(buffer, &te, at + 1);
+        gtk_text_buffer_apply_tag(buffer, tag, &ts, &te);
+    }
+}
+
 gboolean
 on_note_deserialize(GtkTextBuffer *buffer, const guint8 *data, gsize len)
 {
@@ -315,8 +405,10 @@ on_note_deserialize(GtkTextBuffer *buffer, const guint8 *data, gsize len)
 
     while (pos < len) {
         guint8 rec = data[pos++];    /* record type byte                    */
-        if (rec == REC_END)
+        if (rec == REC_END) {
+            migrate_legacy_checkboxes(buffer);
             return TRUE;
+        }
 
         if (rec == REC_TEXT) {
             guint32 flags, n;        /* run formatting and byte length      */
@@ -364,6 +456,50 @@ on_note_deserialize(GtkTextBuffer *buffer, const guint8 *data, gsize len)
             }
             g_object_unref(loader);
             pos += n;
+        } else if (rec == REC_TABLE) {
+            guint32 tflags = 0;      /* table flags (v4+)                   */
+            if (version >= 4 && !get_u32(data, len, &pos, &tflags)) {
+                g_warning("deserialize: truncated TABLE record");
+                return FALSE;
+            }
+            guint32 rows, cols;      /* table dimensions                    */
+            if (!get_u32(data, len, &pos, &rows) ||
+                !get_u32(data, len, &pos, &cols) ||
+                rows == 0 || cols == 0 || rows > 1024 || cols > 1024) {
+                g_warning("deserialize: bad TABLE record");
+                return FALSE;
+            }
+            OnTable *table = on_table_new((gint)rows, (gint)cols);
+            table->header = (tflags & TABLE_FLAG_HEADER) != 0;
+            for (guint32 i = 0; i < rows * cols; i++) {
+                guint32 n;           /* cell byte length                    */
+                if (!get_u32(data, len, &pos, &n) || pos + n > len) {
+                    g_warning("deserialize: truncated TABLE cell");
+                    on_table_free(table);
+                    return FALSE;
+                }
+                gchar *cell = g_strndup((const gchar *)data + pos, n);
+                on_table_set(table, (gint)(i / cols), (gint)(i % cols),
+                             cell);
+                g_free(cell);
+                pos += n;
+            }
+            GtkTextIter end;
+            gtk_text_buffer_get_end_iter(buffer, &end);
+            GtkTextChildAnchor *anchor =
+                gtk_text_buffer_create_child_anchor(buffer, &end);
+            on_anchor_set_table(anchor, table);
+        } else if (rec == REC_CHECK) {
+            if (pos >= len) {
+                g_warning("deserialize: truncated CHECK record");
+                return FALSE;
+            }
+            guint8 state = data[pos++];  /* 0 = unchecked, 1 = checked      */
+            GtkTextIter end;
+            gtk_text_buffer_get_end_iter(buffer, &end);
+            GtkTextChildAnchor *anchor =
+                gtk_text_buffer_create_child_anchor(buffer, &end);
+            on_anchor_set_checkbox(anchor, state != 0);
         } else {
             g_warning("deserialize: unknown record type 0x%02x", rec);
             return FALSE;
@@ -372,6 +508,107 @@ on_note_deserialize(GtkTextBuffer *buffer, const guint8 *data, gsize len)
     /* Ran off the end without seeing REC_END — tolerate but report.        */
     g_warning("deserialize: missing end marker");
     return FALSE;
+}
+
+void
+on_anchor_set_checkbox(GtkTextChildAnchor *anchor, gboolean checked)
+{
+    /* Encoded as 1 (unchecked) / 2 (checked) so NULL means "no checkbox". */
+    g_object_set_data(G_OBJECT(anchor), "on-checkbox",
+                      GINT_TO_POINTER(checked ? 2 : 1));
+}
+
+gboolean
+on_anchor_is_checkbox(GtkTextChildAnchor *anchor, gboolean *out_checked)
+{
+    gint v = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(anchor),
+                                               "on-checkbox"));
+    if (out_checked != NULL)
+        *out_checked = (v == 2);
+    return v != 0;
+}
+
+gboolean
+on_char_is_checkbox(gunichar c, gboolean *out_checked)
+{
+    gboolean checked = (c == 0x2705 || c == 0x2611);   /* ✅ or legacy ☑    */
+    gboolean is_box  = checked ||
+                       c == 0x2B1C || c == 0x2610;     /* ⬜ or legacy ☐    */
+    if (out_checked != NULL)
+        *out_checked = checked;
+    return is_box;
+}
+
+OnTable *
+on_table_new(gint rows, gint cols)
+{
+    OnTable *t = g_new0(OnTable, 1);
+    t->rows  = MAX(1, rows);
+    t->cols  = MAX(1, cols);
+    t->cells = g_ptr_array_new_with_free_func(g_free);
+    for (gint i = 0; i < t->rows * t->cols; i++)
+        g_ptr_array_add(t->cells, g_strdup(""));
+    return t;
+}
+
+void
+on_table_free(OnTable *table)
+{
+    if (table == NULL)
+        return;
+    g_ptr_array_free(table->cells, TRUE);
+    g_free(table);
+}
+
+const gchar *
+on_table_get(OnTable *table, gint r, gint c)
+{
+    if (r < 0 || r >= table->rows || c < 0 || c >= table->cols)
+        return "";
+    return g_ptr_array_index(table->cells, r * table->cols + c);
+}
+
+void
+on_table_set(OnTable *table, gint r, gint c, const gchar *text)
+{
+    if (r < 0 || r >= table->rows || c < 0 || c >= table->cols)
+        return;
+    gint i = r * table->cols + c;    /* row-major cell index                */
+    g_free(g_ptr_array_index(table->cells, i));
+    g_ptr_array_index(table->cells, i) =
+        g_strdup(text != NULL ? text : "");
+}
+
+void
+on_table_resize(OnTable *table, gint rows, gint cols)
+{
+    rows = MAX(1, rows);
+    cols = MAX(1, cols);
+
+    /* Build the new cell array, carrying over overlapping content.         */
+    GPtrArray *cells = g_ptr_array_new_with_free_func(g_free);
+    for (gint r = 0; r < rows; r++)
+        for (gint c = 0; c < cols; c++)
+            g_ptr_array_add(cells,
+                            g_strdup((r < table->rows && c < table->cols)
+                                     ? on_table_get(table, r, c) : ""));
+    g_ptr_array_free(table->cells, TRUE);
+    table->cells = cells;
+    table->rows  = rows;
+    table->cols  = cols;
+}
+
+void
+on_anchor_set_table(GtkTextChildAnchor *anchor, OnTable *table)
+{
+    g_object_set_data_full(G_OBJECT(anchor), "on-table", table,
+                           (GDestroyNotify)on_table_free);
+}
+
+OnTable *
+on_anchor_get_table(GtkTextChildAnchor *anchor)
+{
+    return g_object_get_data(G_OBJECT(anchor), "on-table");
 }
 
 void

@@ -211,6 +211,18 @@ on_db_choose_clicked(GtkButton *btn, gpointer user_data)
     }
 }
 
+/* on_line_numbers_toggled() — show/hide code-block line numbers in every
+ * open editor, live.                                                        */
+static void
+on_line_numbers_toggled(GtkToggleButton *check, gpointer user_data)
+{
+    OnApp *app = user_data;          /* application context                 */
+    app->code_line_numbers = gtk_toggle_button_get_active(check);
+    on_db_setting_set(app->db, "code_line_numbers",
+                      app->code_line_numbers ? "1" : "0");
+    on_editor_apply_line_numbers_all(app);
+}
+
 /* ---------------------------------------------------------------------------
  * section_label() — bold section header for the settings layout.
  * ------------------------------------------------------------------------- */
@@ -239,8 +251,8 @@ on_settings_window_open(OnApp *app)
     gtk_container_set_border_width(GTK_CONTAINER(vbox), 14);
     gtk_container_add(GTK_CONTAINER(window), vbox);
 
-    /* --- toolbar button styles ---------------------------------------------*/
-    gtk_box_pack_start(GTK_BOX(vbox), section_label("Toolbar Buttons"),
+    /* --- appearance ----------------------------------------------------------*/
+    gtk_box_pack_start(GTK_BOX(vbox), section_label("Appearance"),
                        FALSE, FALSE, 0);
 
     GtkWidget *grid = gtk_grid_new();
@@ -248,13 +260,13 @@ on_settings_window_open(OnApp *app)
     gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
     gtk_widget_set_margin_start(grid, 12);
 
-    GtkWidget *lib_label = gtk_label_new("Library windows:");
+    GtkWidget *lib_label = gtk_label_new("Library toolbar buttons:");
     gtk_label_set_xalign(GTK_LABEL(lib_label), 0.0);
     gtk_grid_attach(GTK_GRID(grid), lib_label, 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(grid),
                     style_combo_new(app, ON_TOOLBAR_LIBRARY), 1, 0, 1, 1);
 
-    GtkWidget *ed_label = gtk_label_new("Editor windows:");
+    GtkWidget *ed_label = gtk_label_new("Editor toolbar buttons:");
     gtk_label_set_xalign(GTK_LABEL(ed_label), 0.0);
     gtk_grid_attach(GTK_GRID(grid), ed_label, 0, 1, 1, 1);
     gtk_grid_attach(GTK_GRID(grid),
@@ -262,25 +274,8 @@ on_settings_window_open(OnApp *app)
 
     gtk_box_pack_start(GTK_BOX(vbox), grid, FALSE, FALSE, 0);
 
-    gtk_box_pack_start(GTK_BOX(vbox),
-                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
-                       FALSE, FALSE, 4);
-
-    /* --- editor options ------------------------------------------------------*/
-    gtk_box_pack_start(GTK_BOX(vbox), section_label("Editor"),
-                       FALSE, FALSE, 0);
-
-    GtkWidget *code_check = gtk_check_button_new_with_label(
-        "Show copy button on code blocks");
-    gtk_widget_set_margin_start(code_check, 12);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(code_check),
-                                 app->code_copy_buttons);
-    g_signal_connect(code_check, "toggled",
-                     G_CALLBACK(on_code_copy_toggled), app);
-    gtk_box_pack_start(GTK_BOX(vbox), code_check, FALSE, FALSE, 0);
-
 #ifdef __APPLE__
-    /* --- macOS integration --------------------------------------------------*/
+    /* Native macOS menu bar belongs with the other appearance choices.     */
     GtkWidget *mac_check = gtk_check_button_new_with_label(
         "Use the native macOS menu bar (hide the in-window menu)");
     gtk_widget_set_margin_start(mac_check, 12);
@@ -302,6 +297,44 @@ on_settings_window_open(OnApp *app)
 #endif
     gtk_box_pack_start(GTK_BOX(vbox), mac_check, FALSE, FALSE, 0);
 #endif /* __APPLE__ */
+
+    /* The bundled elementary icons are SVG: warn when they can't render.   */
+    if (!svg_loader_available()) {
+        GtkWidget *warn = gtk_label_new(NULL);
+        gtk_label_set_markup(GTK_LABEL(warn),
+            "<small><i>Toolbar icons are SVG files and need the librsvg "
+            "loader to display:\nsudo port install librsvg "
+            "(then restart Orange Notes)</i></small>");
+        gtk_label_set_xalign(GTK_LABEL(warn), 0.0);
+        gtk_widget_set_margin_start(warn, 12);
+        gtk_box_pack_start(GTK_BOX(vbox), warn, FALSE, FALSE, 2);
+    }
+
+    gtk_box_pack_start(GTK_BOX(vbox),
+                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
+                       FALSE, FALSE, 4);
+
+    /* --- editor options ------------------------------------------------------*/
+    gtk_box_pack_start(GTK_BOX(vbox), section_label("Editor"),
+                       FALSE, FALSE, 0);
+
+    GtkWidget *code_check = gtk_check_button_new_with_label(
+        "Show copy button on code blocks");
+    gtk_widget_set_margin_start(code_check, 12);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(code_check),
+                                 app->code_copy_buttons);
+    g_signal_connect(code_check, "toggled",
+                     G_CALLBACK(on_code_copy_toggled), app);
+    gtk_box_pack_start(GTK_BOX(vbox), code_check, FALSE, FALSE, 0);
+
+    GtkWidget *lines_check = gtk_check_button_new_with_label(
+        "Show line numbers in code blocks");
+    gtk_widget_set_margin_start(lines_check, 12);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(lines_check),
+                                 app->code_line_numbers);
+    g_signal_connect(lines_check, "toggled",
+                     G_CALLBACK(on_line_numbers_toggled), app);
+    gtk_box_pack_start(GTK_BOX(vbox), lines_check, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(vbox),
                        gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
@@ -341,18 +374,6 @@ on_settings_window_open(OnApp *app)
                      G_CALLBACK(on_db_custom_toggled), dbs);
     g_signal_connect(dbs->choose_btn, "clicked",
                      G_CALLBACK(on_db_choose_clicked), dbs);
-
-    /* The bundled elementary icons are SVG: warn when they can't render.   */
-    if (!svg_loader_available()) {
-        GtkWidget *warn = gtk_label_new(NULL);
-        gtk_label_set_markup(GTK_LABEL(warn),
-            "<small><i>Toolbar icons are SVG files and need the librsvg "
-            "loader to display:\nsudo port install librsvg "
-            "(then restart Orange Notes)</i></small>");
-        gtk_label_set_xalign(GTK_LABEL(warn), 0.0);
-        gtk_widget_set_margin_start(warn, 12);
-        gtk_box_pack_start(GTK_BOX(vbox), warn, FALSE, FALSE, 2);
-    }
 
     /* --- close button ---------------------------------------------------------*/
     GtkWidget *close_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
