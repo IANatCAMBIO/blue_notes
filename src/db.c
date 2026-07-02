@@ -135,6 +135,10 @@ on_db_open(const gchar *path_override)
         return NULL;
     }
 
+    /* Wait out short write locks instead of failing instantly — e.g. a
+     * CLI command landing while the GUI is mid-autosave.                   */
+    sqlite3_busy_timeout(db->handle, 5000);
+
     if (!exec_simple(db, SCHEMA_SQL)) {
         on_db_close(db);
         return NULL;

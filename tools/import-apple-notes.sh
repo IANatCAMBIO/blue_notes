@@ -33,6 +33,13 @@ fi
 # Import destination root inside Orange Notes.
 DEST_ROOT="Apple Notes Import"
 
+# One upfront heads-up if the Orange Notes GUI has the database open
+# (individual commands would otherwise repeat this warning per note).
+if "$BIN" folder list 2>&1 >/dev/null | grep -q "in use"; then
+    echo "note: Orange Notes is running — imported notes will appear"
+    echo "      after you restart it (or switch folders to refresh)."
+fi
+
 # Workspace: one .html per note plus a manifest of TAB-separated
 # "file<TAB>folder path" lines.
 TMP=$(mktemp -d)
@@ -154,13 +161,13 @@ while IFS="$(printf '\t')" read -r num folder; do
     dest="$DEST_ROOT/$folder"
 
     # Idempotent: folder add finds existing path components by name.
-    "$BIN" folder add "$dest" >/dev/null
+    "$BIN" folder add "$dest" >/dev/null 2>&1
 
     # HTML -> plain text (textutil ships with macOS), then import via
     # stdin; the note's first line becomes its title.  Capture the new
     # note's id ("note <id>\t<title>") for attaching images.
     note_id=$(textutil -convert txt -stdout "$TMP/$num.html" \
-                  | "$BIN" note new --folder "$dest" - \
+                  | "$BIN" note new --folder "$dest" - 2>/dev/null \
                   | awk '{print $2; exit}') || note_id=""
     if [ -z "$note_id" ]; then
         failed=$((failed + 1))
