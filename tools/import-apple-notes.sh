@@ -44,8 +44,10 @@ echo "Exporting from Notes.app (macOS may ask for permission)..."
 # The AppleScript walks every account and folder (rebuilding nested
 # folder paths via each folder's container chain), writes each note's
 # HTML body to <n>.html in the workspace, and appends a manifest line.
+# It runs in the background so this shell can report progress by
+# counting the files appearing in the workspace.
 # ---------------------------------------------------------------------------
-osascript - "$TMP" <<'APPLESCRIPT'
+osascript - "$TMP" >/dev/null <<'APPLESCRIPT' &
 on run argv
     set outDir to item 1 of argv
     set counter to 0
@@ -117,12 +119,28 @@ on run argv
     return counter
 end run
 APPLESCRIPT
+OSA_PID=$!
+
+# Live export progress: the exporter drops one .html per note.
+while kill -0 "$OSA_PID" 2>/dev/null; do
+    n=$(ls "$TMP" 2>/dev/null | grep -c '\.html$' || true)
+    printf '\r  exported %s note(s)...' "$n"
+    sleep 1
+done
+if ! wait "$OSA_PID"; then
+    printf '\n'
+    echo "error: Notes.app export failed (permission denied?)" >&2
+    exit 1
+fi
+printf '\r  exported %s note(s).   \n' \
+       "$(ls "$TMP" | grep -c '\.html$' || true)"
 
 if [ ! -s "$TMP/manifest.tsv" ]; then
     echo "No notes exported (empty Notes.app, or permission was denied)."
     exit 0
 fi
 
+total=$(grep -c . "$TMP/manifest.tsv")
 echo "Importing into Orange Notes..."
 
 imported=0
@@ -132,6 +150,7 @@ skipped_att=0
 # Manifest lines are "<file-number><TAB><folder path>".
 while IFS="$(printf '\t')" read -r num folder; do
     [ -n "$num" ] || continue
+    printf '\r  importing %s/%s...' "$((imported + failed + 1))" "$total"
     dest="$DEST_ROOT/$folder"
 
     # Idempotent: folder add finds existing path components by name.
@@ -162,6 +181,7 @@ while IFS="$(printf '\t')" read -r num folder; do
         fi
     done
 done < "$TMP/manifest.tsv"
+printf '\r                                        \r'
 
 echo "Done: $imported note(s) and $images image(s) imported into" \
      "\"$DEST_ROOT\""
