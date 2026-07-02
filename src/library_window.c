@@ -28,6 +28,7 @@
 #include "settings_window.h"
 
 #include <cairo-gobject.h>
+#include <glib/gstdio.h>
 #include <string.h>
 
 #ifdef HAVE_GTKOSX
@@ -143,6 +144,11 @@ static void    refresh_notes(OnLibrary *lw);
 static GArray *selected_note_ids(OnLibrary *lw);
 static void    add_menu_item(GtkWidget *menu, const gchar *label,
                              GCallback callback, gpointer data);
+static void    about_button_fit_style(GtkToolItem *item,
+                                      GtkToolbarStyle style);
+static void    on_action_toolbar_style_changed(GtkToolbar *toolbar,
+                                               GtkToolbarStyle style,
+                                               gpointer user_data);
 
 /* ===========================================================================
  * sidebar population
@@ -728,15 +734,64 @@ prompt_for_text(OnLibrary *lw, const gchar *title, const gchar *initial)
 }
 
 /* ---------------------------------------------------------------------------
- * confirm() — modal yes/no question.  Returns TRUE if the user accepted.
+ * confirm() — modal yes/no warning dialog: a 32px warning icon above a
+ * centered primary question and a centered secondary line.
+ *   lw        — the library window (dialog parent).
+ *   primary   — the question (e.g. "Delete this note?").
+ *   secondary — supporting line (e.g. "This cannot be undone."); may be
+ *               NULL.
+ * Returns TRUE if the user accepted.
  * ------------------------------------------------------------------------- */
 static gboolean
-confirm(OnLibrary *lw, const gchar *question)
+confirm(OnLibrary *lw, const gchar *primary, const gchar *secondary)
 {
-    GtkWidget *dialog = gtk_message_dialog_new(
-        GTK_WINDOW(lw->window),
+    GtkWidget *dialog = gtk_dialog_new_with_buttons(
+        "Confirm", GTK_WINDOW(lw->window),
         GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
-        GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO, "%s", question);
+        "_No",  GTK_RESPONSE_NO,
+        "_Yes", GTK_RESPONSE_YES,
+        NULL);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 16);
+
+    /* Warning icon on top (elementary status icon; ⚠ as fallback).         */
+    GtkWidget *icon = on_app_icon_image_sized(lw->app, "dialog-warning",
+                                              32);
+    if (icon == NULL)
+        icon = gtk_label_new("\xe2\x9a\xa0");
+    gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(box), icon, FALSE, FALSE, 0);
+
+    GtkWidget *primary_label = gtk_label_new(primary);
+    gtk_label_set_justify(GTK_LABEL(primary_label), GTK_JUSTIFY_CENTER);
+    gtk_widget_set_halign(primary_label, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(box), primary_label, FALSE, FALSE, 0);
+
+    if (secondary != NULL) {
+        GtkWidget *secondary_label = gtk_label_new(secondary);
+        gtk_label_set_justify(GTK_LABEL(secondary_label),
+                              GTK_JUSTIFY_CENTER);
+        gtk_widget_set_halign(secondary_label, GTK_ALIGN_CENTER);
+        gtk_box_pack_start(GTK_BOX(box), secondary_label, FALSE, FALSE, 0);
+    }
+
+    gtk_box_pack_start(
+        GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))),
+        box, TRUE, TRUE, 0);
+
+    /* Center the No/Yes buttons under the text, 8px apart.  The action
+     * area accessor is deprecated but remains the only way to restyle
+     * the button row in GTK3.                                              */
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    GtkWidget *action_area = gtk_dialog_get_action_area(GTK_DIALOG(dialog));
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    gtk_button_box_set_layout(GTK_BUTTON_BOX(action_area),
+                              GTK_BUTTONBOX_CENTER);
+    gtk_box_set_spacing(GTK_BOX(action_area), 8);
+
+    gtk_widget_show_all(dialog);
+
     gint response = gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
     return response == GTK_RESPONSE_YES;
@@ -813,10 +868,9 @@ delete_notes_with_confirm(OnLibrary *lw, GArray *ids)
     if (ids->len == 0)
         return;
     gchar *question = (ids->len == 1)
-        ? g_strdup("Delete this note? This cannot be undone.")
-        : g_strdup_printf("Delete these %u notes? This cannot be undone.",
-                          ids->len);
-    gboolean ok = confirm(lw, question);
+        ? g_strdup("Delete this note?")
+        : g_strdup_printf("Delete these %u notes?", ids->len);
+    gboolean ok = confirm(lw, question, "This cannot be undone.");
     g_free(question);
     if (!ok)
         return;
@@ -854,7 +908,8 @@ on_delete_folder(GtkWidget *widget, gpointer user_data)
     OnLibrary *lw = user_data;       /* owning library window               */
     if (lw->sel_kind != SB_KIND_FOLDER)
         return;
-    if (confirm(lw, "Delete this folder and everything inside it?")) {
+    if (confirm(lw, "Delete this folder and everything inside it?",
+                "This cannot be undone.")) {
         on_db_folder_delete(lw->app->db, lw->sel_id);
         lw->sel_kind = SB_KIND_ROOT;
         lw->sel_id   = 0;
@@ -900,6 +955,97 @@ on_open_settings(GtkWidget *widget, gpointer user_data)
 }
 
 /* ---------------------------------------------------------------------------
+ * on_backup_db() — File → Back Up Database…: write a consistent snapshot
+ * of the live database to a user-chosen file.
+ * ------------------------------------------------------------------------- */
+static void
+on_backup_db(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+
+    GtkWidget *chooser = gtk_file_chooser_dialog_new(
+        "Back Up Database", GTK_WINDOW(lw->window),
+        GTK_FILE_CHOOSER_ACTION_SAVE,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Back Up", GTK_RESPONSE_ACCEPT,
+        NULL);
+    gtk_file_chooser_set_do_overwrite_confirmation(
+        GTK_FILE_CHOOSER(chooser), TRUE);
+
+    /* Suggest a dated filename.                                            */
+    GDateTime *now = g_date_time_new_now_local();
+    gchar *suggestion = g_date_time_format(
+        now, "orange-notes-backup-%Y%m%d.db");
+    g_date_time_unref(now);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(chooser),
+                                      suggestion);
+    g_free(suggestion);
+
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT) {
+        gchar *path = gtk_file_chooser_get_filename(
+            GTK_FILE_CHOOSER(chooser));
+        gtk_widget_destroy(chooser);
+
+        gboolean ok = on_db_backup_to(lw->app->db, path);
+        GtkWidget *msg = gtk_message_dialog_new(
+            GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
+            ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            ok ? "Database backed up to\n%s" : "Backup to %s failed",
+            path);
+        gtk_dialog_run(GTK_DIALOG(msg));
+        gtk_widget_destroy(msg);
+        g_free(path);
+    } else {
+        gtk_widget_destroy(chooser);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * on_restore_db() — File → Restore Database…: replace the current
+ * database with a backup file (after confirmation; the replaced file is
+ * kept as notes.db.pre-restore).
+ * ------------------------------------------------------------------------- */
+static void
+on_restore_db(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+
+    GtkWidget *chooser = gtk_file_chooser_dialog_new(
+        "Restore Database", GTK_WINDOW(lw->window),
+        GTK_FILE_CHOOSER_ACTION_OPEN,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Restore", GTK_RESPONSE_ACCEPT,
+        NULL);
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "Database files (*.db)");
+    gtk_file_filter_add_pattern(filter, "*.db");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), filter);
+
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) != GTK_RESPONSE_ACCEPT) {
+        gtk_widget_destroy(chooser);
+        return;
+    }
+    gchar *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
+    gtk_widget_destroy(chooser);
+
+    if (confirm(lw, "Replace ALL current notes with this backup?",
+                "The current database will be kept as "
+                "notes.db.pre-restore.")) {
+        gboolean ok = on_app_restore_database(lw->app, path);
+        GtkWidget *msg = gtk_message_dialog_new(
+            GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
+            ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            ok ? "Database restored." :
+                 "Restore failed — the previous database is still in use.");
+        gtk_dialog_run(GTK_DIALOG(msg));
+        gtk_widget_destroy(msg);
+    }
+    g_free(path);
+}
+
+/* ---------------------------------------------------------------------------
  * on_about() — File → About: the standard about dialog with the app icon,
  * author, build date and a link to the BSD license.
  * ------------------------------------------------------------------------- */
@@ -929,10 +1075,25 @@ on_about(GtkWidget *widget, gpointer user_data)
         g_object_unref(logo);
     }
     gtk_about_dialog_set_authors(GTK_ABOUT_DIALOG(dialog), authors);
+
+    /* Database vitals: entry counts, location, on-disk size.               */
+    gint n_notes, n_folders, n_tags;     /* totals across the database      */
+    on_db_totals(lw->app->db, &n_notes, &n_folders, &n_tags);
+    GStatBuf st;                     /* for the database file size          */
+    gchar *size_str = (g_stat(lw->app->db->path, &st) == 0)
+                      ? g_format_size((guint64)st.st_size)
+                      : g_strdup("unknown");
+
     /* __DATE__/__TIME__ expand when this file is compiled — the closest
      * portable thing to a "last compiled" stamp.                           */
-    gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dialog),
-                                  "Compiled " __DATE__ " " __TIME__);
+    gchar *comments = g_strdup_printf(
+        "Compiled " __DATE__ " " __TIME__ "\n\n"
+        "Database: %s\n"
+        "%d notes in %d folders, %d tags \xe2\x80\x94 %s on disk",
+        lw->app->db->path, n_notes, n_folders, n_tags, size_str);
+    gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dialog), comments);
+    g_free(comments);
+    g_free(size_str);
     gtk_about_dialog_set_license_type(GTK_ABOUT_DIALOG(dialog),
                                       GTK_LICENSE_BSD);
     gtk_about_dialog_set_website(GTK_ABOUT_DIALOG(dialog),
@@ -1475,6 +1636,12 @@ build_menubar(OnLibrary *lw)
                   G_CALLBACK(on_export_markdown), lw);
     gtk_menu_shell_append(GTK_MENU_SHELL(file_menu),
                           gtk_separator_menu_item_new());
+    add_menu_item(file_menu, "_Back Up Database\xe2\x80\xa6",
+                  G_CALLBACK(on_backup_db), lw);
+    add_menu_item(file_menu, "Restore _Database\xe2\x80\xa6",
+                  G_CALLBACK(on_restore_db), lw);
+    gtk_menu_shell_append(GTK_MENU_SHELL(file_menu),
+                          gtk_separator_menu_item_new());
     add_menu_item(file_menu, "_Settings\xe2\x80\xa6",
                   G_CALLBACK(on_open_settings), lw);
     gtk_menu_shell_append(GTK_MENU_SHELL(file_menu),
@@ -1490,8 +1657,8 @@ build_menubar(OnLibrary *lw)
 
     /* View menu.  (Toolbar styles now live in File → Settings….)           */
     GtkWidget *view_menu = gtk_menu_new();
-    add_menu_item(view_menu, "as _List", G_CALLBACK(on_view_list), lw);
-    add_menu_item(view_menu, "as _Grid", G_CALLBACK(on_view_grid), lw);
+    add_menu_item(view_menu, "Notes as _List", G_CALLBACK(on_view_list), lw);
+    add_menu_item(view_menu, "Notes as _Grid", G_CALLBACK(on_view_grid), lw);
 
     GtkWidget *view_root = gtk_menu_item_new_with_mnemonic("_View");
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(view_root), view_menu);
@@ -1547,10 +1714,51 @@ build_action_bar(OnLibrary *lw)
     gtk_tool_item_set_expand(spacer, TRUE);
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar), spacer, -1);
 
-    add_tool_button(lw, toolbar, "view-list", "\xe2\x98\xb0", "List",
-                    "Show notes as a list", G_CALLBACK(on_view_list));
-    add_tool_button(lw, toolbar, "view-grid", "\xe2\x96\xa6", "Grid",
-                    "Show notes as a grid", G_CALLBACK(on_view_grid));
+    /* The app logo at the far right opens the About dialog.  Built by
+     * hand because the logo lives at the project root, not in icons/, and
+     * because the child must stay centered (see about_button_fit_style).
+     * (List/Grid switching lives in the View menu.)                        */
+    GtkToolItem *about_item = gtk_tool_item_new();
+    GtkWidget *about_btn = gtk_button_new();
+    gtk_button_set_relief(GTK_BUTTON(about_btn), GTK_RELIEF_NONE);
+    gtk_container_add(GTK_CONTAINER(about_item), about_btn);
+    {
+        gchar *base = g_path_get_dirname(lw->app->icons_dir);
+        gchar *logo_path = g_build_filename(base, "orange.png", NULL);
+        gint sf = gtk_widget_get_scale_factor(lw->window);
+        GdkPixbuf *pix = gdk_pixbuf_new_from_file_at_size(
+            logo_path, 24 * sf, 24 * sf, NULL);
+        GtkWidget *logo;             /* the icon-mode child                 */
+        if (pix != NULL) {
+            cairo_surface_t *surface =
+                gdk_cairo_surface_create_from_pixbuf(pix, sf, NULL);
+            logo = gtk_image_new_from_surface(surface);
+            cairo_surface_destroy(surface);
+            g_object_unref(pix);
+        } else {
+            logo = gtk_label_new("\xf0\x9f\x8d\x8a");    /* 🍊 fallback     */
+        }
+        GtkWidget *label = gtk_label_new("About");   /* text-mode child     */
+
+        /* Keep owning refs so removal from the button never frees them.    */
+        g_object_set_data_full(G_OBJECT(about_item), "on-logo",
+                               g_object_ref_sink(logo), g_object_unref);
+        g_object_set_data_full(G_OBJECT(about_item), "on-label",
+                               g_object_ref_sink(label), g_object_unref);
+        g_free(logo_path);
+        g_free(base);
+    }
+    gtk_tool_item_set_tooltip_text(about_item, "About Orange Notes");
+    g_signal_connect(about_btn, "clicked", G_CALLBACK(on_about), lw);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), about_item, -1);
+
+    /* Logo only, except in text-only mode — applied now and re-applied on
+     * every style switch.                                                  */
+    about_button_fit_style(about_item,
+                           lw->app->toolbar_style[ON_TOOLBAR_LIBRARY]);
+    g_signal_connect(toolbar, "style-changed",
+                     G_CALLBACK(on_action_toolbar_style_changed),
+                     about_item);
 
     on_app_register_toolbar(lw->app, ON_TOOLBAR_LIBRARY, toolbar);
     return toolbar;
@@ -1571,20 +1779,13 @@ build_sidebar_toolbar(OnLibrary *lw)
     add_tool_button(lw, toolbar, "list-add", "+\xf0\x9f\x93\x81",
                     "New Folder", "Create a folder inside the selection",
                     G_CALLBACK(on_new_folder));
-    add_tool_button(lw, toolbar, "document-properties", "\xe2\x9c\x8e",
-                    "Rename", "Rename the selected folder",
-                    G_CALLBACK(on_rename_folder));
     add_tool_button(lw, toolbar, "list-remove", "\xe2\x9c\x95",
-                    "Delete", "Delete the selected folder",
+                    "Delete Folder", "Delete the selected folder",
                     G_CALLBACK(on_delete_folder));
+    /* Rename lives in the folder's right-click menu only.                  */
 
-    /* Expanding invisible separator keeps Search stuck to the right,
-     * visually apart from the three folder actions.                        */
-    GtkToolItem *spacer = gtk_separator_tool_item_new();
-    gtk_separator_tool_item_set_draw(GTK_SEPARATOR_TOOL_ITEM(spacer),
-                                     FALSE);
-    gtk_tool_item_set_expand(spacer, TRUE);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), spacer, -1);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
+                       gtk_separator_tool_item_new(), -1);
 
     add_tool_button(lw, toolbar, "edit-find", "\xf0\x9f\x94\x8d",
                     "Search", "Search notes",
@@ -1592,6 +1793,91 @@ build_sidebar_toolbar(OnLibrary *lw)
 
     on_app_register_toolbar(lw->app, ON_TOOLBAR_LIBRARY, toolbar);
     return toolbar;
+}
+
+/* ---------------------------------------------------------------------------
+ * sidebar_min_width_update() — make the sidebar at least as wide as its
+ * toolbar's natural size plus a little slack, so every button stays
+ * visible in any toolbar style (including icons-above-text).
+ *   toolbar — the sidebar toolbar.
+ *   box     — the sidebar container whose minimum width is being set.
+ * ------------------------------------------------------------------------- */
+static void
+sidebar_min_width_update(GtkWidget *toolbar, GtkWidget *box)
+{
+    gint min_w, nat_w;               /* the toolbar's width requests        */
+    gtk_widget_get_preferred_width(toolbar, &min_w, &nat_w);
+
+    /* Only write on change — this also runs from size-allocate, where an
+     * unconditional set_size_request would re-trigger allocation forever.  */
+    gint cur_w, cur_h;               /* the box's current size request      */
+    gtk_widget_get_size_request(box, &cur_w, &cur_h);
+    if (cur_w != nat_w + 5)
+        gtk_widget_set_size_request(box, nat_w + 5, -1);
+}
+
+/* on_sidebar_toolbar_style_changed() — re-fit the sidebar width whenever
+ * the toolbar switches between text/icons/both.                             */
+static void
+on_sidebar_toolbar_style_changed(GtkToolbar *toolbar,
+                                 GtkToolbarStyle style, gpointer user_data)
+{
+    (void)style;
+    sidebar_min_width_update(GTK_WIDGET(toolbar),
+                             GTK_WIDGET(user_data));
+}
+
+/* on_sidebar_toolbar_size_allocate() — the toolbar's metrics are only
+ * final once it is realized and allocated; before that, the preferred
+ * width measured at construction comes out too small and the buttons
+ * start truncated.  Re-fitting here keeps the minimum correct from the
+ * first frame on (the change guard above prevents allocate loops).          */
+static void
+on_sidebar_toolbar_size_allocate(GtkWidget *toolbar,
+                                 GdkRectangle *allocation,
+                                 gpointer user_data)
+{
+    (void)allocation;
+    sidebar_min_width_update(toolbar, GTK_WIDGET(user_data));
+}
+
+/* ---------------------------------------------------------------------------
+ * about_button_fit_style() — the About button shows the centered logo in
+ * every toolbar style; the "About" text appears ONLY in text-only mode
+ * (where there would otherwise be nothing to click).  The item is a plain
+ * GtkToolItem wrapping a GtkButton whose single child gets swapped — a
+ * GtkToolButton would reserve empty label space under the icon in
+ * icons-above-text mode.  The logo and label widgets live as object data
+ * ("on-logo"/"on-label", owning refs) so they survive being unparented.
+ *   item  — the About tool item.
+ *   style — the toolbar style being applied.
+ * ------------------------------------------------------------------------- */
+static void
+about_button_fit_style(GtkToolItem *item, GtkToolbarStyle style)
+{
+    GtkWidget *btn   = gtk_bin_get_child(GTK_BIN(item));
+    GtkWidget *logo  = g_object_get_data(G_OBJECT(item), "on-logo");
+    GtkWidget *label = g_object_get_data(G_OBJECT(item), "on-label");
+
+    GtkWidget *want =                /* the child this style calls for      */
+        (style == GTK_TOOLBAR_TEXT) ? label : logo;
+    GtkWidget *cur = gtk_bin_get_child(GTK_BIN(btn));
+    if (cur == want)
+        return;
+    if (cur != NULL)
+        gtk_container_remove(GTK_CONTAINER(btn), cur);
+    gtk_container_add(GTK_CONTAINER(btn), want);
+    gtk_widget_show(want);
+}
+
+/* on_action_toolbar_style_changed() — keep the About button's label rule
+ * applied when the library toolbar style changes.                           */
+static void
+on_action_toolbar_style_changed(GtkToolbar *toolbar,
+                                GtkToolbarStyle style, gpointer user_data)
+{
+    (void)toolbar;
+    about_button_fit_style(GTK_TOOL_ITEM(user_data), style);
 }
 
 /* library_free() — destructor for the OnLibrary attached to the window.     */
@@ -1671,19 +1957,28 @@ on_library_window_create(OnApp *app)
                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_overlay_scrolling(
         GTK_SCROLLED_WINDOW(sidebar_scroll), FALSE);
-    gtk_widget_set_size_request(sidebar_scroll, 220, -1);
     gtk_container_add(GTK_CONTAINER(sidebar_scroll),
                       GTK_WIDGET(lw->sidebar));
 
-    /* Sidebar column: its toolbar on top, the tree below.                  */
+    /* Sidebar column: its toolbar on top, the tree below.  The minimum
+     * width always fits the toolbar's buttons (+5px), tracked across
+     * toolbar-style changes.                                               */
+    GtkWidget *sidebar_toolbar = build_sidebar_toolbar(lw);
     GtkWidget *sidebar_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_pack_start(GTK_BOX(sidebar_box), build_sidebar_toolbar(lw),
+    gtk_box_pack_start(GTK_BOX(sidebar_box), sidebar_toolbar,
                        FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(sidebar_box),
                        gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
                        FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(sidebar_box), sidebar_scroll,
                        TRUE, TRUE, 0);
+    sidebar_min_width_update(sidebar_toolbar, sidebar_box);
+    g_signal_connect(sidebar_toolbar, "style-changed",
+                     G_CALLBACK(on_sidebar_toolbar_style_changed),
+                     sidebar_box);
+    g_signal_connect_after(sidebar_toolbar, "size-allocate",
+                           G_CALLBACK(on_sidebar_toolbar_size_allocate),
+                           sidebar_box);
 
     /* --- notes list view ---------------------------------------------------*/
     lw->notes_list = GTK_TREE_VIEW(
@@ -1700,6 +1995,9 @@ on_library_window_create(OnApp *app)
         gtk_tree_view_append_column(lw->notes_list, c1);
 
         GtkCellRenderer *r2 = gtk_cell_renderer_text_new();
+        /* Horizontal padding so the timestamps don't hug the column
+         * edges.                                                           */
+        g_object_set(r2, "xpad", 10, NULL);
         GtkTreeViewColumn *c2 =
             gtk_tree_view_column_new_with_attributes("Modified", r2,
                                                      "text", NL_MODIFIED,

@@ -105,22 +105,25 @@ bind_id_or_null(sqlite3_stmt *stmt, int idx, gint64 id)
  * lifecycle
  * ========================================================================= */
 
+gchar *
+on_db_default_path(void)
+{
+    gchar *dir = g_build_filename(g_get_user_data_dir(),
+                                  "orange-notes", NULL);
+    g_mkdir_with_parents(dir, 0700);
+    gchar *path = g_build_filename(dir, "notes.db", NULL);
+    g_free(dir);
+    return path;
+}
+
 OnDatabase *
 on_db_open(const gchar *path_override)
 {
     /* Resolve the database path: explicit override, or the per-user data
-     * directory (~/.local/share/orange-notes/notes.db on Linux,
-     * ~/Library/Application Support/... on macOS).                          */
-    gchar *path;                         /* final absolute db path          */
-    if (path_override != NULL) {
-        path = g_strdup(path_override);
-    } else {
-        gchar *dir = g_build_filename(g_get_user_data_dir(),
-                                      "orange-notes", NULL);
-        g_mkdir_with_parents(dir, 0700);
-        path = g_build_filename(dir, "notes.db", NULL);
-        g_free(dir);
-    }
+     * directory default.                                                    */
+    gchar *path = (path_override != NULL)   /* final absolute db path      */
+                  ? g_strdup(path_override)
+                  : on_db_default_path();
 
     OnDatabase *db = g_new0(OnDatabase, 1);
     db->path = path;
@@ -136,6 +139,33 @@ on_db_open(const gchar *path_override)
         return NULL;
     }
     return db;
+}
+
+gboolean
+on_db_backup_to(OnDatabase *db, const gchar *dest_path)
+{
+    sqlite3 *dest = NULL;            /* the backup file's connection        */
+    if (sqlite3_open(dest_path, &dest) != SQLITE_OK) {
+        g_warning("db: backup: cannot open %s: %s",
+                  dest_path, sqlite3_errmsg(dest));
+        sqlite3_close(dest);
+        return FALSE;
+    }
+
+    /* The online backup API snapshots a live database safely.              */
+    sqlite3_backup *backup =
+        sqlite3_backup_init(dest, "main", db->handle, "main");
+    gboolean ok = FALSE;             /* overall success                     */
+    if (backup != NULL) {
+        sqlite3_backup_step(backup, -1);     /* copy everything             */
+        sqlite3_backup_finish(backup);
+        ok = sqlite3_errcode(dest) == SQLITE_OK;
+    }
+    if (!ok)
+        g_warning("db: backup to %s failed: %s",
+                  dest_path, sqlite3_errmsg(dest));
+    sqlite3_close(dest);
+    return ok;
 }
 
 void
@@ -654,6 +684,33 @@ on_db_note_count_for_tag(OnDatabase *db, gint64 tag_id)
         count = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     return count;
+}
+
+/* count_all() — COUNT(*) of one table (by trusted internal name).           */
+static gint
+count_all(OnDatabase *db, const gchar *table)
+{
+    gchar *sql = g_strdup_printf("SELECT COUNT(*) FROM %s", table);
+    sqlite3_stmt *stmt = prepare(db, sql);
+    g_free(sql);
+    if (stmt == NULL)
+        return 0;
+    gint count = 0;                  /* the table's row count               */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+void
+on_db_totals(OnDatabase *db, gint *notes, gint *folders, gint *tags)
+{
+    if (notes != NULL)
+        *notes = count_all(db, "notes");
+    if (folders != NULL)
+        *folders = count_all(db, "folders");
+    if (tags != NULL)
+        *tags = count_all(db, "tags");
 }
 
 /* =========================================================================

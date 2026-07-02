@@ -53,8 +53,14 @@ SQLite. Notes are rich text (WYSIWYG) with inline images, code blocks and
 
 Everything lives in a single SQLite database:
 
-- `~/.local/share/orange-notes/notes.db` (macOS and Linux — GLib's
-  user-data directory)
+- `~/.local/share/orange-notes/notes.db` by default (GLib's user-data
+  directory). *File → Settings… → Database* can point the app at a custom
+  folder instead — e.g. a shared drive used by two machines (never open
+  it from both at once). The choice is stored in
+  `~/.config/orange-notes/config.ini`.
+- *File → Back Up Database…* snapshots the live database to a file;
+  *File → Restore Database…* replaces the current data with a backup
+  (keeping the old file as `notes.db.pre-restore`).
 
 Note content is stored as a compact binary blob ("ONBF") holding styled
 text runs and PNG image records — see `src/serialize.h` for the format.

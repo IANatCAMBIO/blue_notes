@@ -39,6 +39,11 @@
  *   code_copy_buttons — whether code blocks show their floating copy
  *                    button (File → Settings…); persisted as the
  *                    "code_copy_button" setting.
+ *   db_dir         — custom directory holding notes.db (owned string), or
+ *                    NULL for the default location.  Persisted in the
+ *                    config FILE (~/.config/orange-notes/config.ini), not
+ *                    the database — the database's own location cannot
+ *                    live inside it.
  * ------------------------------------------------------------------------- */
 
 /* Which family a toolbar belongs to — each has its own style setting.       */
@@ -58,6 +63,7 @@ typedef struct OnApp {
     GPtrArray       *toolbars[ON_TOOLBAR_N_KINDS];
     gchar           *icons_dir;
     gboolean         code_copy_buttons;
+    gchar           *db_dir;
 } OnApp;
 
 /* ---------------------------------------------------------------------------
@@ -127,5 +133,41 @@ void on_app_set_toolbar_style(OnApp *app, OnToolbarKind kind,
  * app->toolbar_style[] (defaulting to icons-above-text when unset).
  * ------------------------------------------------------------------------- */
 void on_app_load_toolbar_styles(OnApp *app);
+
+/* ---------------------------------------------------------------------------
+ * on_app_config_load_db_dir() — read the custom database directory from
+ * the config file. Returns a new string (g_free() it), or NULL when the
+ * default location is in use.
+ * ------------------------------------------------------------------------- */
+gchar *on_app_config_load_db_dir(void);
+
+/* ---------------------------------------------------------------------------
+ * on_app_close_all_editors() — destroy every open editor window (each
+ * flushes its final autosave on destroy). Used before switching or
+ * restoring the database.
+ * ------------------------------------------------------------------------- */
+void on_app_close_all_editors(OnApp *app);
+
+/* ---------------------------------------------------------------------------
+ * on_app_switch_database() — move the app onto a different database
+ * location, live: closes all editors, closes the current database, opens
+ * notes.db inside `new_dir` (NULL = the default location), and persists
+ * the choice in the config file.  If the target has no notes.db yet, the
+ * current database file is copied there first, so notes follow the move.
+ * On failure the old database is reopened.
+ *   app     — the application context.
+ *   new_dir — directory to hold notes.db, or NULL for the default.
+ * Returns TRUE if the switch happened.
+ * ------------------------------------------------------------------------- */
+gboolean on_app_switch_database(OnApp *app, const gchar *new_dir);
+
+/* ---------------------------------------------------------------------------
+ * on_app_restore_database() — replace the current database with a backup
+ * file: closes all editors, snapshots the current file next to itself as
+ * "notes.db.pre-restore", copies `backup_path` over the active location,
+ * and reopens.  Returns TRUE on success (on failure the old file is
+ * still in place and reopened).
+ * ------------------------------------------------------------------------- */
+gboolean on_app_restore_database(OnApp *app, const gchar *backup_path);
 
 #endif /* ORANGE_APP_H */

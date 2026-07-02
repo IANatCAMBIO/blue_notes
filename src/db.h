@@ -85,11 +85,19 @@ typedef struct {
 
 /* --------------------------- lifecycle ---------------------------------- */
 
+/* The default database path (~/.local/share/orange-notes/notes.db),
+ * creating the directory if needed. Returns a new string; g_free() it.     */
+gchar *on_db_default_path(void);
+
 /* Open (creating if necessary) the notes database.
  *   path_override — explicit db path, or NULL to use the default location
  *                   under g_get_user_data_dir().
  * Returns a new OnDatabase*, or NULL on failure (error is logged).          */
 OnDatabase *on_db_open(const gchar *path_override);
+
+/* Write a consistent snapshot of the (possibly in-use) database to
+ * `dest_path` using SQLite's online backup API. Returns TRUE on success.   */
+gboolean on_db_backup_to(OnDatabase *db, const gchar *dest_path);
 
 /* Close the database and free the handle.  Safe to call with NULL.         */
 void on_db_close(OnDatabase *db);
@@ -206,6 +214,9 @@ gint on_db_note_count_for_folder(OnDatabase *db, gint64 folder_id);
 
 /* Number of notes labeled with tag `tag_id`.                               */
 gint on_db_note_count_for_tag(OnDatabase *db, gint64 tag_id);
+
+/* Total row counts across the whole database (any out-param may be NULL). */
+void on_db_totals(OnDatabase *db, gint *notes, gint *folders, gint *tags);
 
 /* ---------------------------- settings ---------------------------------- */
 

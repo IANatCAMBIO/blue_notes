@@ -55,6 +55,17 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 - Settings table keys: `toolbar_style_library`, `toolbar_style_editor`
   (`text|icons|both`, default both), `icon_theme` (legacy, unused),
   `code_copy_button` (`1|0`), `native_menubar` (`1|0`).
+- **Custom DB location** (shared-folder support) lives in the CONFIG FILE
+  `~/.config/orange-notes/config.ini` (`[orange-notes] db_dir=`), never in
+  the DB. `on_app_switch_database()` switches live: closes all editors
+  (flushing saves), swaps the handle, copies the current file to the
+  target if no notes.db exists there, persists, refreshes the library.
+  Failure reverts to the old DB. main.c falls back to the default
+  location if the configured one is unreachable at startup.
+- **Backup/Restore** (File menu): `on_db_backup_to()` uses SQLite's
+  online backup API on the live DB; `on_app_restore_database()` closes
+  editors, keeps the old file as `notes.db.pre-restore`, copies the
+  backup in, reopens (rolls back if the file isn't a usable DB).
 
 ## Hard-won GTK3 quirks (do not re-learn these)
 

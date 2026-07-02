@@ -224,6 +224,165 @@ on_app_set_toolbar_style(OnApp *app, OnToolbarKind kind,
     on_db_setting_set(app->db, STYLE_SETTING_KEYS[kind], value);
 }
 
+/* ---------------------------------------------------------------------------
+ * config_file_path() — "~/.config/orange-notes/config.ini", creating the
+ * directory. Returns a new string; g_free() it.
+ * ------------------------------------------------------------------------- */
+static gchar *
+config_file_path(void)
+{
+    gchar *dir = g_build_filename(g_get_user_config_dir(),
+                                  "orange-notes", NULL);
+    g_mkdir_with_parents(dir, 0700);
+    gchar *path = g_build_filename(dir, "config.ini", NULL);
+    g_free(dir);
+    return path;
+}
+
+gchar *
+on_app_config_load_db_dir(void)
+{
+    gchar *path = config_file_path();
+    GKeyFile *kf = g_key_file_new();
+    gchar *dir = NULL;               /* result, NULL when unset             */
+    if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL))
+        dir = g_key_file_get_string(kf, "orange-notes", "db_dir", NULL);
+    g_key_file_free(kf);
+    g_free(path);
+    if (dir != NULL && *dir == '\0') {
+        g_free(dir);
+        dir = NULL;
+    }
+    return dir;
+}
+
+/* config_save_db_dir() — persist (or clear, with NULL) the custom db dir.   */
+static void
+config_save_db_dir(const gchar *dir)
+{
+    gchar *path = config_file_path();
+    GKeyFile *kf = g_key_file_new();
+    g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL);
+    if (dir != NULL)
+        g_key_file_set_string(kf, "orange-notes", "db_dir", dir);
+    else
+        g_key_file_remove_key(kf, "orange-notes", "db_dir", NULL);
+    GError *err = NULL;
+    if (!g_key_file_save_to_file(kf, path, &err)) {
+        g_warning("config: cannot save %s: %s", path, err->message);
+        g_clear_error(&err);
+    }
+    g_key_file_free(kf);
+    g_free(path);
+}
+
+void
+on_app_close_all_editors(OnApp *app)
+{
+    /* Destroying an editor removes it from the table, so copy the window
+     * list first.                                                          */
+    GList *windows = g_hash_table_get_values(app->editors);
+    for (GList *l = windows; l != NULL; l = l->next)
+        gtk_widget_destroy(GTK_WIDGET(l->data));
+    g_list_free(windows);
+}
+
+/* ---------------------------------------------------------------------------
+ * copy_file() — overwrite-copy `src` to `dest` via GIO.
+ * Returns TRUE on success (warning logged otherwise).
+ * ------------------------------------------------------------------------- */
+static gboolean
+copy_file(const gchar *src, const gchar *dest)
+{
+    GFile *fsrc  = g_file_new_for_path(src);
+    GFile *fdest = g_file_new_for_path(dest);
+    GError *err = NULL;
+    gboolean ok = g_file_copy(fsrc, fdest, G_FILE_COPY_OVERWRITE,
+                              NULL, NULL, NULL, &err);
+    if (!ok) {
+        g_warning("config: copy %s -> %s failed: %s", src, dest,
+                  err->message);
+        g_clear_error(&err);
+    }
+    g_object_unref(fsrc);
+    g_object_unref(fdest);
+    return ok;
+}
+
+gboolean
+on_app_switch_database(OnApp *app, const gchar *new_dir)
+{
+    /* Flush and detach everything that touches the current database.       */
+    on_app_close_all_editors(app);
+
+    gchar *old_path = g_strdup(app->db->path);   /* current db file         */
+    on_db_close(app->db);
+    app->db = NULL;
+
+    /* Resolve the target file inside the requested directory.              */
+    gchar *target;                   /* path of notes.db at the new home    */
+    if (new_dir != NULL) {
+        g_mkdir_with_parents(new_dir, 0755);
+        target = g_build_filename(new_dir, "notes.db", NULL);
+    } else {
+        target = on_db_default_path();
+    }
+
+    /* First move to an empty location: bring the notes along.              */
+    if (!g_file_test(target, G_FILE_TEST_EXISTS) &&
+        g_file_test(old_path, G_FILE_TEST_EXISTS))
+        copy_file(old_path, target);
+
+    app->db = on_db_open(target);
+    gboolean ok = app->db != NULL;   /* did the new location work?          */
+    if (!ok) {
+        /* Fall back to the previous database so the app stays usable.      */
+        g_warning("config: cannot open %s; reverting to %s",
+                  target, old_path);
+        app->db = on_db_open(old_path);
+    } else {
+        g_free(app->db_dir);
+        app->db_dir = g_strdup(new_dir);
+        config_save_db_dir(new_dir);
+    }
+
+    g_free(target);
+    g_free(old_path);
+    if (app->notify_notes_changed != NULL)
+        app->notify_notes_changed(app);
+    return ok;
+}
+
+gboolean
+on_app_restore_database(OnApp *app, const gchar *backup_path)
+{
+    on_app_close_all_editors(app);
+
+    gchar *db_path = g_strdup(app->db->path);    /* active db file          */
+    on_db_close(app->db);
+    app->db = NULL;
+
+    /* Keep an escape hatch next to the database being replaced.            */
+    gchar *safety = g_strdup_printf("%s.pre-restore", db_path);
+    if (g_file_test(db_path, G_FILE_TEST_EXISTS))
+        copy_file(db_path, safety);
+
+    gboolean ok = copy_file(backup_path, db_path);
+    app->db = on_db_open(db_path);
+    if (app->db == NULL && g_file_test(safety, G_FILE_TEST_EXISTS)) {
+        /* The backup file was not a usable database: roll back.            */
+        copy_file(safety, db_path);
+        app->db = on_db_open(db_path);
+        ok = FALSE;
+    }
+
+    g_free(safety);
+    g_free(db_path);
+    if (app->notify_notes_changed != NULL)
+        app->notify_notes_changed(app);
+    return ok && app->db != NULL;
+}
+
 void
 on_app_load_toolbar_styles(OnApp *app)
 {

@@ -68,8 +68,22 @@ main(int argc, char *argv[])
     g_setenv("GTK_OVERLAY_SCROLLING", "0", TRUE);
 
     /* Open (or create) the notes database first — without it there is
-     * nothing to show.                                                     */
-    OnDatabase *db = on_db_open(NULL);
+     * nothing to show.  A custom location (e.g. a shared folder) may be
+     * configured in the config file; fall back to the default if that
+     * location has become unreachable.                                     */
+    gchar *db_dir = on_app_config_load_db_dir();
+    gchar *db_path = (db_dir != NULL)
+                     ? g_build_filename(db_dir, "notes.db", NULL)
+                     : NULL;
+    OnDatabase *db = on_db_open(db_path);
+    if (db == NULL && db_path != NULL) {
+        g_printerr("orange_notes: cannot open %s; using the default "
+                   "database location\n", db_path);
+        g_free(db_dir);
+        db_dir = NULL;
+        db = on_db_open(NULL);
+    }
+    g_free(db_path);
     if (db == NULL) {
         g_printerr("orange_notes: could not open the notes database\n");
         return 1;
@@ -89,7 +103,9 @@ main(int argc, char *argv[])
         .toolbar_style        = { GTK_TOOLBAR_BOTH, GTK_TOOLBAR_BOTH },
         .toolbars             = { NULL, NULL },
         .icons_dir            = NULL,
+        .db_dir               = NULL,
     };
+    app.db_dir = db_dir;             /* ownership transferred               */
     for (gint k = 0; k < ON_TOOLBAR_N_KINDS; k++)
         app.toolbars[k] = g_ptr_array_new();
     on_app_load_toolbar_styles(&app);
@@ -114,6 +130,7 @@ main(int argc, char *argv[])
     for (gint k = 0; k < ON_TOOLBAR_N_KINDS; k++)
         g_ptr_array_free(app.toolbars[k], TRUE);
     g_free(app.icons_dir);
+    g_free(app.db_dir);
     on_db_close(app.db);
     return status;
 }
