@@ -33,9 +33,18 @@ cli_open_db(void)
                   ? g_build_filename(db_dir, "notes.db", NULL)
                   : NULL;
     OnDatabase *db = on_db_open(path);
-    if (db == NULL)
+    if (db == NULL) {
         fprintf(stderr, "error: cannot open database%s%s\n",
                 path != NULL ? " at " : "", path != NULL ? path : "");
+    } else {
+        /* The GUI marks a shared database while it has it open; CLI
+         * commands still run, but the user should know about the risk.     */
+        gchar *holder = on_db_setting_get(db, "in_use");
+        if (holder != NULL && *holder != '\0')
+            fprintf(stderr, "warning: database is in use by %s — "
+                            "concurrent changes may conflict\n", holder);
+        g_free(holder);
+    }
     g_free(path);
     g_free(db_dir);
     return db;

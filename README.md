@@ -102,6 +102,12 @@ Everything lives in a single SQLite database:
 - *File → Back Up Database…* snapshots the live database to a file;
   *File → Restore Database…* replaces the current data with a backup
   (keeping the old file as `notes.db.pre-restore`).
+- **Single-instance failsafe** — a running instance marks the database
+  in use (`user@host`, pid, start time). A second instance opening the
+  same database is offered **Open Read-Only** (writes are refused at the
+  SQLite level) or **Override Lock** (for stale markers left by a
+  crash). The marker is released on quit, window close, and SIGTERM;
+  CLI commands warn when the database is marked in use.
 
 Note content is stored as a compact binary blob ("ONBF", currently
 version 5) holding styled text runs, PNG image records, tables and task

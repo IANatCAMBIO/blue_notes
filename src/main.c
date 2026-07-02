@@ -8,6 +8,7 @@
  * =========================================================================== */
 
 #include <gtk/gtk.h>
+#include <glib-unix.h>
 
 #include "app.h"
 #include "cli.h"
@@ -50,6 +51,13 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
                                        theme_dir);
     g_free(theme_dir);
 
+    /* Shared-database failsafe: claim the in-use marker, or let the user
+     * choose read-only/override when another instance holds it.            */
+    if (!on_app_db_acquire(app, NULL)) {
+        g_application_quit(G_APPLICATION(app->gtk_app));
+        return;
+    }
+
     on_library_window_create(app);
 
 #ifdef HAVE_GTKOSX
@@ -61,6 +69,24 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     g_free(native);
     gtkosx_application_ready(gtkosx_application_get());
 #endif
+}
+
+/* ---------------------------------------------------------------------------
+ * on_sigterm() — terminate gracefully on SIGTERM (pkill, logout, system
+ * shutdown): destroying every window flushes editor autosaves and lets
+ * the main loop end, so the database's in-use marker is released like a
+ * normal quit instead of being stranded like a crash.
+ * ------------------------------------------------------------------------- */
+static gboolean
+on_sigterm(gpointer user_data)
+{
+    OnApp *app = user_data;          /* shared application context          */
+    GList *windows =                 /* copy: destroying mutates the list   */
+        g_list_copy(gtk_application_get_windows(app->gtk_app));
+    for (GList *l = windows; l != NULL; l = l->next)
+        gtk_widget_destroy(GTK_WIDGET(l->data));
+    g_list_free(windows);
+    return G_SOURCE_REMOVE;
 }
 
 /* ---------------------------------------------------------------------------
@@ -119,6 +145,8 @@ main(int argc, char *argv[])
         .toolbars             = { NULL, NULL },
         .icons_dir            = NULL,
         .db_dir               = NULL,
+        .read_only            = FALSE,
+        .lock_token           = NULL,
     };
     app.db_dir = db_dir;             /* ownership transferred               */
     for (gint k = 0; k < ON_TOOLBAR_N_KINDS; k++)
@@ -140,6 +168,7 @@ main(int argc, char *argv[])
                                       G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app.gtk_app, "activate",
                      G_CALLBACK(on_activate), &app);
+    g_unix_signal_add(SIGTERM, on_sigterm, &app);
 
     int status = g_application_run(G_APPLICATION(app.gtk_app), argc, argv);
 
@@ -149,6 +178,9 @@ main(int argc, char *argv[])
     g_hash_table_destroy(app.editors);
     for (gint k = 0; k < ON_TOOLBAR_N_KINDS; k++)
         g_ptr_array_free(app.toolbars[k], TRUE);
+    /* The in-use marker must never outlive a clean exit.                   */
+    on_app_db_release(&app);
+
     g_free(app.icons_dir);
     g_free(app.db_dir);
     on_db_close(app.db);

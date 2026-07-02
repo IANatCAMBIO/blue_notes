@@ -74,6 +74,14 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   online backup API on the live DB; `on_app_restore_database()` closes
   editors, keeps the old file as `notes.db.pre-restore`, copies the
   backup in, reopens (rolls back if the file isn't a usable DB).
+- **Instance lock**: settings key `in_use` = `user@host (pid N, since
+  ...)`. `on_app_db_acquire()` claims it or shows the read-only/override
+  dialog; `on_app_db_release()` clears it ONLY if it still holds our
+  token. Read-only = `app->read_only` + `PRAGMA query_only=ON`
+  (engine-enforced) + non-editable editors + title suffix. Acquire runs
+  at activate, after db switch, and reclaim after restore; release at
+  exit, before switch, and via the SIGTERM handler in main.c (so pkill
+  is a clean quit, not a fake crash). Restore is blocked in read-only.
 
 ## Hard-won GTK3 quirks (do not re-learn these)
 
@@ -131,6 +139,22 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
     edges). Linux emoji fonts fit their advance — the pass compiles to a
     no-op there. The only other platform-specific code is the
     HAVE_GTKOSX menubar integration; everything else is portable GTK3.
+
+## Performance decisions
+
+- Grid thumbnails render ONLY while grid view is visible (`want_thumbs`
+  in refresh_notes; on_view_grid refreshes) — the thumb cache keys on
+  updated_at, so without the gate the edited note re-rendered on every
+  autosave.
+- Sidebar counts come from two GROUP BY maps (`on_db_note_count_map` /
+  `on_db_tag_count_map`), not per-row COUNTs — refresh_sidebar runs per
+  autosave and per-query latency hurts on shared/network DBs.
+- code_buttons_rebuild has a fast path: when block-start offsets match
+  the existing buttons' marks, it only repositions (no widget churn per
+  keystroke).
+- Deliberately NOT done: WAL journal or synchronous=NORMAL pragmas —
+  unsafe/risky on network filesystems, which the shared-DB feature
+  targets.
 
 ## Environment gotchas
 

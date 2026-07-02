@@ -45,7 +45,8 @@ static const char *SCHEMA_SQL =
     "  value TEXT NOT NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id);"
-    "CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);";
+    "CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);"
+    "CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);";
 
 /* ---------------------------------------------------------------------------
  * exec_simple() — run a parameterless SQL string, logging any error.
@@ -790,6 +791,44 @@ on_db_totals(OnDatabase *db, gint *notes, gint *folders, gint *tags)
         *tags = count_all(db, "tags");
 }
 
+/* ---------------------------------------------------------------------------
+ * count_map_from_query() — run a two-column (id, count) query into a
+ * gint64* → GINT_TO_POINTER(count) hash table.
+ * ------------------------------------------------------------------------- */
+static GHashTable *
+count_map_from_query(OnDatabase *db, const gchar *sql)
+{
+    GHashTable *map = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                            g_free, NULL);
+    sqlite3_stmt *stmt = prepare(db, sql);
+    if (stmt != NULL) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            gint64 *key = g_new(gint64, 1);
+            *key = sqlite3_column_int64(stmt, 0);
+            g_hash_table_insert(map, key,
+                                GINT_TO_POINTER(
+                                    sqlite3_column_int(stmt, 1)));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return map;
+}
+
+GHashTable *
+on_db_note_count_map(OnDatabase *db)
+{
+    return count_map_from_query(db,
+        "SELECT COALESCE(folder_id,0), COUNT(*) FROM notes "
+        "GROUP BY COALESCE(folder_id,0)");
+}
+
+GHashTable *
+on_db_tag_count_map(OnDatabase *db)
+{
+    return count_map_from_query(db,
+        "SELECT tag_id, COUNT(*) FROM note_tags GROUP BY tag_id");
+}
+
 /* =========================================================================
  * settings
  * ========================================================================= */
@@ -818,6 +857,18 @@ on_db_setting_set(OnDatabase *db, const gchar *key, const gchar *value)
         return FALSE;
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, value, -1, SQLITE_TRANSIENT);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+gboolean
+on_db_setting_delete(OnDatabase *db, const gchar *key)
+{
+    sqlite3_stmt *stmt = prepare(db, "DELETE FROM settings WHERE key=?");
+    if (stmt == NULL)
+        return FALSE;
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
     gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
     return ok;

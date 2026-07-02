@@ -111,6 +111,7 @@ typedef struct {
 
     GSList         *code_buttons;
     guint           code_btn_idle;
+    guint           scroll_idle;
     gint            popup_x;
     gint            popup_y;
 
@@ -765,6 +766,54 @@ code_buttons_update_positions(OnEditor *ed)
 static void
 code_buttons_rebuild(OnEditor *ed)
 {
+    GtkTextTag *tag = lookup_tag(ed->buffer, ON_TAGNAME_CODEBLOCK);
+
+    /* Fast path: this runs after EVERY buffer change, but the set of
+     * blocks rarely changes while typing.  When the current buttons'
+     * marks already sit exactly on the block starts, just reposition —
+     * no widget churn.                                                     */
+    if (tag != NULL && ed->app->code_copy_buttons) {
+        GArray *starts =             /* block start offsets, ascending      */
+            g_array_new(FALSE, FALSE, sizeof(gint));
+        GtkTextIter scan;
+        gtk_text_buffer_get_start_iter(ed->buffer, &scan);
+        while (TRUE) {
+            if (!gtk_text_iter_starts_tag(&scan, tag)) {
+                if (!gtk_text_iter_forward_to_tag_toggle(&scan, tag))
+                    break;
+                if (!gtk_text_iter_starts_tag(&scan, tag))
+                    continue;
+            }
+            gint off = gtk_text_iter_get_offset(&scan);
+            g_array_append_val(starts, off);
+            if (!gtk_text_iter_forward_to_tag_toggle(&scan, tag))
+                break;
+        }
+
+        gboolean same =              /* do buttons match block starts?      */
+            (guint)g_slist_length(ed->code_buttons) == starts->len;
+        if (same) {
+            /* Buttons were prepended while scanning forward, so the list
+             * is in REVERSE document order.                                */
+            guint i = starts->len;
+            for (GSList *l = ed->code_buttons; same && l != NULL;
+                 l = l->next) {
+                GtkTextMark *mark =
+                    g_object_get_data(G_OBJECT(l->data), "on-mark");
+                GtkTextIter mi;
+                gtk_text_buffer_get_iter_at_mark(ed->buffer, &mi, mark);
+                same = (i > 0) &&
+                       gtk_text_iter_get_offset(&mi) ==
+                           g_array_index(starts, gint, --i);
+            }
+        }
+        g_array_free(starts, TRUE);
+        if (same) {
+            code_buttons_update_positions(ed);
+            return;
+        }
+    }
+
     /* Tear down the old set (their marks die with them).                   */
     for (GSList *l = ed->code_buttons; l != NULL; l = l->next) {
         GtkWidget *btn = l->data;
@@ -780,7 +829,6 @@ code_buttons_rebuild(OnEditor *ed)
     if (!ed->app->code_copy_buttons)
         return;
 
-    GtkTextTag *tag = lookup_tag(ed->buffer, ON_TAGNAME_CODEBLOCK);
     if (tag == NULL)
         return;
 
@@ -2152,6 +2200,18 @@ on_buffer_delete_range_after(GtkTextBuffer *buffer, GtkTextIter *start,
         tag_popup_update(ed);
 }
 
+/* on_scroll_idle() — deferred caret-follow scroll (see on_buffer_changed). */
+static gboolean
+on_scroll_idle(gpointer user_data)
+{
+    OnEditor *ed = user_data;        /* owning editor                       */
+    ed->scroll_idle = 0;
+    gtk_text_view_scroll_to_mark(
+        ed->view, gtk_text_buffer_get_insert(ed->buffer),
+        0.08, FALSE, 0.0, 0.0);
+    return G_SOURCE_REMOVE;
+}
+
 /* ---------------------------------------------------------------------------
  * on_buffer_changed() — any edit re-arms the autosave timer.
  * ------------------------------------------------------------------------- */
@@ -2163,6 +2223,15 @@ on_buffer_changed(GtkTextBuffer *buffer, gpointer user_data)
     editor_queue_autosave(ed);
     /* Text edits can grow, shrink, split or remove code blocks.            */
     code_buttons_queue_rebuild(ed);
+
+    /* Keep the caret comfortably above the window's bottom edge while
+     * typing: within_margin makes the view scroll a little AHEAD of the
+     * cursor instead of letting it ride the very last pixel row.  The
+     * scroll is deferred to an idle — at "changed" time the text layout
+     * has not revalidated yet, so an immediate scroll computes against
+     * stale extents and does nothing at the end of the document.           */
+    if (ed->internal_change == 0 && ed->scroll_idle == 0)
+        ed->scroll_idle = g_idle_add(on_scroll_idle, ed);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2440,6 +2509,9 @@ on_search_stop(GtkSearchEntry *entry, gpointer user_data)
 static void
 editor_save(OnEditor *ed)
 {
+    if (ed->app->read_only)
+        return;                      /* the engine would refuse anyway      */
+
     gsize   blob_len = 0;            /* ONBF blob size                      */
     guint8 *blob = on_note_serialize(ed->buffer, &blob_len);
     gchar  *title = on_buffer_first_line(ed->buffer);
@@ -2481,6 +2553,8 @@ on_autosave_timeout(gpointer user_data)
 static void
 editor_queue_autosave(OnEditor *ed)
 {
+    if (ed->app->read_only)
+        return;
     if (ed->autosave_source != 0)
         g_source_remove(ed->autosave_source);
     ed->autosave_source = g_timeout_add(AUTOSAVE_DELAY_MS,
@@ -2504,6 +2578,10 @@ on_editor_destroy(GtkWidget *widget, gpointer user_data)
     if (ed->code_btn_idle != 0) {
         g_source_remove(ed->code_btn_idle);
         ed->code_btn_idle = 0;
+    }
+    if (ed->scroll_idle != 0) {
+        g_source_remove(ed->scroll_idle);
+        ed->scroll_idle = 0;
     }
     g_slist_free(ed->code_buttons);  /* widgets die with the window         */
     ed->code_buttons = NULL;
@@ -2726,11 +2804,15 @@ on_editor_window_open(OnApp *app, gint64 note_id)
     gtk_text_buffer_create_tag(ed->buffer, "on-emoji",
                                "letter-spacing", 5 * PANGO_SCALE, NULL);
 
+    gtk_text_view_set_editable(ed->view, !app->read_only);
     gtk_text_view_set_wrap_mode(ed->view, GTK_WRAP_WORD_CHAR);
     gtk_text_view_set_left_margin(ed->view, 16);
     gtk_text_view_set_right_margin(ed->view, 16);
     gtk_text_view_set_top_margin(ed->view, 12);
-    gtk_text_view_set_bottom_margin(ed->view, 12);
+    /* Roughly one text line of bottom margin: typing on the LAST line
+     * (where there is no further content to scroll ahead to) still
+     * leaves a line-sized gap below the caret.                             */
+    gtk_text_view_set_bottom_margin(ed->view, 20);
     gtk_text_view_set_pixels_above_lines(ed->view, 2);
     if (app->code_line_numbers)
         editor_apply_line_numbers(ed);

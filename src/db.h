@@ -238,6 +238,14 @@ gint on_db_note_count_for_tag(OnDatabase *db, gint64 tag_id);
 /* Total row counts across the whole database (any out-param may be NULL). */
 void on_db_totals(OnDatabase *db, gint *notes, gint *folders, gint *tags);
 
+/* Per-folder note counts in ONE query (folder id 0 = top level).
+ * Returns a GHashTable of gint64* → GINT_TO_POINTER(count); destroy with
+ * g_hash_table_destroy(). Missing keys mean zero.                           */
+GHashTable *on_db_note_count_map(OnDatabase *db);
+
+/* Per-tag note counts in one query; same shape as above.                    */
+GHashTable *on_db_tag_count_map(OnDatabase *db);
+
 /* ---------------------------- settings ---------------------------------- */
 
 /* Read persistent setting `key`. Returns a newly allocated value string
@@ -248,6 +256,9 @@ gchar *on_db_setting_get(OnDatabase *db, const gchar *key);
  * Returns TRUE on success.                                                 */
 gboolean on_db_setting_set(OnDatabase *db, const gchar *key,
                            const gchar *value);
+
+/* Remove persistent setting `key`. Returns TRUE on success.                */
+gboolean on_db_setting_delete(OnDatabase *db, const gchar *key);
 
 /* ---------------------------- utilities --------------------------------- */
 

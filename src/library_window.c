@@ -162,15 +162,22 @@ static void    on_action_toolbar_style_changed(GtkToolbar *toolbar,
  *   parent_id   — database folder id whose children to add (0 = roots).
  *   parent_iter — sidebar row to attach them under.
  * ------------------------------------------------------------------------- */
+/* count_from_map() — look one id up in a count map (0 when absent).         */
+static gint
+count_from_map(GHashTable *map, gint64 id)
+{
+    return GPOINTER_TO_INT(g_hash_table_lookup(map, &id));
+}
+
 static void
-add_folder_rows(OnLibrary *lw, gint64 parent_id, GtkTreeIter *parent_iter)
+add_folder_rows(OnLibrary *lw, gint64 parent_id, GtkTreeIter *parent_iter,
+                GHashTable *note_counts)
 {
     GList *folders = on_db_folder_list(lw->app->db, parent_id);
     for (GList *l = folders; l != NULL; l = l->next) {
         OnFolder *f = l->data;       /* one child folder                    */
         gchar *display = g_strdup_printf(   /* name + note count            */
-            "%s (%d)", f->name,
-            on_db_note_count_for_folder(lw->app->db, f->id));
+            "%s (%d)", f->name, count_from_map(note_counts, f->id));
         GtkTreeIter iter;
         gtk_tree_store_append(lw->sidebar_store, &iter, parent_iter);
         gtk_tree_store_set(lw->sidebar_store, &iter,
@@ -180,7 +187,7 @@ add_folder_rows(OnLibrary *lw, gint64 parent_id, GtkTreeIter *parent_iter)
                            SB_RAW,  f->name,
                            -1);
         g_free(display);
-        add_folder_rows(lw, f->id, &iter);   /* recurse into children       */
+        add_folder_rows(lw, f->id, &iter, note_counts);
     }
     on_db_folder_list_free(folders);
 }
@@ -199,9 +206,15 @@ refresh_sidebar(OnLibrary *lw)
     lw->populating++;
     gtk_tree_store_clear(lw->sidebar_store);
 
+    /* Batched counts: one query for all folders, one for all tags —
+     * refresh_sidebar runs after every autosave, so per-row COUNT
+     * queries added up (especially against a shared/networked db).         */
+    GHashTable *note_counts = on_db_note_count_map(lw->app->db);
+    GHashTable *tag_counts  = on_db_tag_count_map(lw->app->db);
+
     /* "Notes" root — selecting it shows the top-level notes.               */
     gchar *root_label = g_strdup_printf(
-        "Notes (%d)", on_db_note_count_for_folder(lw->app->db, 0));
+        "Notes (%d)", count_from_map(note_counts, 0));
     GtkTreeIter root;                /* the fixed root row                  */
     gtk_tree_store_append(lw->sidebar_store, &root, NULL);
     gtk_tree_store_set(lw->sidebar_store, &root,
@@ -211,7 +224,7 @@ refresh_sidebar(OnLibrary *lw)
                        SB_RAW,  "Notes",
                        -1);
     g_free(root_label);
-    add_folder_rows(lw, 0, &root);
+    add_folder_rows(lw, 0, &root, note_counts);
 
     /* "Tags" header + one row per known tag.                               */
     GList *tags = on_db_tag_list(lw->app->db);
@@ -228,8 +241,7 @@ refresh_sidebar(OnLibrary *lw)
             OnTag *t = l->data;      /* one tag                             */
             gchar *raw   = g_strdup_printf("#%s", t->name);
             gchar *label = g_strdup_printf(
-                "#%s (%d)", t->name,
-                on_db_note_count_for_tag(lw->app->db, t->id));
+                "#%s (%d)", t->name, count_from_map(tag_counts, t->id));
             GtkTreeIter iter;
             gtk_tree_store_append(lw->sidebar_store, &iter, &header);
             gtk_tree_store_set(lw->sidebar_store, &iter,
@@ -259,6 +271,9 @@ refresh_sidebar(OnLibrary *lw)
                            -1);
         g_free(label);
     }
+
+    g_hash_table_destroy(note_counts);
+    g_hash_table_destroy(tag_counts);
 
     gtk_tree_view_expand_all(lw->sidebar);
     lw->populating--;
@@ -462,6 +477,13 @@ get_note_thumb(OnLibrary *lw, OnNoteMeta *m)
 static void
 refresh_notes(OnLibrary *lw)
 {
+    /* Thumbnails are only rendered while the grid is showing: list mode
+     * never pays for them (they used to be regenerated for the edited
+     * note on EVERY autosave), and switching to grid refreshes.            */
+    gboolean want_thumbs =
+        g_strcmp0(gtk_stack_get_visible_child_name(GTK_STACK(lw->stack)),
+                  "grid") == 0;
+
     lw->populating++;
     gtk_list_store_clear(lw->notes_store);
 
@@ -488,7 +510,8 @@ refresh_notes(OnLibrary *lw)
                            NL_ID,       m->id,
                            NL_TITLE,    m->title,
                            NL_MODIFIED, when,
-                           NL_THUMB,    get_note_thumb(lw, m),
+                           NL_THUMB,    want_thumbs ? get_note_thumb(lw, m)
+                                                    : NULL,
                            NL_UPDATED,  m->updated_at,
                            -1);
         g_free(when);
@@ -1241,6 +1264,7 @@ on_view_grid(GtkWidget *widget, gpointer user_data)
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
     gtk_stack_set_visible_child_name(GTK_STACK(lw->stack), "grid");
+    refresh_notes(lw);               /* fill the thumbnails list mode skips */
 }
 
 /* ---------------------------------------------------------------------------
@@ -1979,7 +2003,10 @@ on_library_window_create(OnApp *app)
 
     /* --- window (standard titlebar, no HeaderBar) ------------------------*/
     lw->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(lw->window), "Orange Notes - Library");
+    gtk_window_set_title(GTK_WINDOW(lw->window),
+                         app->read_only
+                         ? "Orange Notes - Library (Read-Only)"
+                         : "Orange Notes - Library");
     gtk_window_set_default_size(GTK_WINDOW(lw->window), 900, 620);
     gtk_application_add_window(app->gtk_app, GTK_WINDOW(lw->window));
     g_object_set_data_full(G_OBJECT(lw->window), "on-library", lw,

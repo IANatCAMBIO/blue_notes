@@ -65,6 +65,8 @@ typedef struct OnApp {
     gboolean         code_copy_buttons;
     gboolean         code_line_numbers;
     gchar           *db_dir;
+    gboolean         read_only;
+    gchar           *lock_token;
 } OnApp;
 
 /* ---------------------------------------------------------------------------
@@ -170,5 +172,30 @@ gboolean on_app_switch_database(OnApp *app, const gchar *new_dir);
  * still in place and reopened).
  * ------------------------------------------------------------------------- */
 gboolean on_app_restore_database(OnApp *app, const gchar *backup_path);
+
+/* ---------------------------------------------------------------------------
+ * on_app_db_acquire() — single-instance failsafe for shared databases.
+ *
+ * Checks the database's "in_use" marker.  When free, claims it with a
+ * user@host/pid token (stored in app->lock_token).  When another
+ * instance holds it, a dialog offers:
+ *   - Open Read-Only : app->read_only is set and the SQLite connection
+ *     is put in query_only mode (the engine refuses all writes);
+ *   - Override Lock  : claim it anyway (for after a crash left a stale
+ *     marker);
+ *   - Quit           : returns FALSE — the caller should not proceed.
+ *
+ *   app    — the application context (db must be open).
+ *   parent — window to parent the conflict dialog on, or NULL.
+ * Returns TRUE when the app may use the database (owned or read-only).
+ * ------------------------------------------------------------------------- */
+gboolean on_app_db_acquire(OnApp *app, GtkWindow *parent);
+
+/* ---------------------------------------------------------------------------
+ * on_app_db_release() — clear the "in_use" marker, but ONLY if it still
+ * holds our own token (never clobbers a lock someone else overrode).
+ * Called at exit and before switching databases.
+ * ------------------------------------------------------------------------- */
+void on_app_db_release(OnApp *app);
 
 #endif /* ORANGE_APP_H */
