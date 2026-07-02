@@ -150,8 +150,9 @@ orange_notes tag list                         orange_notes tag delete NAME
 orange_notes folder list                      orange_notes folder add PATH
 orange_notes folder delete PATH               orange_notes note list [PATH|--all]
 orange_notes note new [--folder PATH] TEXT|-  orange_notes note delete ID [ID...]
-orange_notes note move ID [ID...] PATH        orange_notes backup FILE.db
-orange_notes export-md DIR                    orange_notes export-html DIR
+orange_notes note move ID [ID...] PATH        orange_notes note add-image ID FILE
+orange_notes backup FILE.db                   orange_notes export-md DIR
+orange_notes export-html DIR
 ```
 
 Folders are addressed by path (`"Work/Projects"`, created like `mkdir -p`
@@ -159,6 +160,20 @@ by `folder add`); notes by the ids `note list` prints. `note new` takes
 its content from the argument or stdin (`-`); the first line becomes the
 title. Output is tab-separated for easy scripting; exit codes: 0 success,
 1 usage, 2 failure. `orange_notes help` shows the full reference.
+
+## Migrating from Apple Notes
+
+```sh
+tools/import-apple-notes.sh
+```
+
+Exports every folder and note from Notes.app (macOS will ask once for
+permission to control Notes), converts the bodies to text, saves image
+attachments, and imports everything — hierarchy included — under an
+"Apple Notes Import" folder via the CLI. Images land at the end of each
+note (Notes' scripting interface doesn't reveal their inline position);
+non-image attachments (PDFs, scans) are skipped with a count. Re-running
+duplicates notes, so delete the import folder first if retrying.
 
 ## Code layout
 

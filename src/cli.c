@@ -287,6 +287,71 @@ cmd_new_note(OnDatabase *db, const gchar *folder_path, const gchar *content)
     return 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * cmd_add_image() — append an image file to an existing note.  The image
+ * is stored at full resolution (same as pasting it in the editor) and
+ * displayed at the default thumbnail width.
+ * ------------------------------------------------------------------------- */
+static int
+cmd_add_image(OnDatabase *db, const gchar *id_str, const gchar *file)
+{
+    gint64 id = g_ascii_strtoll(id_str, NULL, 10);
+    OnNoteMeta *meta = (id > 0) ? on_db_note_get(db, id) : NULL;
+    if (meta == NULL) {
+        fprintf(stderr, "error: no such note: %s\n", id_str);
+        return 2;
+    }
+
+    if (!gtk_init_check(NULL, NULL)) {
+        fprintf(stderr, "error: GTK could not initialize (needed to "
+                        "process note content)\n");
+        on_db_note_meta_free(meta);
+        return 2;
+    }
+
+    GError *err = NULL;
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(file, &err);
+    if (pixbuf == NULL) {
+        fprintf(stderr, "error: cannot load image %s: %s\n",
+                file, err->message);
+        g_clear_error(&err);
+        on_db_note_meta_free(meta);
+        return 2;
+    }
+
+    /* Load the note, append the image on a fresh line, save it back.       */
+    GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
+    on_buffer_ensure_tags(buffer);
+    gsize   blob_len = 0;            /* stored blob size                    */
+    guint8 *blob = on_db_note_load(db, id, &blob_len);
+    if (blob != NULL) {
+        on_note_deserialize(buffer, blob, blob_len);
+        g_free(blob);
+    }
+
+    GtkTextIter end;                 /* append position                     */
+    gtk_text_buffer_get_end_iter(buffer, &end);
+    if (gtk_text_buffer_get_char_count(buffer) > 0 &&
+        !gtk_text_iter_starts_line(&end))
+        gtk_text_buffer_insert(buffer, &end, "\n", -1);
+    GtkTextChildAnchor *anchor =
+        gtk_text_buffer_create_child_anchor(buffer, &end);
+    on_anchor_set_image(anchor, pixbuf, 0);
+
+    gchar *title = on_buffer_first_line(buffer);
+    guint8 *out = on_note_serialize(buffer, &blob_len);
+    on_db_note_save(db, id, title, out, blob_len);
+
+    printf("added image to note %" G_GINT64_FORMAT "\t%s\n", id, title);
+
+    g_free(out);
+    g_free(title);
+    g_object_unref(buffer);
+    g_object_unref(pixbuf);
+    on_db_note_meta_free(meta);
+    return 0;
+}
+
 /* cmd_delete_notes() — delete each note id given.                           */
 static int
 cmd_delete_notes(OnDatabase *db, char **ids, int n)
@@ -389,6 +454,7 @@ usage(FILE *out)
 "                                    the first line becomes the title)\n"
 "  note delete ID [ID...]            delete notes by id (see note list)\n"
 "  note move ID [ID...] PATH         move notes into a folder ('/' = top)\n"
+"  note add-image ID FILE            append an image file to a note\n"
 "\n"
 "  backup FILE.db                    snapshot the database to FILE.db\n"
 "  export-md DIR                     export all notes as Markdown into DIR\n"
@@ -441,6 +507,8 @@ dispatch_note(OnDatabase *db, const char *verb, char **argv, int argc)
         return cmd_delete_notes(db, argv, argc);
     if (g_strcmp0(verb, "move") == 0 && argc >= 2)
         return cmd_move_notes(db, argv, argc - 1, argv[argc - 1]);
+    if (g_strcmp0(verb, "add-image") == 0 && argc == 2)
+        return cmd_add_image(db, argv[0], argv[1]);
     return usage(stderr);
 }
 
