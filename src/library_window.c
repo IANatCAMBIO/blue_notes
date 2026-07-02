@@ -938,6 +938,7 @@ on_new_note(GtkWidget *widget, gpointer user_data)
     gint64 id = on_db_note_create(lw->app->db, current_folder_id(lw));
     if (id != 0) {
         refresh_notes(lw);
+        refresh_sidebar(lw);         /* the folder's count just grew        */
         on_editor_window_open(lw->app, id);
     }
 }
