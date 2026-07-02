@@ -145,14 +145,31 @@ gboolean on_db_note_delete(OnDatabase *db, gint64 id);
  * the end of that folder. Returns TRUE on success.                          */
 gboolean on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id);
 
-/* Persist a note's title and serialized content.
- *   id      — note to save.
- *   title   — display title (first line of the note).
- *   content — ONBF blob bytes (may be NULL when len is 0).
- *   len     — length of `content` in bytes.
+/* Persist a note's title, serialized content, and searchable plain text.
+ *   id        — note to save.
+ *   title     — display title (first line of the note).
+ *   content   — ONBF blob bytes (may be NULL when len is 0).
+ *   len       — length of `content` in bytes.
+ *   body_text — plain text of the note for fast searching (may be NULL).
  * Also bumps updated_at. Returns TRUE on success.                           */
 gboolean on_db_note_save(OnDatabase *db, gint64 id, const gchar *title,
-                         const guint8 *content, gsize len);
+                         const guint8 *content, gsize len,
+                         const gchar *body_text);
+
+/* Read a note's cached searchable text. Returns a new string (g_free()
+ * it), or NULL when the cache is unfilled (older rows) — callers then
+ * extract from the blob and may write it back via
+ * on_db_note_set_body_text().                                               */
+gchar *on_db_note_body_text(OnDatabase *db, gint64 id);
+
+/* Fill the searchable-text cache for one note.                              */
+gboolean on_db_note_set_body_text(OnDatabase *db, gint64 id,
+                                  const gchar *body_text);
+
+/* Overwrite a note's updated_at with an explicit UNIX timestamp.  Used by
+ * importers to preserve the original modification date (ordinary saves
+ * stamp the current time). Returns TRUE on success.                         */
+gboolean on_db_note_set_updated_at(OnDatabase *db, gint64 id, gint64 ts);
 
 /* Load a note's serialized content.
  *   id      — note to load.

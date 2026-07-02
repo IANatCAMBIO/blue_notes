@@ -99,6 +99,11 @@ static const GtkTargetEntry ROW_TARGET =
  *                   know to stand down.
  *   thumb_cache   — note id (gint64*) → ThumbEntry*, so grid thumbnails
  *                   are only re-rendered when a note actually changed.
+ *   shown_kind/
+ *   shown_id      — the selection refresh_notes() last populated for;
+ *                   a matching refresh (e.g. after an editor autosave)
+ *                   keeps the notes-pane scroll position instead of
+ *                   jumping back to the top.
  * ------------------------------------------------------------------------- */
 typedef struct {
     OnApp        *app;
@@ -114,6 +119,8 @@ typedef struct {
     gchar        *sel_name;
     gint          populating;
     GHashTable   *thumb_cache;
+    gint          shown_kind;
+    gint64        shown_id;
 } OnLibrary;
 
 /* ---------------------------------------------------------------------------
@@ -474,8 +481,31 @@ get_note_thumb(OnLibrary *lw, OnNoteMeta *m)
 }
 
 /* ---------------------------------------------------------------------------
+ * ScrollKeep — one vadjustment position being restored after a notes
+ * model rebuild (clearing the store zeroes the scrollbar).  The restore
+ * runs at idle so the rebuilt view has re-validated its height first.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    GtkAdjustment *adj;              /* the notes-pane scrollbar (owned ref)*/
+    gdouble        value;            /* position before the rebuild         */
+} ScrollKeep;
+
+/* scroll_keep_restore() — idle callback: put the scrollbar back.            */
+static gboolean
+scroll_keep_restore(gpointer user_data)
+{
+    ScrollKeep *k = user_data;
+    gtk_adjustment_set_value(k->adj, k->value);  /* clamps to the range     */
+    g_object_unref(k->adj);
+    g_free(k);
+    return G_SOURCE_REMOVE;
+}
+
+/* ---------------------------------------------------------------------------
  * refresh_notes() — repopulate the notes model from the current sidebar
- * selection (a folder's notes, or a tag's notes).
+ * selection (a folder's notes, or a tag's notes).  When the selection is
+ * the same one already shown — a content refresh (autosave, editor
+ * close), not a navigation — the scroll position is preserved.
  * ------------------------------------------------------------------------- */
 static void
 refresh_notes(OnLibrary *lw)
@@ -486,6 +516,15 @@ refresh_notes(OnLibrary *lw)
     gboolean want_thumbs =
         g_strcmp0(gtk_stack_get_visible_child_name(GTK_STACK(lw->stack)),
                   "grid") == 0;
+
+    /* Same selection as last time?  Then remember where the visible
+     * notes pane is scrolled so the rebuild doesn't jump to the top.       */
+    gboolean keep_scroll = lw->shown_kind == lw->sel_kind &&
+                           lw->shown_id   == lw->sel_id;
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(
+        GTK_SCROLLED_WINDOW(
+            gtk_stack_get_visible_child(GTK_STACK(lw->stack))));
+    gdouble scroll_pos = gtk_adjustment_get_value(vadj);
 
     lw->populating++;
     gtk_list_store_clear(lw->notes_store);
@@ -521,6 +560,15 @@ refresh_notes(OnLibrary *lw)
     }
     on_db_note_list_free(notes);
     lw->populating--;
+
+    lw->shown_kind = lw->sel_kind;
+    lw->shown_id   = lw->sel_id;
+    if (keep_scroll && scroll_pos > 0) {
+        ScrollKeep *k = g_new(ScrollKeep, 1);
+        k->adj   = g_object_ref(vadj);
+        k->value = scroll_pos;
+        g_idle_add(scroll_keep_restore, k);
+    }
 }
 
 /* ---------------------------------------------------------------------------

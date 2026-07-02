@@ -41,7 +41,8 @@ if "$BIN" folder list 2>&1 >/dev/null | grep -q "in use"; then
 fi
 
 # Workspace: one .html per note plus a manifest of TAB-separated
-# "file<TAB>folder path" lines.
+# "file<TAB>folder path<TAB>modified date" lines (the date is
+# "Y-M-D H:M:S" in local time, converted to UNIX seconds at import).
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -85,6 +86,14 @@ on run argv
                         set counter to counter + 1
                         set htmlBody to body of n
 
+                        -- The last-edited date, spelled out numerically so
+                        -- the importer can parse it regardless of locale.
+                        set d to modification date of n
+                        set dstr to (year of d as string) & "-" ¬
+                            & ((month of d) as integer) & "-" & (day of d) ¬
+                            & " " & (hours of d) & ":" & (minutes of d) ¬
+                            & ":" & (seconds of d)
+
                         -- Write the note body as UTF-8 HTML.
                         set p to outDir & "/" & counter & ".html"
                         set fp to open for access (POSIX file p) ¬
@@ -109,7 +118,7 @@ on run argv
                         end repeat
 
                         set manifest to manifest & counter & tab ¬
-                            & fPath & linefeed
+                            & fPath & tab & dstr & linefeed
                     end repeat
                 end if
             end repeat
@@ -154,8 +163,8 @@ imported=0
 failed=0
 images=0
 skipped_att=0
-# Manifest lines are "<file-number><TAB><folder path>".
-while IFS="$(printf '\t')" read -r num folder; do
+# Manifest lines are "<file-number><TAB><folder path><TAB><modified>".
+while IFS="$(printf '\t')" read -r num folder moddate; do
     [ -n "$num" ] || continue
     printf '\r  importing %s/%s...' "$((imported + failed + 1))" "$total"
     dest="$DEST_ROOT/$folder"
@@ -187,6 +196,15 @@ while IFS="$(printf '\t')" read -r num folder; do
             skipped_att=$((skipped_att + 1))
         fi
     done
+
+    # Restore the note's Apple Notes edit date LAST — every save above
+    # (including add-image) stamps the current time.
+    if [ -n "${moddate:-}" ]; then
+        ts=$(date -j -f '%Y-%m-%d %H:%M:%S' "$moddate" +%s \
+                 2>/dev/null) || ts=""
+        [ -n "$ts" ] && \
+            "$BIN" note set-modified "$note_id" "$ts" >/dev/null 2>&1
+    fi
 done < "$TMP/manifest.tsv"
 printf '\r                                        \r'
 

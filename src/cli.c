@@ -276,10 +276,12 @@ cmd_new_note(OnDatabase *db, const gchar *folder_path, const gchar *content)
     gsize blob_len;                  /* serialized content size             */
     guint8 *blob = on_note_serialize(buffer, &blob_len);
     gchar *title = on_buffer_first_line(buffer);
-    on_db_note_save(db, id, title, blob, blob_len);
+    gchar *body = on_note_extract_text(blob, blob_len);
+    on_db_note_save(db, id, title, blob, blob_len, body);
 
     printf("note %" G_GINT64_FORMAT "\t%s\n", id, title);
 
+    g_free(body);
     g_free(title);
     g_free(blob);
     g_object_unref(buffer);
@@ -340,10 +342,12 @@ cmd_add_image(OnDatabase *db, const gchar *id_str, const gchar *file)
 
     gchar *title = on_buffer_first_line(buffer);
     guint8 *out = on_note_serialize(buffer, &blob_len);
-    on_db_note_save(db, id, title, out, blob_len);
+    gchar *body = on_note_extract_text(out, blob_len);
+    on_db_note_save(db, id, title, out, blob_len, body);
 
     printf("added image to note %" G_GINT64_FORMAT "\t%s\n", id, title);
 
+    g_free(body);
     g_free(out);
     g_free(title);
     g_object_unref(buffer);
@@ -397,6 +401,34 @@ cmd_move_notes(OnDatabase *db, char **ids, int n, const gchar *dest)
         on_db_note_meta_free(meta);
     }
     return rc;
+}
+
+/* cmd_set_modified() — overwrite a note's modification date with a UNIX
+ * timestamp.  Lets importers preserve the original edit date (a normal
+ * save always stamps the current time).                                     */
+static int
+cmd_set_modified(OnDatabase *db, const gchar *id_str, const gchar *ts_str)
+{
+    gint64 id = g_ascii_strtoll(id_str, NULL, 10);
+    OnNoteMeta *meta = (id > 0) ? on_db_note_get(db, id) : NULL;
+    if (meta == NULL) {
+        fprintf(stderr, "error: no such note: %s\n", id_str);
+        return 2;
+    }
+
+    gchar *endp = NULL;              /* end of the parsed number            */
+    gint64 ts = g_ascii_strtoll(ts_str, &endp, 10);
+    if (ts <= 0 || endp == NULL || *endp != '\0') {
+        fprintf(stderr, "error: bad UNIX timestamp: %s\n", ts_str);
+        on_db_note_meta_free(meta);
+        return 2;
+    }
+
+    on_db_note_set_updated_at(db, id, ts);
+    printf("set modified of note %" G_GINT64_FORMAT "\t%s\n",
+           id, meta->title);
+    on_db_note_meta_free(meta);
+    return 0;
 }
 
 /* cmd_backup() — snapshot the database to a file.                           */
@@ -455,6 +487,8 @@ usage(FILE *out)
 "  note delete ID [ID...]            delete notes by id (see note list)\n"
 "  note move ID [ID...] PATH         move notes into a folder ('/' = top)\n"
 "  note add-image ID FILE            append an image file to a note\n"
+"  note set-modified ID TIMESTAMP    set a note's modified date (UNIX\n"
+"                                    seconds; for importers)\n"
 "\n"
 "  backup FILE.db                    snapshot the database to FILE.db\n"
 "  export-md DIR                     export all notes as Markdown into DIR\n"
@@ -509,6 +543,8 @@ dispatch_note(OnDatabase *db, const char *verb, char **argv, int argc)
         return cmd_move_notes(db, argv, argc - 1, argv[argc - 1]);
     if (g_strcmp0(verb, "add-image") == 0 && argc == 2)
         return cmd_add_image(db, argv[0], argv[1]);
+    if (g_strcmp0(verb, "set-modified") == 0 && argc == 2)
+        return cmd_set_modified(db, argv[0], argv[1]);
     return usage(stderr);
 }
 

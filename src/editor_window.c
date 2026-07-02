@@ -30,6 +30,7 @@
 
 #include <gdk/gdkkeysyms.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Milliseconds of idle time after the last edit before autosaving.         */
 #define AUTOSAVE_DELAY_MS 1200
@@ -1241,10 +1242,13 @@ on_img_copy(GtkMenuItem *item, gpointer user_data)
             orig);
 }
 
-/* on_img_open_full() — "Open Full Size…": show the original image in its
- * own scrollable viewer window.                                             */
+/* on_img_open() — "Open": write the full-resolution image to a temporary
+ * PNG file and hand it to an image viewer — the program configured under
+ * Settings ("image_viewer" setting), or the platform opener (macOS
+ * `open`, otherwise `xdg-open`) which launches the system's default
+ * viewer.                                                                   */
 static void
-on_img_open_full(GtkMenuItem *item, gpointer user_data)
+on_img_open(GtkMenuItem *item, gpointer user_data)
 {
     OnEditor *ed = user_data;        /* owning editor                       */
     GtkTextChildAnchor *anchor = anchor_at_offset(
@@ -1255,20 +1259,39 @@ on_img_open_full(GtkMenuItem *item, gpointer user_data)
     if (orig == NULL)
         return;
 
-    GtkWidget *viewer = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(viewer), "Orange Notes - Image");
-    gtk_window_set_transient_for(GTK_WINDOW(viewer),
-                                 GTK_WINDOW(ed->window));
-    gtk_window_set_default_size(
-        GTK_WINDOW(viewer),
-        MIN(gdk_pixbuf_get_width(orig) + 40, 1200),
-        MIN(gdk_pixbuf_get_height(orig) + 40, 900));
+    GError *err = NULL;
+    gchar  *path = NULL;             /* temporary PNG path                  */
+    gint fd = g_file_open_tmp("orange-note-XXXXXX.png", &path, &err);
+    if (fd < 0) {
+        g_warning("cannot create temp image file: %s", err->message);
+        g_clear_error(&err);
+        return;
+    }
+    close(fd);
+    if (!gdk_pixbuf_save(orig, path, "png", &err, NULL)) {
+        g_warning("cannot write temp image file: %s", err->message);
+        g_clear_error(&err);
+        g_free(path);
+        return;
+    }
 
-    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(scroll),
-                      gtk_image_new_from_pixbuf(orig));
-    gtk_container_add(GTK_CONTAINER(viewer), scroll);
-    gtk_widget_show_all(viewer);
+    gchar *viewer = on_db_setting_get(ed->app->db, "image_viewer");
+#ifdef __APPLE__
+    const gchar *opener = "open";
+#else
+    const gchar *opener = "xdg-open";
+#endif
+    gchar *argv[] = {
+        (viewer != NULL && *viewer != '\0') ? viewer : (gchar *)opener,
+        path, NULL
+    };
+    if (!g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                       NULL, NULL, NULL, &err)) {
+        g_warning("cannot launch image viewer: %s", err->message);
+        g_clear_error(&err);
+    }
+    g_free(viewer);
+    g_free(path);
 }
 
 /* on_img_display_full() / on_img_display_thumb() — inline display size.     */
@@ -1357,8 +1380,7 @@ on_view_populate_popup(GtkTextView *view, GtkWidget *popup,
           shown_full },
         { "Display _Full Size",    G_CALLBACK(on_img_display_full),
           !shown_full },
-        { "_Open Full Size\xe2\x80\xa6", G_CALLBACK(on_img_open_full),
-          TRUE },
+        { "_Open",                 G_CALLBACK(on_img_open), TRUE },
         { "Copy _Image",           G_CALLBACK(on_img_copy), TRUE },
     };
 
@@ -2515,8 +2537,10 @@ editor_save(OnEditor *ed)
     gsize   blob_len = 0;            /* ONBF blob size                      */
     guint8 *blob = on_note_serialize(ed->buffer, &blob_len);
     gchar  *title = on_buffer_first_line(ed->buffer);
+    gchar  *body = on_note_extract_text(blob, blob_len);
 
-    on_db_note_save(ed->app->db, ed->note_id, title, blob, blob_len);
+    on_db_note_save(ed->app->db, ed->note_id, title, blob, blob_len, body);
+    g_free(body);
 
     /* Recompute the tag set from the text.                                 */
     GList *tags = on_buffer_collect_tags(ed->buffer);

@@ -34,7 +34,12 @@ scanning titles and full note text. Scope radios choose **All Notes** or
 **Selected Folder/Tag** — the latter resolves against whatever is
 selected in the library at the moment you press Search. Case-sensitive
 and regular-expression modes are available; double-click a result to
-open it.
+open it. Results show each note's full path, including any nested
+folders it lives in.
+
+Note text is cached in a `body_text` column on save, so searches never
+decode images or parse the binary blobs; notes saved by older versions
+are backfilled automatically the first time they are searched.
 
 ### Editor windows
 
@@ -151,8 +156,8 @@ orange_notes folder list                      orange_notes folder add PATH
 orange_notes folder delete PATH               orange_notes note list [PATH|--all]
 orange_notes note new [--folder PATH] TEXT|-  orange_notes note delete ID [ID...]
 orange_notes note move ID [ID...] PATH        orange_notes note add-image ID FILE
-orange_notes backup FILE.db                   orange_notes export-md DIR
-orange_notes export-html DIR
+orange_notes note set-modified ID TIMESTAMP   orange_notes backup FILE.db
+orange_notes export-md DIR                    orange_notes export-html DIR
 ```
 
 Folders are addressed by path (`"Work/Projects"`, created like `mkdir -p`
@@ -170,10 +175,103 @@ tools/import-apple-notes.sh
 Exports every folder and note from Notes.app (macOS will ask once for
 permission to control Notes), converts the bodies to text, saves image
 attachments, and imports everything — hierarchy included — under an
-"Apple Notes Import" folder via the CLI. Images land at the end of each
-note (Notes' scripting interface doesn't reveal their inline position);
+"Apple Notes Import" folder via the CLI. Each note keeps its original
+last-edited date from Apple Notes. Images land at the end of each note
+(Notes' scripting interface doesn't reveal their inline position);
 non-image attachments (PDFs, scans) are skipped with a count. Re-running
 duplicates notes, so delete the import folder first if retrying.
+
+## Database format
+
+Everything lives in one ordinary SQLite file (see *Where the data lives*
+above), so any standard SQLite tool can read it:
+
+```sql
+CREATE TABLE folders (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id  INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE notes (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  folder_id  INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+  title      TEXT NOT NULL DEFAULT 'New Note',
+  content    BLOB,             -- the note itself, in ONBF (see below)
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, -- UNIX seconds
+  updated_at INTEGER NOT NULL, -- UNIX seconds
+  pinned     INTEGER NOT NULL DEFAULT 0,
+  body_text  TEXT              -- plain-text cache used by search
+);
+
+CREATE TABLE tags      (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE);
+CREATE TABLE note_tags (note_id INTEGER NOT NULL REFERENCES notes(id)
+                          ON DELETE CASCADE,
+                        tag_id  INTEGER NOT NULL REFERENCES tags(id)
+                          ON DELETE CASCADE,
+                        PRIMARY KEY (note_id, tag_id));
+CREATE TABLE settings  (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+CREATE INDEX idx_notes_folder   ON notes(folder_id);
+CREATE INDEX idx_folders_parent ON folders(parent_id);
+CREATE INDEX idx_note_tags_tag  ON note_tags(tag_id);
+```
+
+Semantics worth knowing when querying directly:
+
+- A `NULL` `folder_id` means the note sits at the top level; a `NULL`
+  `parent_id` means a top-level folder. Deleting a folder cascades to
+  its subfolders and notes.
+- `body_text` is a derived plain-text copy of `content`, kept for fast
+  searching. It may be `NULL` on rows written by older versions (the app
+  backfills it on first search). Treat it as read-only convenience — the
+  `content` blob is the source of truth.
+- `tags.name` is stored without the leading `#`.
+- `settings` holds app preferences (toolbar styles, `image_viewer`, …)
+  and the instance lock: while a GUI has the database open, the key
+  `in_use` is set to `"user@host (pid N, since …)"` and removed on exit.
+  Respect it before writing from your own tools.
+
+Example — every note with its full folder path:
+
+```sql
+WITH RECURSIVE fpath(id, path) AS (
+  SELECT id, '/' || name FROM folders WHERE parent_id IS NULL
+  UNION ALL
+  SELECT f.id, p.path || '/' || f.name
+  FROM folders f JOIN fpath p ON f.parent_id = p.id
+)
+SELECT COALESCE(p.path, '') || '/' || n.title AS note,
+       datetime(n.updated_at, 'unixepoch', 'localtime') AS modified
+FROM notes n LEFT JOIN fpath p ON n.folder_id = p.id
+ORDER BY 1;
+```
+
+`content` is ONBF ("Orange Notes Binary Format"), a simple little-endian
+record stream — 4-byte magic `ONBF`, a `u32` version (currently 5), then
+typed records until a `0x00` end marker:
+
+| Record | Type byte | Payload |
+|--------|-----------|---------|
+| TEXT   | `0x01`    | `u32` format flags, `u32` byte length, UTF-8 bytes |
+| IMAGE  | `0x02`    | `u32` display width (v2+), `u32` PNG length, PNG bytes at full resolution |
+| TABLE  | `0x03`    | `u32` flags (v4+; bit 0 = header row), `u32` rows, `u32` cols, then rows×cols of (`u32` length, UTF-8 bytes) |
+| CHECK  | `0x04`    | `u8` state (0 unchecked / 1 checked) (v5+) |
+
+TEXT flag bits mark bold, italic, headings, code blocks, list kinds,
+inline `#tags`, and so on. The authoritative spec — including every flag
+bit and all version differences — is the header comment in
+`src/serialize.h`. Prefer exporting (`export-md` / `export-html`) over
+parsing ONBF yourself when possible.
+
+Two practical cautions: the app sets a 5-second busy timeout, so brief
+external readers coexist fine, but long write transactions from other
+tools will stall it; and back up with `orange_notes backup FILE.db`
+(SQLite's online backup API) rather than copying the file while the app
+is running.
 
 ## Code layout
 

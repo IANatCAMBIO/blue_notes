@@ -132,6 +132,16 @@ gboolean on_note_deserialize_scaled(GtkTextBuffer *buffer,
                                     gint max_img_px);
 
 /* ---------------------------------------------------------------------------
+ * on_note_extract_text() — pull the searchable plain text out of an ONBF
+ * blob WITHOUT building a GtkTextBuffer or decoding any images: TEXT
+ * runs are concatenated, table cells are appended (space-separated), and
+ * image/checkbox payloads are skipped.  Orders of magnitude cheaper than
+ * a full deserialize; used to (back)fill the notes.body_text column.
+ * Returns a newly allocated string; g_free() it.
+ * ------------------------------------------------------------------------- */
+gchar *on_note_extract_text(const guint8 *data, gsize len);
+
+/* ---------------------------------------------------------------------------
  * on_buffer_first_line() — extract the note title: the text of the first
  * non-empty line, or "New Note" if the buffer is empty.
  *   buffer — buffer to inspect.

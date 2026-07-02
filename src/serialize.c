@@ -661,6 +661,69 @@ on_anchor_get_image(GtkTextChildAnchor *anchor, gint *display_width)
 }
 
 gchar *
+on_note_extract_text(const guint8 *data, gsize len)
+{
+    GString *out = g_string_new(NULL);
+
+    if (data == NULL || len < 8 || memcmp(data, ONBF_MAGIC, 4) != 0)
+        return g_string_free(out, FALSE);
+    gsize   pos = 4;                 /* read cursor, past the magic         */
+    guint32 version;
+    if (!get_u32(data, len, &pos, &version) ||
+        version < 1 || version > ONBF_VERSION)
+        return g_string_free(out, FALSE);
+
+    while (pos < len) {
+        guint8 rec = data[pos++];    /* record type byte                    */
+        if (rec == REC_END)
+            break;
+
+        if (rec == REC_TEXT) {
+            guint32 flags, n;
+            if (!get_u32(data, len, &pos, &flags) ||
+                !get_u32(data, len, &pos, &n) || pos + n > len)
+                break;
+            g_string_append_len(out, (const gchar *)data + pos, n);
+            pos += n;
+        } else if (rec == REC_IMAGE) {
+            guint32 dw = 0, n;
+            if (version >= 2 && !get_u32(data, len, &pos, &dw))
+                break;
+            if (!get_u32(data, len, &pos, &n) || pos + n > len)
+                break;
+            pos += n;                /* skip the PNG payload                */
+        } else if (rec == REC_TABLE) {
+            guint32 tflags = 0, rows, cols;
+            if (version >= 4 && !get_u32(data, len, &pos, &tflags))
+                break;
+            if (!get_u32(data, len, &pos, &rows) ||
+                !get_u32(data, len, &pos, &cols))
+                break;
+            gboolean bad = FALSE;    /* truncated cell encountered          */
+            for (guint32 i = 0; i < rows * cols && !bad; i++) {
+                guint32 n;
+                if (!get_u32(data, len, &pos, &n) || pos + n > len) {
+                    bad = TRUE;
+                    break;
+                }
+                g_string_append_len(out, (const gchar *)data + pos, n);
+                g_string_append_c(out, ' ');
+                pos += n;
+            }
+            if (bad)
+                break;
+        } else if (rec == REC_CHECK) {
+            if (pos >= len)
+                break;
+            pos += 1;                /* skip the state byte                 */
+        } else {
+            break;                   /* unknown record: stop safely         */
+        }
+    }
+    return g_string_free(out, FALSE);
+}
+
+gchar *
 on_buffer_first_line(GtkTextBuffer *buffer)
 {
     GtkTextIter start, line_end;     /* span of the first line              */

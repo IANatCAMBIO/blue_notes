@@ -211,6 +211,42 @@ on_db_choose_clicked(GtkButton *btn, gpointer user_data)
     }
 }
 
+/* on_viewer_entry_changed() — persist the image-viewer program path as
+ * the user types; an empty entry clears the setting so "Open" on an
+ * image falls back to the system default viewer.                            */
+static void
+on_viewer_entry_changed(GtkEditable *editable, gpointer user_data)
+{
+    OnApp *app = user_data;          /* application context                 */
+    const gchar *text = gtk_entry_get_text(GTK_ENTRY(editable));
+    if (text != NULL && *text != '\0')
+        on_db_setting_set(app->db, "image_viewer", text);
+    else
+        on_db_setting_delete(app->db, "image_viewer");
+}
+
+/* on_viewer_browse_clicked() — pick the viewer program with a file
+ * chooser; the entry's "changed" handler does the persisting.               */
+static void
+on_viewer_browse_clicked(GtkButton *btn, gpointer user_data)
+{
+    GtkWidget *entry = user_data;    /* the viewer-path entry               */
+    GtkWidget *chooser = gtk_file_chooser_dialog_new(
+        "Choose Image Viewer",
+        GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(btn))),
+        GTK_FILE_CHOOSER_ACTION_OPEN,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Select", GTK_RESPONSE_ACCEPT,
+        NULL);
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT) {
+        gchar *file = gtk_file_chooser_get_filename(
+            GTK_FILE_CHOOSER(chooser));
+        gtk_entry_set_text(GTK_ENTRY(entry), file);
+        g_free(file);
+    }
+    gtk_widget_destroy(chooser);
+}
+
 /* on_line_numbers_toggled() — show/hide code-block line numbers in every
  * open editor, live.                                                        */
 static void
@@ -335,6 +371,33 @@ on_settings_window_open(OnApp *app)
     g_signal_connect(lines_check, "toggled",
                      G_CALLBACK(on_line_numbers_toggled), app);
     gtk_box_pack_start(GTK_BOX(vbox), lines_check, FALSE, FALSE, 0);
+
+    /* Program used by an image's "Open" action; empty = system default.   */
+    GtkWidget *viewer_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_margin_start(viewer_row, 12);
+    GtkWidget *viewer_label = gtk_label_new("Image viewer:");
+    gtk_box_pack_start(GTK_BOX(viewer_row), viewer_label, FALSE, FALSE, 0);
+
+    GtkWidget *viewer_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(viewer_entry),
+                                   "System default");
+    {
+        gchar *viewer = on_db_setting_get(app->db, "image_viewer");
+        if (viewer != NULL) {
+            gtk_entry_set_text(GTK_ENTRY(viewer_entry), viewer);
+            g_free(viewer);
+        }
+    }
+    g_signal_connect(viewer_entry, "changed",
+                     G_CALLBACK(on_viewer_entry_changed), app);
+    gtk_box_pack_start(GTK_BOX(viewer_row), viewer_entry, TRUE, TRUE, 0);
+
+    GtkWidget *viewer_btn = gtk_button_new_with_label(
+        "Browse\xe2\x80\xa6");
+    g_signal_connect(viewer_btn, "clicked",
+                     G_CALLBACK(on_viewer_browse_clicked), viewer_entry);
+    gtk_box_pack_start(GTK_BOX(viewer_row), viewer_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), viewer_row, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(vbox),
                        gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),

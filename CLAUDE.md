@@ -30,7 +30,7 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 | `src/serialize.[ch]` | ONBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
 | `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid, DnD, sortable headers, context menus, menubar (File/View), native-menubar hook |
-| `src/search_window.[ch]` | Search over titles + full text; scope = All Notes / live library selection; case + regex options |
+| `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles (library vs editor), code-copy-button toggle, native macOS menubar toggle |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
 | `src/cli.[ch]` | Headless subcommand interface (runs before GTK in main; tags/folders/notes CRUD, backup, export); folders by path, notes by id |
@@ -152,6 +152,22 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 - code_buttons_rebuild has a fast path: when block-start offsets match
   the existing buttons' marks, it only repositions (no widget churn per
   keystroke).
+- Cross-note search reads the `notes.body_text` cache column (filled by
+  every save via `on_note_extract_text`, a record-walk over the ONBF
+  blob that skips image payloads entirely). NULL rows (pre-column saves)
+  fall back to the extractor and write back unless read-only. Measured:
+  full cold extraction of 1260 notes / 616 MB of blobs = 183 ms; the
+  warm path reads ~1 MB of text. The old path deserialized every note
+  into a GtkTextBuffer, decoding every PNG, per search.
+- Search runs on a worker thread (GtkSpinner in the window), never the
+  GTK main loop. The worker opens its OWN SQLite connection (one
+  connection must not cross threads); scope is resolved on the main
+  thread first (it reads library widgets); results come back via
+  g_idle_add. A SearchJob owns everything and frees itself on the main
+  thread after checking its atomic `cancelled` flag — set when the
+  window closes or a newer search starts, so it never touches a dead
+  window. GRegex is immutable ⇒ compile on main (instant bad-pattern
+  errors), match on worker.
 - Deliberately NOT done: WAL journal or synchronous=NORMAL pragmas —
   unsafe/risky on network filesystems, which the shared-DB feature
   targets.

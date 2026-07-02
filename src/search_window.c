@@ -1,11 +1,25 @@
 /* ===========================================================================
  * search_window.c — the note search window (implementation)
  *
- * Each search deserializes candidate notes into an offscreen buffer to
- * obtain their plain text, then matches title-or-body against the query
- * using one of three strategies: plain case-insensitive (casefolded
- * strstr), plain case-sensitive (strstr), or GRegex (with or without
- * G_REGEX_CASELESS).
+ * Each search matches title-or-body against the query using one of three
+ * strategies: plain case-insensitive (casefolded strstr), plain
+ * case-sensitive (strstr), or GRegex (with or without G_REGEX_CASELESS).
+ *
+ * Note bodies come from the notes.body_text cache column so a search
+ * never decodes images or builds text buffers.  Rows saved before the
+ * column existed have a NULL cache; those fall back to a cheap scan of
+ * the ONBF blob (on_note_extract_text) and the result is written back,
+ * so the first search after upgrading backfills the cache.
+ *
+ * Searches run OFF the GTK main thread so the GUI never blocks: the
+ * scope is resolved up front (it reads library widgets), then a worker
+ * thread with its OWN SQLite connection (one connection must not be
+ * shared across threads) does all the reading and matching while a
+ * spinner runs in the window.  The worker hands its results back via
+ * g_idle_add; a cancelled flag lets a new search, an empty query, or
+ * closing the window abandon an in-flight job — the job always frees
+ * itself on the main thread after checking that flag, so it never
+ * touches a destroyed window.
  * =========================================================================== */
 
 #include "search_window.h"
@@ -18,10 +32,12 @@
 /* Result-list store columns.                                                */
 enum {
     SR_ID,                           /* gint64: note id                     */
-    SR_TITLE,                        /* gchar*: note title                  */
+    SR_PATH,                         /* gchar*: /Folder/Sub/Title path      */
     SR_MODIFIED,                     /* gchar*: formatted updated_at        */
     SR_N_COLS
 };
+
+typedef struct SearchJob SearchJob;  /* forward: one in-flight search       */
 
 /* ---------------------------------------------------------------------------
  * OnSearch — all state for one search window.
@@ -37,6 +53,10 @@ enum {
  *   check_regex   — "Regular expression" checkbox.
  *   store         — results list model.
  *   status        — label under the results showing match counts/errors.
+ *   spinner       — GtkSpinner next to the Search button; visible and
+ *                   spinning while a worker thread is searching.
+ *   job           — the in-flight search, or NULL when idle (the job is
+ *                   owned by its worker/idle chain, never freed here).
  * ------------------------------------------------------------------------- */
 typedef struct {
     OnApp         *app;
@@ -48,30 +68,143 @@ typedef struct {
     GtkWidget     *check_regex;
     GtkListStore  *store;
     GtkWidget     *status;
+    GtkWidget     *spinner;
+    SearchJob     *job;
 } OnSearch;
 
 /* ---------------------------------------------------------------------------
- * note_plain_text() — load a note and flatten it to plain text (title is
- * matched separately by the caller).  Returns a newly allocated string.
+ * SearchHit — one matching note, fully formatted by the worker so the
+ * main thread only copies strings into the list store.
+ *
+ * Fields:
+ *   id   — note id (for opening on activation).
+ *   path — "/Folder/Sub/Title" display path (owned).
+ *   when — formatted updated_at (owned).
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    gint64  id;
+    gchar  *path;
+    gchar  *when;
+} SearchHit;
+
+/* search_hit_free() — GDestroyNotify for the job's hits array.              */
+static void
+search_hit_free(gpointer data)
+{
+    SearchHit *h = data;
+    g_free(h->path);
+    g_free(h->when);
+    g_free(h);
+}
+
+/* ---------------------------------------------------------------------------
+ * SearchJob — everything one background search needs, snapshotted on the
+ * main thread so the worker never touches GTK or the shared db handle.
+ *
+ * Fields:
+ *   sw             — owning window; ONLY dereferenced on the main thread
+ *                    and ONLY while `cancelled` is unset.
+ *   cancelled      — set (atomically, from the main thread) when the
+ *                    window closes or a newer search supersedes this one.
+ *   db_path        — database file to open privately (owned).
+ *   read_only      — the app's read-only flag; suppresses the body_text
+ *                    backfill writeback.
+ *   query          — the search text (owned).
+ *   case_sensitive — plain-match case option.
+ *   regex          — compiled pattern, or NULL for plain matching (GRegex
+ *                    is immutable, so cross-thread use is safe).
+ *   scoped/
+ *   scope_tag/
+ *   scope_id       — candidate-note scope resolved before the thread ran.
+ *   scope_desc     — " in “name”" status suffix, or NULL (owned).
+ *   hits           — SearchHit* results, filled by the worker.
+ *   error          — worker-side failure message, or NULL (owned).
+ * ------------------------------------------------------------------------- */
+struct SearchJob {
+    OnSearch  *sw;
+    gint       cancelled;
+    gchar     *db_path;
+    gboolean   read_only;
+    gchar     *query;
+    gboolean   case_sensitive;
+    GRegex    *regex;
+    gboolean   scoped;
+    gboolean   scope_tag;
+    gint64     scope_id;
+    gchar     *scope_desc;
+    GPtrArray *hits;
+    gchar     *error;
+};
+
+/* search_job_free() — release a job and everything it owns.                 */
+static void
+search_job_free(SearchJob *job)
+{
+    if (job->regex != NULL)
+        g_regex_unref(job->regex);
+    g_ptr_array_free(job->hits, TRUE);
+    g_free(job->db_path);
+    g_free(job->query);
+    g_free(job->scope_desc);
+    g_free(job->error);
+    g_free(job);
+}
+
+/* search_job_cancel() — detach an in-flight job from its window.  The
+ * worker/idle chain still owns the job and frees it; it just won't touch
+ * the window any more.                                                      */
+static void
+search_job_cancel(OnSearch *sw)
+{
+    if (sw->job != NULL) {
+        g_atomic_int_set(&sw->job->cancelled, 1);
+        sw->job = NULL;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * note_plain_text() — a note's plain text for matching (title is matched
+ * separately by the caller).  Reads the body_text cache when filled;
+ * otherwise extracts it from the ONBF blob without decoding images and
+ * writes it back so the next search skips the blob entirely (unless the
+ * session is read-only).  Runs on the worker thread against the worker's
+ * private connection.  Returns a newly allocated string.
  * ------------------------------------------------------------------------- */
 static gchar *
-note_plain_text(OnApp *app, gint64 note_id)
+note_plain_text(OnDatabase *db, gint64 note_id, gboolean read_only)
 {
+    gchar *cached = on_db_note_body_text(db, note_id);
+    if (cached != NULL)
+        return cached;
+
     gsize   blob_len = 0;            /* stored blob size                    */
-    guint8 *blob = on_db_note_load(app->db, note_id, &blob_len);
+    guint8 *blob = on_db_note_load(db, note_id, &blob_len);
     if (blob == NULL)
         return g_strdup("");
 
-    GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
-    on_buffer_ensure_tags(buffer);
-    on_note_deserialize(buffer, blob, blob_len);
+    gchar *text = on_note_extract_text(blob, blob_len);
     g_free(blob);
-
-    GtkTextIter start, end;          /* full buffer bounds                  */
-    gtk_text_buffer_get_bounds(buffer, &start, &end);
-    gchar *text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-    g_object_unref(buffer);
+    if (!read_only)
+        on_db_note_set_body_text(db, note_id, text);
     return text;
+}
+
+/* ---------------------------------------------------------------------------
+ * note_full_path() — build the "/Folder/Sub/Title" display path of one
+ * result.  Folder paths are memoized in `cache` (gint64 folder id →
+ * owned path string) since a result set typically clusters in a handful
+ * of folders.  Returns a newly allocated string.
+ * ------------------------------------------------------------------------- */
+static gchar *
+note_full_path(OnDatabase *db, OnNoteMeta *m, GHashTable *cache)
+{
+    gpointer key = (gpointer)(gintptr)m->folder_id;
+    gchar *fpath = g_hash_table_lookup(cache, key);
+    if (fpath == NULL) {
+        fpath = on_db_folder_path(db, m->folder_id);
+        g_hash_table_insert(cache, key, fpath);
+    }
+    return g_strdup_printf("%s/%s", fpath, m->title);
 }
 
 /* ---------------------------------------------------------------------------
@@ -95,11 +228,124 @@ text_matches(const gchar *haystack, const gchar *needle,
 }
 
 /* ---------------------------------------------------------------------------
- * run_search() — execute the query and fill the results list.
+ * search_done() — idle callback on the main thread: deliver a finished
+ * job's results to its window (unless the job was cancelled, in which
+ * case the window is gone or has moved on) and free the job.
+ * ------------------------------------------------------------------------- */
+static gboolean
+search_done(gpointer user_data)
+{
+    SearchJob *job = user_data;
+    if (!g_atomic_int_get(&job->cancelled)) {
+        OnSearch *sw = job->sw;      /* safe: not cancelled ⇒ window alive  */
+        sw->job = NULL;
+        gtk_spinner_stop(GTK_SPINNER(sw->spinner));
+        gtk_widget_hide(sw->spinner);
+
+        if (job->error != NULL) {
+            gtk_label_set_text(GTK_LABEL(sw->status), job->error);
+        } else {
+            for (guint i = 0; i < job->hits->len; i++) {
+                SearchHit *h = g_ptr_array_index(job->hits, i);
+                GtkTreeIter iter;
+                gtk_list_store_append(sw->store, &iter);
+                gtk_list_store_set(sw->store, &iter,
+                                   SR_ID,       h->id,
+                                   SR_PATH,     h->path,
+                                   SR_MODIFIED, h->when,
+                                   -1);
+            }
+            gchar *msg = g_strdup_printf(
+                "%u match%s%s", job->hits->len,
+                job->hits->len == 1 ? "" : "es",
+                job->scope_desc != NULL ? job->scope_desc : "");
+            gtk_label_set_text(GTK_LABEL(sw->status), msg);
+            g_free(msg);
+        }
+    }
+    search_job_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+/* ---------------------------------------------------------------------------
+ * search_worker() — the search thread: open a private connection, walk
+ * the candidate notes, and collect formatted hits.  Touches nothing of
+ * the window; finishes by posting search_done() to the main loop.
+ * ------------------------------------------------------------------------- */
+static gpointer
+search_worker(gpointer user_data)
+{
+    SearchJob *job = user_data;
+
+    /* One SQLite connection must not be shared across threads, so the
+     * worker opens its own (same file, same 5 s busy timeout).             */
+    OnDatabase *db = on_db_open(job->db_path);
+    if (db == NULL) {
+        job->error = g_strdup("Could not open the database.");
+        g_idle_add(search_done, job);
+        return NULL;
+    }
+
+    GList *notes;                    /* OnNoteMeta* candidates              */
+    if (!job->scoped)
+        notes = on_db_note_list_all(db);
+    else if (job->scope_tag)
+        notes = on_db_notes_by_tag(db, job->scope_id);
+    else
+        notes = on_db_note_list(db, job->scope_id);
+
+    /* Memoized folder-id → path strings for the result rows.               */
+    GHashTable *paths = g_hash_table_new_full(g_direct_hash, g_direct_equal,
+                                              NULL, g_free);
+
+    for (GList *l = notes; l != NULL; l = l->next) {
+        if (g_atomic_int_get(&job->cancelled))
+            break;                   /* superseded/closed: stop early       */
+        OnNoteMeta *m = l->data;     /* one candidate                       */
+        gchar *body = note_plain_text(db, m->id, job->read_only);
+
+        gboolean match;              /* does this note match the query?     */
+        if (job->regex != NULL)
+            match = g_regex_match(job->regex, m->title, 0, NULL) ||
+                    g_regex_match(job->regex, body, 0, NULL);
+        else
+            match = text_matches(m->title, job->query,
+                                 job->case_sensitive) ||
+                    text_matches(body, job->query, job->case_sensitive);
+        g_free(body);
+        if (!match)
+            continue;
+
+        GDateTime *dt = g_date_time_new_from_unix_local(m->updated_at);
+        SearchHit *h = g_new0(SearchHit, 1);
+        h->id   = m->id;
+        h->path = note_full_path(db, m, paths);
+        h->when = g_date_time_format(dt, "%b %e, %Y %H:%M");
+        g_date_time_unref(dt);
+        g_ptr_array_add(job->hits, h);
+    }
+    g_hash_table_destroy(paths);
+    on_db_note_list_free(notes);
+    on_db_close(db);
+
+    g_idle_add(search_done, job);
+    return NULL;
+}
+
+/* ---------------------------------------------------------------------------
+ * run_search() — validate the query, snapshot everything the worker
+ * needs (scope resolution reads library widgets, so it happens here on
+ * the main thread), and kick off the search thread.  Any search already
+ * in flight is abandoned first.
  * ------------------------------------------------------------------------- */
 static void
 run_search(OnSearch *sw)
 {
+    /* A new request supersedes whatever is still running.                  */
+    search_job_cancel(sw);
+    gtk_spinner_stop(GTK_SPINNER(sw->spinner));
+    gtk_widget_hide(sw->spinner);
+
     const gchar *query = gtk_entry_get_text(GTK_ENTRY(sw->entry));
     gtk_list_store_clear(sw->store);
     if (query == NULL || *query == '\0') {
@@ -130,67 +376,34 @@ run_search(OnSearch *sw)
         }
     }
 
-    /* Candidate notes per the scope radio.  The scoped variant reads the
-     * library's selection NOW, so it always matches what is highlighted
-     * in the sidebar at the moment Search is pressed.                      */
-    GList *notes;                    /* OnNoteMeta* candidates              */
-    gchar *scope_desc = NULL;        /* "in <name>" suffix for the status   */
-    if (!scoped) {
-        notes = on_db_note_list_all(sw->app->db);
-    } else {
+    SearchJob *job = g_new0(SearchJob, 1);
+    job->sw             = sw;
+    job->db_path        = g_strdup(sw->app->db->path);
+    job->read_only      = sw->app->read_only;
+    job->query          = g_strdup(query);
+    job->case_sensitive = case_sensitive;
+    job->regex          = regex;     /* ownership passes to the job         */
+    job->scoped         = scoped;
+    job->hits           = g_ptr_array_new_with_free_func(search_hit_free);
+
+    /* The scoped variant reads the library's selection NOW, so it always
+     * matches what is highlighted in the sidebar at the moment Search is
+     * pressed.                                                             */
+    if (scoped) {
         OnSearchScope scope;         /* live library scope                  */
-        gint64 scope_id;             /* live folder/tag id                  */
         gchar *scope_name;           /* live selection name                 */
-        on_library_get_scope(sw->app, &scope, &scope_id, &scope_name);
-        if (scope == ON_SCOPE_TAG)
-            notes = on_db_notes_by_tag(sw->app->db, scope_id);
-        else
-            notes = on_db_note_list(sw->app->db, scope_id);
-        scope_desc = g_strdup_printf(
+        on_library_get_scope(sw->app, &scope, &job->scope_id, &scope_name);
+        job->scope_tag  = scope == ON_SCOPE_TAG;
+        job->scope_desc = g_strdup_printf(
             " in \xe2\x80\x9c%s\xe2\x80\x9d", scope_name);
         g_free(scope_name);
     }
 
-    gint hits = 0;                   /* matching notes                      */
-    for (GList *l = notes; l != NULL; l = l->next) {
-        OnNoteMeta *m = l->data;     /* one candidate                       */
-        gchar *body = note_plain_text(sw->app, m->id);
-
-        gboolean match;              /* does this note match the query?     */
-        if (regex != NULL)
-            match = g_regex_match(regex, m->title, 0, NULL) ||
-                    g_regex_match(regex, body, 0, NULL);
-        else
-            match = text_matches(m->title, query, case_sensitive) ||
-                    text_matches(body, query, case_sensitive);
-        g_free(body);
-        if (!match)
-            continue;
-
-        GDateTime *dt = g_date_time_new_from_unix_local(m->updated_at);
-        gchar *when = g_date_time_format(dt, "%b %e, %Y %H:%M");
-        g_date_time_unref(dt);
-
-        GtkTreeIter iter;
-        gtk_list_store_append(sw->store, &iter);
-        gtk_list_store_set(sw->store, &iter,
-                           SR_ID,       m->id,
-                           SR_TITLE,    m->title,
-                           SR_MODIFIED, when,
-                           -1);
-        g_free(when);
-        hits++;
-    }
-    on_db_note_list_free(notes);
-    if (regex != NULL)
-        g_regex_unref(regex);
-
-    gchar *msg = g_strdup_printf("%d match%s%s", hits,
-                                 hits == 1 ? "" : "es",
-                                 scope_desc != NULL ? scope_desc : "");
-    gtk_label_set_text(GTK_LABEL(sw->status), msg);
-    g_free(msg);
-    g_free(scope_desc);
+    sw->job = job;
+    gtk_label_set_text(GTK_LABEL(sw->status), "Searching\xe2\x80\xa6");
+    gtk_widget_show(sw->spinner);
+    gtk_spinner_start(GTK_SPINNER(sw->spinner));
+    g_thread_unref(g_thread_new("on-search", search_worker, job));
 }
 
 /* on_search_clicked() / on_entry_activate() — both trigger the search.      */
@@ -223,12 +436,15 @@ on_result_activated(GtkTreeView *view, GtkTreePath *path,
     on_editor_window_open(sw->app, id);
 }
 
-/* on_search_destroy() — free the state struct with the window.              */
+/* on_search_destroy() — abandon any running search (the job frees itself
+ * once its worker finishes) and free the state struct with the window.      */
 static void
 on_search_destroy(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
-    g_free(user_data);
+    OnSearch *sw = user_data;        /* owning search window                */
+    search_job_cancel(sw);
+    g_free(sw);
 }
 
 void
@@ -262,6 +478,11 @@ on_search_window_open(OnApp *app, gboolean scope_to_sel)
     GtkWidget *btn = gtk_button_new_with_label("Search");
     g_signal_connect(btn, "clicked", G_CALLBACK(on_search_clicked), sw);
     gtk_box_pack_start(GTK_BOX(query_row), btn, FALSE, FALSE, 0);
+
+    /* Spinner shown while a background search runs (hidden when idle).     */
+    sw->spinner = gtk_spinner_new();
+    gtk_widget_set_no_show_all(sw->spinner, TRUE);
+    gtk_box_pack_start(GTK_BOX(query_row), sw->spinner, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), query_row, FALSE, FALSE, 0);
 
     /* --- scope radios -------------------------------------------------------*/
@@ -292,7 +513,7 @@ on_search_window_open(OnApp *app, gboolean scope_to_sel)
     /* --- results -------------------------------------------------------------*/
     sw->store = gtk_list_store_new(SR_N_COLS,
                                    G_TYPE_INT64,    /* SR_ID               */
-                                   G_TYPE_STRING,   /* SR_TITLE            */
+                                   G_TYPE_STRING,   /* SR_PATH             */
                                    G_TYPE_STRING);  /* SR_MODIFIED         */
 
     GtkWidget *results = gtk_tree_view_new_with_model(
@@ -301,8 +522,8 @@ on_search_window_open(OnApp *app, gboolean scope_to_sel)
     gtk_tree_view_append_column(
         GTK_TREE_VIEW(results),
         gtk_tree_view_column_new_with_attributes(
-            "Title", gtk_cell_renderer_text_new(),
-            "text", SR_TITLE, NULL));
+            "Path", gtk_cell_renderer_text_new(),
+            "text", SR_PATH, NULL));
     gtk_tree_view_append_column(
         GTK_TREE_VIEW(results),
         gtk_tree_view_column_new_with_attributes(

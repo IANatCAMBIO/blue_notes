@@ -144,11 +144,14 @@ on_db_open(const gchar *path_override)
         return NULL;
     }
 
-    /* Migration: the pinned column arrived after the original schema.
+    /* Migrations: these columns arrived after the original schema.
      * ALTER fails harmlessly when the column already exists.               */
     sqlite3_exec(db->handle,
                  "ALTER TABLE notes ADD COLUMN pinned INTEGER "
                  "NOT NULL DEFAULT 0",
+                 NULL, NULL, NULL);
+    sqlite3_exec(db->handle,
+                 "ALTER TABLE notes ADD COLUMN body_text TEXT",
                  NULL, NULL, NULL);
     return db;
 }
@@ -390,10 +393,10 @@ on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id)
 
 gboolean
 on_db_note_save(OnDatabase *db, gint64 id, const gchar *title,
-                const guint8 *content, gsize len)
+                const guint8 *content, gsize len, const gchar *body_text)
 {
     sqlite3_stmt *stmt = prepare(db,
-        "UPDATE notes SET title=?, content=?, "
+        "UPDATE notes SET title=?, content=?, body_text=?, "
         "updated_at=strftime('%s','now') WHERE id=?");
     if (stmt == NULL)
         return FALSE;
@@ -402,10 +405,58 @@ on_db_note_save(OnDatabase *db, gint64 id, const gchar *title,
         sqlite3_bind_blob(stmt, 2, content, (int)len, SQLITE_TRANSIENT);
     else
         sqlite3_bind_null(stmt, 2);
-    sqlite3_bind_int64(stmt, 3, id);
+    if (body_text != NULL)
+        sqlite3_bind_text(stmt, 3, body_text, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(stmt, 3);
+    sqlite3_bind_int64(stmt, 4, id);
     gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
     if (!ok)
         g_warning("db: note_save: %s", sqlite3_errmsg(db->handle));
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+gchar *
+on_db_note_body_text(OnDatabase *db, gint64 id)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT body_text FROM notes WHERE id=?");
+    if (stmt == NULL)
+        return NULL;
+    sqlite3_bind_int64(stmt, 1, id);
+    gchar *text = NULL;              /* cached text, NULL if unfilled       */
+    if (sqlite3_step(stmt) == SQLITE_ROW &&
+        sqlite3_column_type(stmt, 0) != SQLITE_NULL)
+        text = g_strdup((const gchar *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+    return text;
+}
+
+gboolean
+on_db_note_set_body_text(OnDatabase *db, gint64 id, const gchar *body_text)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE notes SET body_text=? WHERE id=?");
+    if (stmt == NULL)
+        return FALSE;
+    sqlite3_bind_text(stmt, 1, body_text, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, id);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+gboolean
+on_db_note_set_updated_at(OnDatabase *db, gint64 id, gint64 ts)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE notes SET updated_at=? WHERE id=?");
+    if (stmt == NULL)
+        return FALSE;
+    sqlite3_bind_int64(stmt, 1, ts);
+    sqlite3_bind_int64(stmt, 2, id);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
     return ok;
 }
