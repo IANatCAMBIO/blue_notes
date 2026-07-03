@@ -61,8 +61,10 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   offscreen and never need widgets. Default display width 320
   (`ON_IMAGE_DEFAULT_WIDTH`); right-click menu toggles thumbnail/full.
 - Settings table keys: `toolbar_style_library`, `toolbar_style_editor`
-  (`text|icons|both`, default both), `icon_theme` (legacy, unused),
-  `code_copy_button` (`1|0`), `native_menubar` (`1|0`).
+  (`text|icons|both`, default icons), `code_copy_button` (`1|0`),
+  `code_line_numbers` (`1|0`), `native_menubar` (`1|0`), `image_viewer`
+  (program path; unset = system default), `search_win_w`/`search_win_h`
+  (last search-window size, the default for the next one).
 - **Custom DB location** (shared-folder support) lives in the CONFIG FILE
   `~/.config/orange-notes/config.ini` (`[orange-notes] db_dir=`), never in
   the DB. `on_app_switch_database()` switches live: closes all editors

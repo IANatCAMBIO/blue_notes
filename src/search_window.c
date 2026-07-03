@@ -57,6 +57,9 @@ typedef struct SearchJob SearchJob;  /* forward: one in-flight search       */
  *                   spinning while a worker thread is searching.
  *   job           — the in-flight search, or NULL when idle (the job is
  *                   owned by its worker/idle chain, never freed here).
+ *   win_w/win_h   — the window's current size, tracked by configure
+ *                   events and persisted on close so the next search
+ *                   window opens at the size this one was left at.
  * ------------------------------------------------------------------------- */
 typedef struct {
     OnApp         *app;
@@ -70,7 +73,13 @@ typedef struct {
     GtkWidget     *status;
     GtkWidget     *spinner;
     SearchJob     *job;
+    gint           win_w;
+    gint           win_h;
 } OnSearch;
+
+/* Fallback dimensions before any search window has been resized.            */
+#define SEARCH_WIN_DEFAULT_W 680
+#define SEARCH_WIN_DEFAULT_H 460
 
 /* ---------------------------------------------------------------------------
  * SearchHit — one matching note, fully formatted by the worker so the
@@ -436,14 +445,36 @@ on_result_activated(GtkTreeView *view, GtkTreePath *path,
     on_editor_window_open(sw->app, id);
 }
 
+/* on_search_configure() — track the window's live size so it can be
+ * persisted at close (the GdkWindow is already gone by "destroy").          */
+static gboolean
+on_search_configure(GtkWidget *widget, GdkEventConfigure *event,
+                    gpointer user_data)
+{
+    (void)widget;
+    OnSearch *sw = user_data;        /* owning search window                */
+    sw->win_w = event->width;
+    sw->win_h = event->height;
+    return FALSE;                    /* never consume: default handling     */
+}
+
 /* on_search_destroy() — abandon any running search (the job frees itself
- * once its worker finishes) and free the state struct with the window.      */
+ * once its worker finishes), remember the window's size as the default
+ * for the next search window, and free the state struct.                    */
 static void
 on_search_destroy(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     OnSearch *sw = user_data;        /* owning search window                */
     search_job_cancel(sw);
+    if (sw->win_w > 0 && sw->win_h > 0 && !sw->app->read_only) {
+        gchar *w = g_strdup_printf("%d", sw->win_w);
+        gchar *h = g_strdup_printf("%d", sw->win_h);
+        on_db_setting_set(sw->app->db, "search_win_w", w);
+        on_db_setting_set(sw->app->db, "search_win_h", h);
+        g_free(w);
+        g_free(h);
+    }
     g_free(sw);
 }
 
@@ -456,9 +487,28 @@ on_search_window_open(OnApp *app, gboolean scope_to_sel)
     /* --- window (standard titlebar) --------------------------------------*/
     sw->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(sw->window), "Orange Notes - Search");
-    gtk_window_set_default_size(GTK_WINDOW(sw->window), 680, 460);
+
+    /* Open at whatever size the last search window was left at.            */
+    gint win_w = SEARCH_WIN_DEFAULT_W;
+    gint win_h = SEARCH_WIN_DEFAULT_H;
+    gchar *w_str = on_db_setting_get(app->db, "search_win_w");
+    gchar *h_str = on_db_setting_get(app->db, "search_win_h");
+    if (w_str != NULL && h_str != NULL) {
+        gint w = (gint)g_ascii_strtoll(w_str, NULL, 10);
+        gint h = (gint)g_ascii_strtoll(h_str, NULL, 10);
+        if (w > 0 && h > 0) {
+            win_w = w;
+            win_h = h;
+        }
+    }
+    g_free(w_str);
+    g_free(h_str);
+    gtk_window_set_default_size(GTK_WINDOW(sw->window), win_w, win_h);
+
     gtk_window_set_transient_for(GTK_WINDOW(sw->window),
                                  GTK_WINDOW(app->library_window));
+    g_signal_connect(sw->window, "configure-event",
+                     G_CALLBACK(on_search_configure), sw);
     g_signal_connect(sw->window, "destroy",
                      G_CALLBACK(on_search_destroy), sw);
 

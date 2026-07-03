@@ -493,12 +493,12 @@ on_app_load_toolbar_styles(OnApp *app)
 {
     for (gint kind = 0; kind < ON_TOOLBAR_N_KINDS; kind++) {
         gchar *value = on_db_setting_get(app->db, STYLE_SETTING_KEYS[kind]);
-        GtkToolbarStyle style = GTK_TOOLBAR_BOTH;    /* icons above text    */
+        GtkToolbarStyle style = GTK_TOOLBAR_ICONS;   /* the default         */
         if (value != NULL) {
             if (g_strcmp0(value, "text") == 0)
                 style = GTK_TOOLBAR_TEXT;
-            else if (g_strcmp0(value, "icons") == 0)
-                style = GTK_TOOLBAR_ICONS;
+            else if (g_strcmp0(value, "both") == 0)
+                style = GTK_TOOLBAR_BOTH;
             g_free(value);
         }
         app->toolbar_style[kind] = style;

@@ -141,7 +141,7 @@ main(int argc, char *argv[])
                                                       g_free, NULL),
         .library_window       = NULL,
         .notify_notes_changed = NULL,
-        .toolbar_style        = { GTK_TOOLBAR_BOTH, GTK_TOOLBAR_BOTH },
+        .toolbar_style        = { GTK_TOOLBAR_ICONS, GTK_TOOLBAR_ICONS },
         .toolbars             = { NULL, NULL },
         .icons_dir            = NULL,
         .db_dir               = NULL,

@@ -1837,6 +1837,10 @@ build_menubar(OnLibrary *lw)
     GtkWidget *view_menu = gtk_menu_new();
     add_menu_item(view_menu, "Notes as _List", G_CALLBACK(on_view_list), lw);
     add_menu_item(view_menu, "Notes as _Grid", G_CALLBACK(on_view_grid), lw);
+    gtk_menu_shell_append(GTK_MENU_SHELL(view_menu),
+                          gtk_separator_menu_item_new());
+    add_menu_item(view_menu, "_Search Notes\xe2\x80\xa6",
+                  G_CALLBACK(on_open_search), lw);
 
     GtkWidget *view_root = gtk_menu_item_new_with_mnemonic("_View");
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(view_root), view_menu);
