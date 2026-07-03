@@ -104,6 +104,8 @@ static const GtkTargetEntry ROW_TARGET =
  *                   a matching refresh (e.g. after an editor autosave)
  *                   keeps the notes-pane scroll position instead of
  *                   jumping back to the top.
+ *   sidebar_box   — the whole folder/tag pane, so the toolbar's
+ *                   show/hide toggle can flip its visibility.
  * ------------------------------------------------------------------------- */
 typedef struct {
     OnApp        *app;
@@ -121,6 +123,7 @@ typedef struct {
     GHashTable   *thumb_cache;
     gint          shown_kind;
     gint64        shown_id;
+    GtkWidget    *sidebar_box;
 } OnLibrary;
 
 /* ---------------------------------------------------------------------------
@@ -1354,6 +1357,17 @@ on_view_grid(GtkWidget *widget, gpointer user_data)
     refresh_notes(lw);               /* fill the thumbnails list mode skips */
 }
 
+/* on_toggle_sidebar() — toolbar show/hide button for the folder/tag
+ * pane: the notes view takes the whole window while it is hidden.           */
+static void
+on_toggle_sidebar(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    gtk_widget_set_visible(lw->sidebar_box,
+                           !gtk_widget_get_visible(lw->sidebar_box));
+}
+
 /* on_toggle_view() — toolbar List/Grid button: switch to whichever notes
  * view is not currently showing.                                            */
 static void
@@ -1906,6 +1920,9 @@ build_action_bar(OnLibrary *lw)
                               GTK_ICON_SIZE_SMALL_TOOLBAR);
 
     /* --- folder area ---------------------------------------------------- */
+    add_tool_button(lw, toolbar, "web", "\xe2\x97\xa7",
+                    "Folders", "Show or hide the folder pane",
+                    G_CALLBACK(on_toggle_sidebar));
     add_tool_button(lw, toolbar, "new-folder", "+\xf0\x9f\x93\x81",
                     "New Folder", "Create a folder inside the selection",
                     G_CALLBACK(on_new_folder));
@@ -2115,11 +2132,40 @@ on_library_window_create(OnApp *app)
     lw->sidebar = GTK_TREE_VIEW(
         gtk_tree_view_new_with_model(GTK_TREE_MODEL(lw->sidebar_store)));
     gtk_tree_view_set_headers_visible(lw->sidebar, FALSE);
-    gtk_tree_view_append_column(
-        lw->sidebar,
-        gtk_tree_view_column_new_with_attributes(
-            "Name", gtk_cell_renderer_text_new(),
-            "text", SB_NAME, NULL));
+    {
+        /* Ellipsizing names keeps the pane's MINIMUM width small: without
+         * it the widest row dictates the minimum and the divider can't be
+         * dragged past it.                                                 */
+        GtkCellRenderer *name_cell = gtk_cell_renderer_text_new();
+        g_object_set(name_cell,
+                     "ellipsize", PANGO_ELLIPSIZE_END, NULL);
+        gtk_tree_view_append_column(
+            lw->sidebar,
+            gtk_tree_view_column_new_with_attributes(
+                "Name", name_cell, "text", SB_NAME, NULL));
+    }
+
+    /* Sidebar palette: light grey backdrop (rows and the empty area
+     * below them — the tree view paints the whole widget), muted grey
+     * text, and a blue selection bar (white text for contrast).            */
+    {
+        GtkCssProvider *css = gtk_css_provider_new();
+        gtk_css_provider_load_from_data(css,
+            "treeview.view {"
+            "  background-color: rgb(230,230,230);"
+            "  color: rgb(65,65,65);"
+            "}"
+            "treeview.view:selected {"
+            "  background-color: rgb(86,131,224);"
+            "  color: white;"
+            "}",
+            -1, NULL);
+        gtk_style_context_add_provider(
+            gtk_widget_get_style_context(GTK_WIDGET(lw->sidebar)),
+            GTK_STYLE_PROVIDER(css),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(css);
+    }
 
     GtkTreeSelection *sb_sel = gtk_tree_view_get_selection(lw->sidebar);
     gtk_tree_selection_set_select_function(sb_sel, sidebar_select_func,
@@ -2150,6 +2196,7 @@ on_library_window_create(OnApp *app)
     GtkWidget *sidebar_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_pack_start(GTK_BOX(sidebar_box), sidebar_scroll,
                        TRUE, TRUE, 0);
+    lw->sidebar_box = sidebar_box;   /* for the toolbar show/hide toggle    */
 
     /* --- notes list view ---------------------------------------------------*/
     lw->notes_list = GTK_TREE_VIEW(

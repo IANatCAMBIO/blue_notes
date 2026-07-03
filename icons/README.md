@@ -22,6 +22,7 @@ is missing or cannot be decoded, the button falls back to a text glyph.
 | `new-folder.png`         | New Folder                     |
 | `delete-folder.png`      | Delete Folder                  |
 | `view.png`               | List/Grid view toggle          |
+| `web.png`                | Show/hide the folder pane      |
 | `search.png`             | Search                         |
 | `copy.png`               | Code-block copy button         |
 | `dialog-warning.svg`     | Delete-confirmation dialogs    |

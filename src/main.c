@@ -205,6 +205,11 @@ main(int argc, char *argv[])
     app.sidebar_counts = g_strcmp0(sbc, "1") == 0;
     g_free(sbc);
 
+    /* Auto-H1 for the first line of a new note (off unless enabled).      */
+    gchar *flh = on_app_config_get("first_line_h1");
+    app.first_line_h1 = g_strcmp0(flh, "1") == 0;
+    g_free(flh);
+
     app.gtk_app = gtk_application_new("org.example.orange-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app.gtk_app, "activate",

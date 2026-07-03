@@ -102,6 +102,10 @@
  *                     editor_save knows — without any buffer scan —
  *                     whether note_tags and the library's tag sidebar
  *                     need updating.
+ *   auto_h1         — TRUE while the first line of a brand-new note is
+ *                     being typed and should be styled as Heading 1
+ *                     (File → Settings…); cleared once the title line
+ *                     is finished (Enter pressed).
  * ------------------------------------------------------------------------- */
 typedef struct {
     OnApp          *app;
@@ -129,6 +133,7 @@ typedef struct {
     GtkWidget      *search_entry;
     gboolean        dirty;
     gboolean        tags_modified;
+    gboolean        auto_h1;
 } OnEditor;
 
 /* ---------------------------------------------------------------------------
@@ -2155,6 +2160,26 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
     tag_emoji_in_range(ed, end_off - (gint)n_chars, end_off);
     gtk_text_buffer_get_iter_at_offset(ed->buffer, location, end_off);
 
+    /* Auto-H1: while the first line of a brand-new note is being typed,
+     * keep it styled as a heading.  The tag can't be pre-applied to an
+     * empty line (there is nothing to tag yet), so it is re-applied per
+     * insertion; the first Enter ends the title line — the newline stays
+     * untagged, so the next line starts as plain body text.                */
+    if (ed->auto_h1) {
+        if (gtk_text_buffer_get_line_count(buffer) > 1) {
+            ed->auto_h1 = FALSE;     /* title line finished                 */
+        } else {
+            GtkTextIter ls, le;      /* whole first line                    */
+            line_span(buffer, 0, &ls, &le);
+            if (!gtk_text_iter_equal(&ls, &le)) {
+                ed->internal_change++;
+                gtk_text_buffer_apply_tag_by_name(buffer, ON_TAGNAME_H1,
+                                                  &ls, &le);
+                ed->internal_change--;
+            }
+        }
+    }
+
     /* Typing INSIDE an existing styled #tag renames it — flag the tag set
      * as changed so the next save updates note_tags and the sidebar.       */
     if (!ed->tags_modified) {
@@ -2881,7 +2906,7 @@ on_editor_window_open(OnApp *app, gint64 note_id)
 
     /* --- window: a plain GtkWindow, standard titlebar (no HeaderBar) ---- */
     ed->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_default_size(GTK_WINDOW(ed->window), 720, 800);
+    gtk_window_set_default_size(GTK_WINDOW(ed->window), 720, 580);
     gtk_application_add_window(app->gtk_app, GTK_WINDOW(ed->window));
     {
         gchar *wtitle = g_strdup_printf("Orange Notes - %s", meta->title);
@@ -2929,6 +2954,10 @@ on_editor_window_open(OnApp *app, gint64 note_id)
         g_free(blob);
     }
     gtk_text_buffer_set_modified(ed->buffer, FALSE);
+    /* A brand-new (empty) note gets its first line auto-styled as H1
+     * when the option is enabled.                                          */
+    ed->auto_h1 = app->first_line_h1 &&
+                  gtk_text_buffer_get_char_count(ed->buffer) == 0;
 
     /* --- layout ----------------------------------------------------------*/
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);

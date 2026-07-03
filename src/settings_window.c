@@ -148,19 +148,21 @@ db_section_refresh(DbSection *s)
     gtk_widget_set_sensitive(s->choose_btn, s->app->db_dir != NULL);
 }
 
-/* db_switch_report() — run the switch and report failures in a dialog.      */
+static void on_db_custom_toggled(GtkToggleButton *check,
+                                 gpointer user_data);
+
+/* db_switch_report() — run the switch (it reports its own errors and
+ * asks about existing databases) and re-sync this section's widgets with
+ * whatever actually happened — a cancelled or failed switch leaves the
+ * old location active.                                                      */
 static void
 db_switch_report(DbSection *s, const gchar *new_dir)
 {
-    if (!on_app_switch_database(s->app, new_dir)) {
-        GtkWidget *msg = gtk_message_dialog_new(
-            GTK_WINDOW(gtk_widget_get_toplevel(s->check)),
-            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            "Could not open a database at that location.\n"
-            "The previous database is still in use.");
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
-    }
+    on_app_switch_database(s->app, new_dir);
+    g_signal_handlers_block_by_func(s->check, on_db_custom_toggled, s);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->check),
+                                 s->app->db_dir != NULL);
+    g_signal_handlers_unblock_by_func(s->check, on_db_custom_toggled, s);
     db_section_refresh(s);
 }
 
@@ -270,6 +272,17 @@ on_line_numbers_toggled(GtkToggleButton *check, gpointer user_data)
     on_app_config_set("code_line_numbers",
                       app->code_line_numbers ? "1" : "0");
     on_editor_apply_line_numbers_all(app);
+}
+
+/* on_first_line_h1_toggled() — auto-style the first line of new notes
+ * as Heading 1 (affects notes created from now on).                         */
+static void
+on_first_line_h1_toggled(GtkToggleButton *check, gpointer user_data)
+{
+    OnApp *app = user_data;          /* application context                 */
+    app->first_line_h1 = gtk_toggle_button_get_active(check);
+    on_app_config_set("first_line_h1",
+                      app->first_line_h1 ? "1" : "0");
 }
 
 /* ---------------------------------------------------------------------------
@@ -393,6 +406,15 @@ on_settings_window_open(OnApp *app)
     g_signal_connect(lines_check, "toggled",
                      G_CALLBACK(on_line_numbers_toggled), app);
     gtk_box_pack_start(GTK_BOX(vbox), lines_check, FALSE, FALSE, 0);
+
+    GtkWidget *h1_check = gtk_check_button_new_with_label(
+        "Format the first line of a new note as Heading 1");
+    gtk_widget_set_margin_start(h1_check, 12);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(h1_check),
+                                 app->first_line_h1);
+    g_signal_connect(h1_check, "toggled",
+                     G_CALLBACK(on_first_line_h1_toggled), app);
+    gtk_box_pack_start(GTK_BOX(vbox), h1_check, FALSE, FALSE, 0);
 
     /* Program used by an image's "Open" action; empty = system default.   */
     GtkWidget *viewer_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);

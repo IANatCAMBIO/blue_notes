@@ -347,14 +347,6 @@ copy_file(const gchar *src, const gchar *dest)
 gboolean
 on_app_switch_database(OnApp *app, const gchar *new_dir)
 {
-    /* Flush and detach everything that touches the current database.       */
-    on_app_close_all_editors(app);
-    on_app_db_release(app);
-
-    gchar *old_path = g_strdup(app->db->path);   /* current db file         */
-    on_db_close(app->db);
-    app->db = NULL;
-
     /* Resolve the target file inside the requested directory.              */
     gchar *target;                   /* path of notes.db at the new home    */
     if (new_dir != NULL) {
@@ -363,9 +355,52 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
     } else {
         target = on_db_default_path();
     }
+    if (g_strcmp0(target, app->db->path) == 0) {
+        g_free(target);
+        return TRUE;                 /* already there: nothing to do        */
+    }
 
-    /* First move to an empty location: bring the notes along.              */
-    if (!g_file_test(target, G_FILE_TEST_EXISTS) &&
+    /* A database already living at the target must never be adopted (or
+     * destroyed) silently: ask BEFORE anything is torn down, so Cancel
+     * leaves the running app completely untouched.                         */
+    gboolean overwrite = FALSE;      /* replace the target file?            */
+    if (g_file_test(target, G_FILE_TEST_EXISTS)) {
+        GtkWidget *dialog = gtk_message_dialog_new(
+            app->library_window != NULL
+                ? GTK_WINDOW(app->library_window) : NULL,
+            GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+            "That folder already contains a notes database.\n\n"
+            "Use the notes stored there, or overwrite it with a copy "
+            "of your current database?\n"
+            "(Overwriting permanently replaces the file at %s.)",
+            target);
+        gtk_window_set_title(GTK_WINDOW(dialog),
+                             "Orange Notes - Existing Database");
+        gtk_dialog_add_buttons(GTK_DIALOG(dialog),
+                               "_Cancel",                GTK_RESPONSE_CANCEL,
+                               "_Use Existing Database", 1,
+                               "_Overwrite It",          2,
+                               NULL);
+        gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        if (response != 1 && response != 2) {
+            g_free(target);
+            return FALSE;            /* cancelled: nothing was touched      */
+        }
+        overwrite = response == 2;
+    }
+
+    /* Flush and detach everything that touches the current database.       */
+    on_app_close_all_editors(app);
+    on_app_db_release(app);
+
+    gchar *old_path = g_strdup(app->db->path);   /* current db file         */
+    on_db_close(app->db);
+    app->db = NULL;
+
+    /* Bring the notes along: always into an empty location, and over an
+     * occupied one only with the user's explicit consent from above.       */
+    if ((overwrite || !g_file_test(target, G_FILE_TEST_EXISTS)) &&
         g_file_test(old_path, G_FILE_TEST_EXISTS))
         copy_file(old_path, target);
 
@@ -386,6 +421,14 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
         /* Fall back to the previous database so the app stays usable.      */
         g_warning("config: cannot use %s; reverting to %s",
                   target, old_path);
+        GtkWidget *msg = gtk_message_dialog_new(
+            app->library_window != NULL
+                ? GTK_WINDOW(app->library_window) : NULL,
+            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            "Could not open a database at that location.\n"
+            "The previous database is still in use.");
+        gtk_dialog_run(GTK_DIALOG(msg));
+        gtk_widget_destroy(msg);
         app->db = on_db_open(old_path);
         if (app->db != NULL)
             on_app_db_acquire(app, NULL);   /* re-claim our old lock        */

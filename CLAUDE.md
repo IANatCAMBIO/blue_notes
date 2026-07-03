@@ -67,7 +67,9 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   (`text|icons|both`, default icons), `code_copy_button` (`1|0`),
   `code_line_numbers` (`1|0`), `native_menubar` (`1|0`),
   `sidebar_counts` (`1|0`, default 0 — folder/tag counts in the
-  sidebar), `image_viewer` (program path; unset = system default),
+  sidebar), `first_line_h1` (`1|0`, default 0 — auto-style the first
+  line of a new note as H1), `image_viewer` (program path; unset =
+  system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
   for the next one). The DB settings table holds ONLY the `in_use`
   instance lock (it must be in the DB — it coordinates instances across

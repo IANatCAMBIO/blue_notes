@@ -50,6 +50,9 @@
  *   sidebar_counts — whether the library sidebar shows note counts next
  *                    to folders and tags; persisted as the
  *                    "sidebar_counts" setting (default off).
+ *   first_line_h1  — whether the first line typed into a brand-new note
+ *                    is automatically formatted as Heading 1; persisted
+ *                    as the "first_line_h1" setting (default off).
  *   db_dir         — custom directory holding notes.db (owned string), or
  *                    NULL for the default location.  Persisted in the
  *                    config FILE (~/.config/orange-notes/config.ini), not
@@ -77,6 +80,7 @@ typedef struct OnApp {
     gboolean         code_copy_buttons;
     gboolean         code_line_numbers;
     gboolean         sidebar_counts;
+    gboolean         first_line_h1;
     gchar           *db_dir;
     gboolean         read_only;
     gchar           *lock_token;
@@ -191,7 +195,10 @@ void on_app_close_all_editors(OnApp *app);
  * notes.db inside `new_dir` (NULL = the default location), and persists
  * the choice in the config file.  If the target has no notes.db yet, the
  * current database file is copied there first, so notes follow the move.
- * On failure the old database is reopened.
+ * If the target ALREADY has a notes.db, the user is asked first — use
+ * the existing database, overwrite it with a copy of the current one, or
+ * cancel (which leaves everything untouched).  Failures are reported in
+ * a dialog and the old database is reopened.
  *   app     — the application context.
  *   new_dir — directory to hold notes.db, or NULL for the default.
  * Returns TRUE if the switch happened.
