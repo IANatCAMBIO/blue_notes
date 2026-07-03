@@ -1,12 +1,13 @@
 /* ===========================================================================
- * serialize.h — ONBF binary note format
+ * serialize.h — BNBF binary note format
  *
  * Converts a GtkTextBuffer (rich text + inline images) to and from the
- * "Blue Notes Binary Format" (ONBF) blob stored in SQLite.
+ * "Blue Notes Binary Format" (BNBF) blob stored in SQLite.
  *
- * ONBF layout (all integers little-endian):
+ * BNBF layout (all integers little-endian):
  *
- *   [4 bytes]  magic "ONBF"
+ *   [4 bytes]  magic "BNBF" ("ONBF" from before the rename is
+ *              accepted by all readers forever)
  *   [u32]      format version (currently 5; 1–4 are still readable)
  *   ...records...
  *   [u8 0x00]  end marker
@@ -41,7 +42,7 @@
 #include <gtk/gtk.h>
 
 /* ---------------------------------------------------------------------------
- * Formatting flag bits used in ONBF TEXT records.  Each bit corresponds to
+ * Formatting flag bits used in BNBF TEXT records.  Each bit corresponds to
  * exactly one named GtkTextTag (see ON_TAGNAME_* below).
  * ------------------------------------------------------------------------- */
 typedef enum {
@@ -101,7 +102,7 @@ gboolean on_char_is_checkbox(gunichar c, gboolean *out_checked);
 void on_buffer_ensure_tags(GtkTextBuffer *buffer);
 
 /* ---------------------------------------------------------------------------
- * on_note_serialize() — flatten a buffer into a newly allocated ONBF blob.
+ * on_note_serialize() — flatten a buffer into a newly allocated BNBF blob.
  *   buffer  — source buffer (must have been through on_buffer_ensure_tags).
  *   out_len — receives the blob size in bytes.
  * Returns a g_malloc'd byte array (g_free() it), or NULL on error.
@@ -110,9 +111,9 @@ guint8 *on_note_serialize(GtkTextBuffer *buffer, gsize *out_len);
 
 /* ---------------------------------------------------------------------------
  * on_note_deserialize() — replace `buffer`'s contents with the note stored
- * in an ONBF blob.
+ * in a BNBF blob.
  *   buffer — destination buffer (tags are ensured automatically).
- *   data   — ONBF bytes as loaded from SQLite.
+ *   data   — BNBF bytes as loaded from SQLite.
  *   len    — length of `data`.
  * Returns TRUE if the blob parsed cleanly; on FALSE the buffer may hold a
  * partial document (best-effort recovery).
@@ -132,7 +133,7 @@ gboolean on_note_deserialize_scaled(GtkTextBuffer *buffer,
                                     gint max_img_px);
 
 /* ---------------------------------------------------------------------------
- * on_note_extract_text() — pull the searchable plain text out of an ONBF
+ * on_note_extract_text() — pull the searchable plain text out of a BNBF
  * blob WITHOUT building a GtkTextBuffer or decoding any images: TEXT
  * runs are concatenated, table cells are appended (space-separated), and
  * image/checkbox payloads are skipped.  Orders of magnitude cheaper than

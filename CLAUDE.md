@@ -16,9 +16,11 @@ make run
 Dependencies (MacPorts): `gtk3 +quartz`, `sqlite3`, `pkgconf`, and
 optionally `gtk-osx-application-gtk3` (native macOS menubar — pkg-config
 module is **`gtk-mac-integration-gtk3`**, NOT "gtkmacintegration"; the
-Makefile auto-detects it and defines `HAVE_GTKOSX`). librsvg provides the
-SVG pixbuf loader the icons need. After toggling a dependency, run
-`make clean && make` so every object sees the new flags.
+Makefile auto-detects it and defines `HAVE_GTKOSX`). librsvg is
+OPTIONAL now that toolbar icons are PNGs — it only renders
+`dialog-warning.svg` and the bundled `icons/theme/` symbolic arrows.
+After toggling a dependency, run `make clean && make` so every object
+sees the new flags.
 
 ## File map
 
@@ -27,7 +29,7 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 | `src/main.c` | GtkApplication entry; config init + settings migration; sets `icons/trumpet.png` as default window icon |
 | `src/app.[ch]` | Shared `OnApp` context: db handle, open-editors map, per-family toolbar styles, icon loading, toolbar registry + right-click style menu |
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
-| `src/serialize.[ch]` | ONBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
+| `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
 | `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid, DnD, sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook |
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
@@ -39,15 +41,16 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 
 ## Data & formats
 
-- DB: `~/.local/share/orange-notes/notes.db` (GLib user-data dir; do NOT
-  rename this directory — existing user data lives there).
-- Note content: **ONBF v5** blobs (see header comment in `serialize.h`).
+- DB: `~/.local/share/blue_notes/notes.db` (GLib user-data dir; renamed
+  from `orange-notes` pre-release — do NOT rename again once released,
+  user data will live there).
+- Note content: **BNBF v5** blobs (magic `BNBF`; the pre-rename `ONBF` magic is accepted forever) (see header comment in `serialize.h`).
   TEXT records = styled runs (flag bits ↔ named GtkTextTags via one
   shared table); IMAGE = full-resolution PNG + display width; TABLE;
   CHECK. All older versions (1–4) still parse.
 - **Task checkboxes are GtkTextChildAnchors** carrying their state as
   object data (`on_anchor_set/is_checkbox`), rendered as native
-  GtkCheckButtons (ONBF v5 CHECK records).  A task line = anchor + space
+  GtkCheckButtons (BNBF v5 CHECK records).  A task line = anchor + space
   + text under the on-list-check paragraph tag.  Legacy glyph-based
   notes (⬜/✅/☐/☑ prefixes) are migrated to anchors on load
   (`migrate_legacy_checkboxes`).  Like all anchors, copy/paste within a
@@ -200,7 +203,7 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   the existing buttons' marks, it only repositions (no widget churn per
   keystroke).
 - Cross-note search reads the `notes.body_text` cache column (filled by
-  every save via `on_note_extract_text`, a record-walk over the ONBF
+  every save via `on_note_extract_text`, a record-walk over the BNBF
   blob that skips image payloads entirely). NULL rows (pre-column saves)
   fall back to the extractor and write back unless read-only. Measured:
   full cold extraction of 1260 notes / 616 MB of blobs = 183 ms; the

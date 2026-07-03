@@ -1,5 +1,5 @@
 /* ===========================================================================
- * serialize.c — ONBF binary note format (implementation)
+ * serialize.c — BNBF binary note format (implementation)
  *
  * See serialize.h for the format specification.  The general strategy:
  *
@@ -16,14 +16,26 @@
 
 #include <string.h>
 
-/* Magic bytes at the start of every ONBF blob.                              */
+/* Magic bytes at the start of every BNBF blob.  Blobs written before the
+ * Blue Notes rename carry the legacy "ONBF" magic — the readers accept
+ * both, forever (existing databases hold thousands of such notes).          */
+static const guint8 BNBF_MAGIC[4] = { 'B', 'N', 'B', 'F' };
 static const guint8 ONBF_MAGIC[4] = { 'O', 'N', 'B', 'F' };
+
+/* magic_ok() — does this blob start with the current or legacy magic?       */
+static gboolean
+magic_ok(const guint8 *data, gsize len)
+{
+    return data != NULL && len >= 8 &&
+           (memcmp(data, BNBF_MAGIC, 4) == 0 ||
+            memcmp(data, ONBF_MAGIC, 4) == 0);
+}
 
 /* Current format version written by on_note_serialize().  Version 2 added
  * the display_width field to IMAGE records; version 3 added TABLE
  * records; version 4 added the tflags field to TABLE records; version 5
  * added CHECK records.  All older versions are still readable.              */
-#define ONBF_VERSION 5u
+#define BNBF_VERSION 5u
 
 /* TABLE record flag bits (the tflags field).                                */
 #define TABLE_FLAG_HEADER 1u         /* first row is a header row           */
@@ -157,7 +169,7 @@ put_u32(GByteArray *buf, guint32 v)
 /* ---------------------------------------------------------------------------
  * flush_text_run() — emit one TEXT record if the pending run is non-empty,
  * then reset the run accumulator.
- *   out   — the ONBF blob under construction.
+ *   out   — the BNBF blob under construction.
  *   run   — pending UTF-8 text (emptied by this call).
  *   flags — formatting bits for the whole run.
  * ------------------------------------------------------------------------- */
@@ -177,9 +189,9 @@ flush_text_run(GByteArray *out, GString *run, guint32 flags)
 guint8 *
 on_note_serialize(GtkTextBuffer *buffer, gsize *out_len)
 {
-    GByteArray *out = g_byte_array_new();   /* the growing ONBF blob        */
-    g_byte_array_append(out, ONBF_MAGIC, 4);
-    put_u32(out, ONBF_VERSION);
+    GByteArray *out = g_byte_array_new();   /* the growing BNBF blob        */
+    g_byte_array_append(out, BNBF_MAGIC, 4);
+    put_u32(out, BNBF_VERSION);
 
     GtkTextIter iter;                /* walk position                       */
     gtk_text_buffer_get_start_iter(buffer, &iter);
@@ -416,16 +428,16 @@ on_note_deserialize_scaled(GtkTextBuffer *buffer, const guint8 *data,
     on_buffer_ensure_tags(buffer);
     gtk_text_buffer_set_text(buffer, "", -1);
 
-    /* Validate header.                                                     */
-    if (data == NULL || len < 8 || memcmp(data, ONBF_MAGIC, 4) != 0) {
-        g_warning("deserialize: bad or missing ONBF header");
+    /* Validate header (current BNBF magic, or legacy ONBF).                */
+    if (!magic_ok(data, len)) {
+        g_warning("deserialize: bad or missing BNBF header");
         return FALSE;
     }
     gsize   pos = 4;                 /* read cursor, past the magic         */
     guint32 version;                 /* format version from the header      */
     if (!get_u32(data, len, &pos, &version) ||
-        version < 1 || version > ONBF_VERSION) {
-        g_warning("deserialize: unsupported ONBF version");
+        version < 1 || version > BNBF_VERSION) {
+        g_warning("deserialize: unsupported BNBF version");
         return FALSE;
     }
 
@@ -665,12 +677,12 @@ on_note_extract_text(const guint8 *data, gsize len)
 {
     GString *out = g_string_new(NULL);
 
-    if (data == NULL || len < 8 || memcmp(data, ONBF_MAGIC, 4) != 0)
+    if (!magic_ok(data, len))
         return g_string_free(out, FALSE);
     gsize   pos = 4;                 /* read cursor, past the magic         */
     guint32 version;
     if (!get_u32(data, len, &pos, &version) ||
-        version < 1 || version > ONBF_VERSION)
+        version < 1 || version > BNBF_VERSION)
         return g_string_free(out, FALSE);
 
     while (pos < len) {

@@ -83,9 +83,9 @@ header bars anywhere). The first line of the note becomes its title.
   numbers.
 - **Database** — store the database in a custom folder (see Storage).
 
-All changes apply live and persist. Toolbar icons are elementary SVGs
-bundled in `icons/` — replaceable by dropping in files, see
-`icons/README.md`.
+All changes apply live and persist (in `blue_notes.ini` next to the
+binary). Toolbar icons are PNGs bundled in `icons/` — replaceable by
+dropping in files, see `icons/README.md`.
 
 ### Export
 
@@ -99,7 +99,7 @@ pipe tables and `- [ ]` task items.
 
 Everything lives in a single SQLite database:
 
-- `~/.local/share/orange-notes/notes.db` by default (GLib's user-data
+- `~/.local/share/blue_notes/notes.db` by default (GLib's user-data
   directory). *File → Settings… → Database* can point the app at a custom
   folder instead — e.g. a shared drive used by two machines (never open
   it from both at once). The choice is stored in `blue_notes.ini` in
@@ -116,15 +116,18 @@ Everything lives in a single SQLite database:
   crash). The marker is released on quit, window close, and SIGTERM;
   CLI commands warn when the database is marked in use.
 
-Note content is stored as a compact binary blob ("ONBF", currently
+Note content is stored as a compact binary blob ("BNBF", currently
 version 5) holding styled text runs, PNG image records, tables and task
 checkboxes — see `src/serialize.h` for the format. Older versions load
 transparently.
 
 ## Building
 
-Requirements: a C compiler, GTK3 and SQLite3 development files,
-pkg-config, and librsvg (SVG icon rendering).
+Requirements: a C compiler, GTK3 and SQLite3 development files, and
+pkg-config. librsvg is optional — the toolbar icons are PNGs; it only
+sharpens the few remaining SVG icons (the warning-dialog icon and the
+bundled symbolic arrows), which otherwise fall back to text glyphs and
+GTK's built-in raster icons.
 
 macOS (MacPorts):
 
@@ -200,7 +203,7 @@ CREATE TABLE notes (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   folder_id  INTEGER REFERENCES folders(id) ON DELETE CASCADE,
   title      TEXT NOT NULL DEFAULT 'New Note',
-  content    BLOB,             -- the note itself, in ONBF (see below)
+  content    BLOB,             -- the note itself, in BNBF (see below)
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL, -- UNIX seconds
   updated_at INTEGER NOT NULL, -- UNIX seconds
@@ -253,9 +256,10 @@ FROM notes n LEFT JOIN fpath p ON n.folder_id = p.id
 ORDER BY 1;
 ```
 
-`content` is ONBF ("Orange Notes Binary Format" — the historical name behind the ONBF magic bytes), a simple little-endian
-record stream — 4-byte magic `ONBF`, a `u32` version (currently 5), then
-typed records until a `0x00` end marker:
+`content` is BNBF ("Blue Notes Binary Format"), a simple little-endian
+record stream — 4-byte magic `BNBF` (blobs written before the rename
+carry the legacy `ONBF` magic; readers accept both), a `u32` version
+(currently 5), then typed records until a `0x00` end marker:
 
 | Record | Type byte | Payload |
 |--------|-----------|---------|
@@ -268,7 +272,7 @@ TEXT flag bits mark bold, italic, headings, code blocks, list kinds,
 inline `#tags`, and so on. The authoritative spec — including every flag
 bit and all version differences — is the header comment in
 `src/serialize.h`. Prefer exporting (`export-md` / `export-html`) over
-parsing ONBF yourself when possible.
+parsing BNBF yourself when possible.
 
 Two practical cautions: the app sets a 5-second busy timeout, so brief
 external readers coexist fine, but long write transactions from other
@@ -284,7 +288,7 @@ is running.
 | `src/app.[ch]`            | Shared `OnApp` context, icon loading, toolbar styles, DB switching/restore |
 | `src/cli.[ch]`            | Headless noun-verb command-line interface           |
 | `src/db.[ch]`             | SQLite layer: folders, notes, tags, settings, backup |
-| `src/serialize.[ch]`      | ONBF binary format ⇄ GtkTextBuffer conversion       |
+| `src/serialize.[ch]`      | BNBF binary format ⇄ GtkTextBuffer conversion       |
 | `src/editor_window.[ch]`  | WYSIWYG editor: formatting, images, tables, tasks, code blocks, find-in-note |
 | `src/library_window.[ch]` | Sidebar, list & grid views, drag & drop, menus, About |
 | `src/search_window.[ch]`  | Cross-note search window                            |

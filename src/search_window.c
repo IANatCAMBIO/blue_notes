@@ -8,7 +8,7 @@
  * Note bodies come from the notes.body_text cache column so a search
  * never decodes images or builds text buffers.  Rows saved before the
  * column existed have a NULL cache; those fall back to a cheap scan of
- * the ONBF blob (on_note_extract_text) and the result is written back,
+ * the BNBF blob (on_note_extract_text) and the result is written back,
  * so the first search after upgrading backfills the cache.
  *
  * Searches run OFF the GTK main thread so the GUI never blocks: the
@@ -174,7 +174,7 @@ search_job_cancel(OnSearch *sw)
 /* ---------------------------------------------------------------------------
  * note_plain_text() — a note's plain text for matching (title is matched
  * separately by the caller).  Reads the body_text cache when filled;
- * otherwise extracts it from the ONBF blob without decoding images and
+ * otherwise extracts it from the BNBF blob without decoding images and
  * writes it back so the next search skips the blob entirely (unless the
  * session is read-only).  Runs on the worker thread against the worker's
  * private connection.  Returns a newly allocated string.

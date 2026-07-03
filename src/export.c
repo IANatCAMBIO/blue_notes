@@ -1,7 +1,7 @@
 /* ===========================================================================
  * export.c — export all notes to HTML or Markdown (implementation)
  *
- * Strategy: every note's ONBF blob is deserialized into an *offscreen*
+ * Strategy: every note's BNBF blob is deserialized into an *offscreen*
  * GtkTextBuffer (no window needed), which is then walked line by line.
  * Each line's paragraph style (heading / code block / list / plain) picks
  * the block element, and the characters inside the line are grouped into

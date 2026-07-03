@@ -2,9 +2,9 @@
  * db.h — SQLite persistence layer for Blue Notes
  *
  * All notes, folders and tags live in a single SQLite database file stored
- * in the user's data directory (e.g. ~/.local/share/orange-notes/notes.db).
+ * in the user's data directory (e.g. ~/.local/share/blue_notes/notes.db).
  *
- * Note *content* is stored as an opaque binary BLOB in the custom "ONBF"
+ * Note *content* is stored as an opaque binary BLOB in the custom "BNBF"
  * format produced by serialize.c; this module never interprets it.
  *
  * Schema
@@ -87,7 +87,7 @@ typedef struct {
 
 /* --------------------------- lifecycle ---------------------------------- */
 
-/* The default database path (~/.local/share/orange-notes/notes.db),
+/* The default database path (~/.local/share/blue_notes/notes.db),
  * creating the directory if needed. Returns a new string; g_free() it.     */
 gchar *on_db_default_path(void);
 
@@ -143,7 +143,7 @@ gboolean on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id);
 /* Persist a note's title, serialized content, and searchable plain text.
  *   id        — note to save.
  *   title     — display title (first line of the note).
- *   content   — ONBF blob bytes (may be NULL when len is 0).
+ *   content   — BNBF blob bytes (may be NULL when len is 0).
  *   len       — length of `content` in bytes.
  *   body_text — plain text of the note for fast searching (may be NULL).
  * Also bumps updated_at. Returns TRUE on success.                           */

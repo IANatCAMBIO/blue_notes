@@ -10,7 +10,7 @@
  *     monospace code blocks (with a one-click "copy code block" button)
  *   - inline images pasted from the clipboard or inserted from a file
  *   - inline #tags with an autocomplete popup (space ends the tag)
- *   - debounced autosave to SQLite via the ONBF serializer
+ *   - debounced autosave to SQLite via the BNBF serializer
  * =========================================================================== */
 
 #ifndef BLUE_EDITOR_WINDOW_H

@@ -1,7 +1,7 @@
 /* ===========================================================================
  * export.h — export all notes to HTML or Markdown
  *
- * The exporter walks every note in the database, deserializes its ONBF
+ * The exporter walks every note in the database, deserializes its BNBF
  * blob into an offscreen GtkTextBuffer, and renders that buffer to either
  * an .html or a .md file.  The on-disk layout mirrors the folder
  * hierarchy:

@@ -20,7 +20,7 @@
  *                        ends the tag; Escape cancels it.
  *
  *   autosave           — every buffer change re-arms a short timer; when
- *                        it fires the buffer is serialized to ONBF and
+ *                        it fires the buffer is serialized to BNBF and
  *                        written to SQLite, and the note's tag set is
  *                        recomputed from the text.
  * =========================================================================== */
@@ -2612,7 +2612,7 @@ editor_save(OnEditor *ed)
     if (ed->app->read_only)
         return;                      /* the engine would refuse anyway      */
 
-    gsize   blob_len = 0;            /* ONBF blob size                      */
+    gsize   blob_len = 0;            /* BNBF blob size                      */
     guint8 *blob = on_note_serialize(ed->buffer, &blob_len);
     gchar  *title = on_buffer_first_line(ed->buffer);
     gchar  *body = on_note_extract_text(blob, blob_len);
@@ -2941,7 +2941,7 @@ on_editor_window_open(OnApp *app, gint64 note_id)
         editor_apply_line_numbers(ed);
 
     /* --- load content ---------------------------------------------------- */
-    gsize   blob_len = 0;            /* stored ONBF blob size               */
+    gsize   blob_len = 0;            /* stored BNBF blob size               */
     guint8 *blob = on_db_note_load(app->db, note_id, &blob_len);
     if (blob != NULL) {
         ed->internal_change++;

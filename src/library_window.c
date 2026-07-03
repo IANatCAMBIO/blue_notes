@@ -2109,6 +2109,26 @@ on_library_key_press(GtkWidget *widget, GdkEventKey *event,
     return FALSE;
 }
 
+/* ---------------------------------------------------------------------------
+ * sidebar_name_cell_func() — bold the sidebar's section rows (the Notes
+ * root, the Tags header, and Pinned Notes); folders and tags render at
+ * normal weight.  Runs per row draw, keyed on SB_KIND.
+ * ------------------------------------------------------------------------- */
+static void
+sidebar_name_cell_func(GtkTreeViewColumn *col, GtkCellRenderer *cell,
+                       GtkTreeModel *model, GtkTreeIter *iter,
+                       gpointer user_data)
+{
+    (void)col; (void)user_data;
+    gint kind;                       /* SB_KIND_* of this row               */
+    gtk_tree_model_get(model, iter, SB_KIND, &kind, -1);
+    gboolean bold = kind == SB_KIND_ROOT ||
+                    kind == SB_KIND_TAGS_HEADER ||
+                    kind == SB_KIND_PINNED;
+    g_object_set(cell, "weight",
+                 bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL, NULL);
+}
+
 /* library_free() — destructor for the OnLibrary attached to the window.     */
 static void
 library_free(gpointer data)
@@ -2175,10 +2195,13 @@ on_library_window_create(OnApp *app)
         GtkCellRenderer *name_cell = gtk_cell_renderer_text_new();
         g_object_set(name_cell,
                      "ellipsize", PANGO_ELLIPSIZE_END, NULL);
-        gtk_tree_view_append_column(
-            lw->sidebar,
+        GtkTreeViewColumn *name_col =
             gtk_tree_view_column_new_with_attributes(
-                "Name", name_cell, "text", SB_NAME, NULL));
+                "Name", name_cell, "text", SB_NAME, NULL);
+        /* Section rows (Notes root, Tags, Pinned Notes) render bold.       */
+        gtk_tree_view_column_set_cell_data_func(
+            name_col, name_cell, sidebar_name_cell_func, NULL, NULL);
+        gtk_tree_view_append_column(lw->sidebar, name_col);
     }
 
     /* Sidebar palette: light grey backdrop (rows and the empty area
