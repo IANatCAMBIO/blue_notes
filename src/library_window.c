@@ -1119,7 +1119,7 @@ on_backup_db(GtkWidget *widget, gpointer user_data)
     /* Suggest a dated filename.                                            */
     GDateTime *now = g_date_time_new_now_local();
     gchar *suggestion = g_date_time_format(
-        now, "orange-notes-backup-%Y%m%d.db");
+        now, "blue-notes-backup-%Y%m%d.db");
     g_date_time_unref(now);
     gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(chooser),
                                       suggestion);
@@ -1188,6 +1188,24 @@ on_restore_db(GtkWidget *widget, gpointer user_data)
     g_free(path);
 }
 
+/* find_gtk_image() — first GtkImage in a widget subtree (depth-first).
+ * Used to reach GtkAboutDialog's internal logo image, which the public
+ * API only feeds with a plain (blurry-on-Retina) GdkPixbuf.                 */
+static GtkWidget *
+find_gtk_image(GtkWidget *widget)
+{
+    if (GTK_IS_IMAGE(widget))
+        return widget;
+    GtkWidget *hit = NULL;           /* first image found in the subtree    */
+    if (GTK_IS_CONTAINER(widget)) {
+        GList *kids = gtk_container_get_children(GTK_CONTAINER(widget));
+        for (GList *l = kids; l != NULL && hit == NULL; l = l->next)
+            hit = find_gtk_image(l->data);
+        g_list_free(kids);
+    }
+    return hit;
+}
+
 /* ---------------------------------------------------------------------------
  * on_about() — File → About: the standard about dialog with the app icon,
  * author, build date and a link to the BSD license.
@@ -1198,13 +1216,15 @@ on_about(GtkWidget *widget, gpointer user_data)
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
 
-    /* 64x64 logo from orange.png, which lives next to the icons/ folder.   */
-    gchar *base = g_path_get_dirname(lw->app->icons_dir);
-    gchar *icon_path = g_build_filename(base, "orange.png", NULL);
-    GdkPixbuf *logo = gdk_pixbuf_new_from_file_at_size(icon_path, 64, 64,
+    /* 64x64-logical logo from trumpet.png, decoded at the display's
+     * scale factor so it stays sharp on Retina (quirk #5).                 */
+    gint sf = gtk_widget_get_scale_factor(lw->window);
+    gchar *icon_path = g_build_filename(lw->app->icons_dir, "trumpet.png",
+                                        NULL);
+    GdkPixbuf *logo = gdk_pixbuf_new_from_file_at_size(icon_path,
+                                                       64 * sf, 64 * sf,
                                                        NULL);
     g_free(icon_path);
-    g_free(base);
 
     const gchar *authors[] = { "Ian Campbell", "Claude Sonnet 4.5", NULL };
 
@@ -1212,9 +1232,28 @@ on_about(GtkWidget *widget, gpointer user_data)
     gtk_window_set_transient_for(GTK_WINDOW(dialog),
                                  GTK_WINDOW(lw->window));
     gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dialog),
-                                      "Orange Notes");
+                                      "Blue Notes");
     if (logo != NULL) {
-        gtk_about_dialog_set_logo(GTK_ABOUT_DIALOG(dialog), logo);
+        /* set_logo() first (it makes the internal image visible and
+         * sized), then swap that image's content for a cairo surface
+         * with the device scale — the pixbuf API renders 1 buffer px
+         * per logical px and looks soft on HiDPI.                          */
+        GdkPixbuf *at_64 = (sf > 1)
+            ? gdk_pixbuf_scale_simple(logo, 64, 64, GDK_INTERP_BILINEAR)
+            : g_object_ref(logo);
+        gtk_about_dialog_set_logo(GTK_ABOUT_DIALOG(dialog), at_64);
+        g_object_unref(at_64);
+
+        if (sf > 1) {
+            GtkWidget *img = find_gtk_image(
+                gtk_dialog_get_content_area(GTK_DIALOG(dialog)));
+            if (img != NULL) {
+                cairo_surface_t *surface =
+                    gdk_cairo_surface_create_from_pixbuf(logo, sf, NULL);
+                gtk_image_set_from_surface(GTK_IMAGE(img), surface);
+                cairo_surface_destroy(surface);
+            }
+        }
         g_object_unref(logo);
     }
     gtk_about_dialog_set_authors(GTK_ABOUT_DIALOG(dialog), authors);
@@ -1959,17 +1998,15 @@ build_action_bar(OnLibrary *lw)
     gtk_tool_item_set_expand(spacer, TRUE);
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar), spacer, -1);
 
-    /* The app logo at the far right opens the About dialog.  Built by
-     * hand because the logo lives at the project root, not in icons/, and
-     * because the child must stay centered (see about_button_fit_style).
-     * (List/Grid switching lives in the View menu.)                        */
+    /* The About button at the far right.  Built by hand because the
+     * child must stay centered (see about_button_fit_style).               */
     GtkToolItem *about_item = gtk_tool_item_new();
     GtkWidget *about_btn = gtk_button_new();
     gtk_button_set_relief(GTK_BUTTON(about_btn), GTK_RELIEF_NONE);
     gtk_container_add(GTK_CONTAINER(about_item), about_btn);
     {
-        gchar *base = g_path_get_dirname(lw->app->icons_dir);
-        gchar *logo_path = g_build_filename(base, "orange.png", NULL);
+        gchar *logo_path = g_build_filename(lw->app->icons_dir,
+                                            "trumpet.png", NULL);
         gint sf = gtk_widget_get_scale_factor(lw->window);
         GdkPixbuf *pix = gdk_pixbuf_new_from_file_at_size(
             logo_path, 24 * sf, 24 * sf, NULL);
@@ -1981,7 +2018,7 @@ build_action_bar(OnLibrary *lw)
             cairo_surface_destroy(surface);
             g_object_unref(pix);
         } else {
-            logo = gtk_label_new("\xf0\x9f\x8d\x8a");    /* 🍊 fallback     */
+            logo = gtk_label_new("\xf0\x9f\x8e\xba");    /* 🎺 fallback     */
         }
         GtkWidget *label = gtk_label_new("About");   /* text-mode child     */
 
@@ -1991,9 +2028,8 @@ build_action_bar(OnLibrary *lw)
         g_object_set_data_full(G_OBJECT(about_item), "on-label",
                                g_object_ref_sink(label), g_object_unref);
         g_free(logo_path);
-        g_free(base);
     }
-    gtk_tool_item_set_tooltip_text(about_item, "About Orange Notes");
+    gtk_tool_item_set_tooltip_text(about_item, "About Blue Notes");
     g_signal_connect(about_btn, "clicked", G_CALLBACK(on_about), lw);
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar), about_item, -1);
 
@@ -2098,8 +2134,8 @@ on_library_window_create(OnApp *app)
     lw->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(lw->window),
                          app->read_only
-                         ? "Orange Notes - Library (Read-Only)"
-                         : "Orange Notes - Library");
+                         ? "Blue Notes - Library (Read-Only)"
+                         : "Blue Notes - Library");
     gtk_window_set_default_size(GTK_WINDOW(lw->window), 900, 620);
     gtk_application_add_window(app->gtk_app, GTK_WINDOW(lw->window));
     g_object_set_data_full(G_OBJECT(lw->window), "on-library", lw,

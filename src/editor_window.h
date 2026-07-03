@@ -13,8 +13,8 @@
  *   - debounced autosave to SQLite via the ONBF serializer
  * =========================================================================== */
 
-#ifndef ORANGE_EDITOR_WINDOW_H
-#define ORANGE_EDITOR_WINDOW_H
+#ifndef BLUE_EDITOR_WINDOW_H
+#define BLUE_EDITOR_WINDOW_H
 
 #include "app.h"
 
@@ -45,4 +45,4 @@ void on_editor_rebuild_code_buttons_all(OnApp *app);
  * ------------------------------------------------------------------------- */
 void on_editor_apply_line_numbers_all(OnApp *app);
 
-#endif /* ORANGE_EDITOR_WINDOW_H */
+#endif /* BLUE_EDITOR_WINDOW_H */

@@ -11,8 +11,8 @@
  * when the librsvg gdk-pixbuf loader they need is missing.)
  * =========================================================================== */
 
-#ifndef ORANGE_SETTINGS_WINDOW_H
-#define ORANGE_SETTINGS_WINDOW_H
+#ifndef BLUE_SETTINGS_WINDOW_H
+#define BLUE_SETTINGS_WINDOW_H
 
 #include "app.h"
 
@@ -23,4 +23,4 @@
  * ------------------------------------------------------------------------- */
 void on_settings_window_open(OnApp *app);
 
-#endif /* ORANGE_SETTINGS_WINDOW_H */
+#endif /* BLUE_SETTINGS_WINDOW_H */

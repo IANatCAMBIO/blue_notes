@@ -1,4 +1,4 @@
-# Orange Notes — toolbar icons
+# Blue Notes — toolbar icons
 
 Custom PNG icons for the toolbars, plus one SVG kept from the
 **elementary** icon theme (GPL-3.0,
@@ -6,7 +6,7 @@ Custom PNG icons for the toolbars, plus one SVG kept from the
 confirmation dialogs.
 
 SVG rendering requires the librsvg gdk-pixbuf loader:
-`sudo port install librsvg` (then restart Orange Notes). Without it,
+`sudo port install librsvg` (then restart Blue Notes). Without it,
 SVG-based icons show small text glyphs instead.
 
 ## Replacing icons
@@ -25,6 +25,7 @@ is missing or cannot be decoded, the button falls back to a text glyph.
 | `web.png`                | Show/hide the folder pane      |
 | `search.png`             | Search                         |
 | `copy.png`               | Code-block copy button         |
+| `trumpet.png`            | App logo: window icon, About button + dialog |
 | `dialog-warning.svg`     | Delete-confirmation dialogs    |
 
 These names are looked up but have no bundled file — the editor's

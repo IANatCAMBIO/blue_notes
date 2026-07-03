@@ -1,5 +1,5 @@
 /* ===========================================================================
- * app.h — shared application context for Orange Notes
+ * app.h — shared application context for Blue Notes
  *
  * A single OnApp instance is created in main() and passed to every window.
  * It owns the database handle, tracks open editor windows, carries the
@@ -7,8 +7,8 @@
  * app-local icons/ folder (see on_app_icon_image).
  * =========================================================================== */
 
-#ifndef ORANGE_APP_H
-#define ORANGE_APP_H
+#ifndef BLUE_APP_H
+#define BLUE_APP_H
 
 #include <gtk/gtk.h>
 #include "db.h"
@@ -55,7 +55,7 @@
  *                    as the "first_line_h1" setting (default off).
  *   db_dir         — custom directory holding notes.db (owned string), or
  *                    NULL for the default location.  Persisted in the
- *                    config FILE (~/.config/orange-notes/config.ini), not
+ *                    config FILE (blue_notes.ini next to the binary), not
  *                    the database — the database's own location cannot
  *                    live inside it.
  * ------------------------------------------------------------------------- */
@@ -156,7 +156,7 @@ void on_app_load_toolbar_styles(OnApp *app);
 
 /* ---------------------------------------------------------------------------
  * on_app_config_init() — resolve the application config file once
- * ("orange_notes.ini" in the same directory as the binary, from `argv0`)
+ * ("blue_notes.ini" in the same directory as the binary, from `argv0`)
  * and load it into memory.  All later reads are served from memory; the
  * file is only written when a setting changes.  Must run before any
  * other config call; safe to call repeatedly.
@@ -239,4 +239,4 @@ gboolean on_app_db_acquire(OnApp *app, GtkWindow *parent);
  * ------------------------------------------------------------------------- */
 void on_app_db_release(OnApp *app);
 
-#endif /* ORANGE_APP_H */
+#endif /* BLUE_APP_H */

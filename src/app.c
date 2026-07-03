@@ -235,16 +235,16 @@ on_app_set_toolbar_style(OnApp *app, OnToolbarKind kind,
 }
 
 /* ---------------------------------------------------------------------------
- * The application config: "orange_notes.ini" in the same directory as
+ * The application config: "blue_notes.ini" in the same directory as
  * the binary.  on_app_config_init() resolves the path and loads the
  * whole file into memory ONCE; every read is served from memory and the
  * file is only touched again to write a modification through.  All keys
- * live under one [orange-notes] group.
+ * live under one [blue-notes] group.
  * ------------------------------------------------------------------------- */
 static gchar    *config_ini_path = NULL;   /* resolved ini path             */
 static GKeyFile *config_kf       = NULL;   /* in-memory settings            */
 
-#define CONFIG_GROUP "orange-notes"
+#define CONFIG_GROUP "blue-notes"
 
 void
 on_app_config_init(const gchar *argv0)
@@ -252,7 +252,7 @@ on_app_config_init(const gchar *argv0)
     if (config_kf != NULL)
         return;                      /* already resolved and loaded         */
     gchar *exe_dir = exe_dir_from_argv0(argv0);
-    config_ini_path = g_build_filename(exe_dir, "orange_notes.ini", NULL);
+    config_ini_path = g_build_filename(exe_dir, "blue_notes.ini", NULL);
     g_free(exe_dir);
 
     config_kf = g_key_file_new();
@@ -375,7 +375,7 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
             "(Overwriting permanently replaces the file at %s.)",
             target);
         gtk_window_set_title(GTK_WINDOW(dialog),
-                             "Orange Notes - Existing Database");
+                             "Blue Notes - Existing Database");
         gtk_dialog_add_buttons(GTK_DIALOG(dialog),
                                "_Cancel",                GTK_RESPONSE_CANCEL,
                                "_Use Existing Database", 1,
@@ -519,7 +519,7 @@ on_app_db_acquire(OnApp *app, GtkWindow *parent)
             "Open it read-only, or override the lock if that instance "
             "crashed without releasing it.", holder);
         gtk_window_set_title(GTK_WINDOW(dialog),
-                             "Orange Notes - Database In Use");
+                             "Blue Notes - Database In Use");
         gtk_dialog_add_buttons(GTK_DIALOG(dialog),
                                "_Quit",           GTK_RESPONSE_CANCEL,
                                "Open _Read-Only", 1,

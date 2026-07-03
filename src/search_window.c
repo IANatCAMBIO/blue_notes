@@ -486,7 +486,7 @@ on_search_window_open(OnApp *app, gboolean scope_to_sel)
 
     /* --- window (standard titlebar) --------------------------------------*/
     sw->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(sw->window), "Orange Notes - Search");
+    gtk_window_set_title(GTK_WINDOW(sw->window), "Blue Notes - Search");
 
     /* Open at whatever size the last search window was left at.            */
     gint win_w = SEARCH_WIN_DEFAULT_W;

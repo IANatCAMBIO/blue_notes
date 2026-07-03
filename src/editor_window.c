@@ -1271,7 +1271,7 @@ on_img_open(GtkMenuItem *item, gpointer user_data)
 
     GError *err = NULL;
     gchar  *path = NULL;             /* temporary PNG path                  */
-    gint fd = g_file_open_tmp("orange-note-XXXXXX.png", &path, &err);
+    gint fd = g_file_open_tmp("blue-note-XXXXXX.png", &path, &err);
     if (fd < 0) {
         g_warning("cannot create temp image file: %s", err->message);
         g_clear_error(&err);
@@ -2633,7 +2633,7 @@ editor_save(OnEditor *ed)
 
     /* Window title mirrors the note title.                                 */
     if (ed->window != NULL) {
-        gchar *wtitle = g_strdup_printf("Orange Notes - %s", title);
+        gchar *wtitle = g_strdup_printf("Blue Notes - %s", title);
         gtk_window_set_title(GTK_WINDOW(ed->window), wtitle);
         g_free(wtitle);
     }
@@ -2909,7 +2909,7 @@ on_editor_window_open(OnApp *app, gint64 note_id)
     gtk_window_set_default_size(GTK_WINDOW(ed->window), 720, 580);
     gtk_application_add_window(app->gtk_app, GTK_WINDOW(ed->window));
     {
-        gchar *wtitle = g_strdup_printf("Orange Notes - %s", meta->title);
+        gchar *wtitle = g_strdup_printf("Blue Notes - %s", meta->title);
         gtk_window_set_title(GTK_WINDOW(ed->window), wtitle);
         g_free(wtitle);
     }

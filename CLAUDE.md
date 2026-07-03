@@ -1,15 +1,15 @@
-# Orange Notes — project guide
+# Blue Notes — project guide
 
 Apple Notes–style app in **plain C + GTK3 + SQLite**. Two window types:
 a Library (folders/tags sidebar, notes as list or grid) and one editor
 window per note (WYSIWYG rich text). No GNOME HeaderBars anywhere —
-plain `GtkWindow` titlebars, formatted `"Orange Notes - <thing>"`.
+plain `GtkWindow` titlebars, formatted `"Blue Notes - <thing>"`.
 
 ## Build & run
 
 ```sh
 export PATH=/opt/local/bin:$PATH   # MacPorts pkg-config
-make          # builds ./orange_notes
+make          # builds ./blue_notes
 make run
 ```
 
@@ -24,28 +24,27 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 
 | File | Purpose |
 |---|---|
-| `src/main.c` | GtkApplication entry; loads settings; sets `orange.png` as default window icon |
+| `src/main.c` | GtkApplication entry; config init + settings migration; sets `icons/trumpet.png` as default window icon |
 | `src/app.[ch]` | Shared `OnApp` context: db handle, open-editors map, per-family toolbar styles, icon loading, toolbar registry + right-click style menu |
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
 | `src/serialize.[ch]` | ONBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
 | `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid, DnD, sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook |
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
-| `src/settings_window.[ch]` | Toolbar styles (library vs editor), code-copy-button toggle, native macOS menubar toggle |
+| `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
 | `src/cli.[ch]` | Headless subcommand interface (runs before GTK in main; tags/folders/notes CRUD, backup, export); folders by path, notes by id |
-| `icons/` | elementary SVG icons, loaded by basename; see icons/README.md |
-| `tools/gen_icon.c` | Regenerates `orange.png` (cairo drawing; keep it artifact-free — no lines/text over the fruit) |
-| `orange.png` | App logo: default window icon and the 64×64 About-dialog logo |
+| `icons/` | custom PNG toolbar icons + `trumpet.png` app logo (window icon, About button/dialog), loaded by basename; see icons/README.md |
+| `tools/import-apple-notes.sh` | Apple Notes migration (AppleScript export → CLI import; keeps modification dates) |
 
 ## Data & formats
 
 - DB: `~/.local/share/orange-notes/notes.db` (GLib user-data dir; do NOT
   rename this directory — existing user data lives there).
-- Note content: **ONBF v2** blobs (see header comment in `serialize.h`).
-  TEXT records = styled runs (flag bits ↔ named GtkTextTags via one shared
-  table). IMAGE records = full-resolution PNG + chosen display width.
-  v1 (no display width) still parses.
+- Note content: **ONBF v5** blobs (see header comment in `serialize.h`).
+  TEXT records = styled runs (flag bits ↔ named GtkTextTags via one
+  shared table); IMAGE = full-resolution PNG + display width; TABLE;
+  CHECK. All older versions (1–4) still parse.
 - **Task checkboxes are GtkTextChildAnchors** carrying their state as
   object data (`on_anchor_set/is_checkbox`), rendered as native
   GtkCheckButtons (ONBF v5 CHECK records).  A task line = anchor + space
@@ -58,9 +57,10 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   (`on_anchor_set_image/get_image`). The editor attaches a HiDPI-aware
   GtkImage (pixels scaled × scale-factor, cairo surface with device
   scale) at each anchor; export/search/thumbnails read anchor data
-  offscreen and never need widgets. Default display width 320
-  (`ON_IMAGE_DEFAULT_WIDTH`); right-click menu toggles thumbnail/full.
-- ALL UI settings live in the ini (`[orange-notes]` group), loaded into
+  offscreen and never need widgets. Default thumbnail display fits a
+  200×125 box (`ON_IMAGE_THUMB_W/H`, aspect kept, never upscaled);
+  right-click menu toggles thumbnail/full.
+- ALL UI settings live in the ini (`[blue-notes]` group), loaded into
   memory ONCE by `on_app_config_init()` and written through on change
   (`on_app_config_get/set`); the file is never re-read while running.
   Keys: `db_dir`, `toolbar_style_library`, `toolbar_style_editor`
@@ -75,7 +75,7 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   instance lock (it must be in the DB — it coordinates instances across
   machines); main.c migrates any legacy UI keys out of it at startup.
 - **Custom DB location** (shared-folder support) lives in the CONFIG
-  FILE `orange_notes.ini` NEXT TO THE BINARY (`[orange-notes] db_dir=`;
+  FILE `blue_notes.ini` NEXT TO THE BINARY (`[blue-notes] db_dir=`;
   resolved from argv[0] by `on_app_config_init()`, which must run before
   any config read — main() calls it first thing), never in the DB.
   `on_app_switch_database()` switches live: closes all editors (flushing
@@ -229,7 +229,7 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   (no compile_commands.json); trust `make`, which builds `-Wall -Wextra`
   clean.
 - The GUI can be launched in background for the user with
-  `./orange_notes & disown` after `pkill -f "./orange_notes"`.
+  `./blue_notes & disown` after `pkill -f "./blue_notes"`.
 
 ## Conventions
 
@@ -237,7 +237,7 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   non-obvious variables. Column-aligned trailing comments, ~78-col lines.
 - `on_` prefix for public symbols; `On` prefix for types.
 - UI strings use UTF-8 escapes for …, •, ✕ etc. in source.
-- No GtkHeaderBar. Window titles `"Orange Notes - <name>"`.
+- No GtkHeaderBar. Window titles `"Blue Notes - <name>"`.
 - Scrollbars: overlay scrolling disabled globally
   (`GTK_OVERLAY_SCROLLING=0` in main) + per-scrolled-window; vertical
   policy AUTOMATIC.

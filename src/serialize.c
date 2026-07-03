@@ -121,7 +121,7 @@ on_buffer_ensure_tags(GtkTextBuffer *buffer)
  * flags_at_iter() — compute the ON_FMT_* bitmask in effect at `iter`.
  *   buffer — buffer owning the tag table.
  *   iter   — position to inspect.
- * Returns the OR of every Orange Notes formatting bit whose tag covers
+ * Returns the OR of every Blue Notes formatting bit whose tag covers
  * the character at `iter`.
  * ------------------------------------------------------------------------- */
 static guint32
@@ -271,7 +271,7 @@ on_note_serialize(GtkTextBuffer *buffer, gsize *out_len)
         }
         gunichar ch = gtk_text_iter_get_char(&iter);
         /* 0xFFFC marks non-pixbuf embedded objects (child anchors); we
-         * skip those since Orange Notes never creates them.                */
+         * skip those since Blue Notes never creates them.                */
         if (ch != 0xFFFC)
             g_string_append_unichar(run, ch);
         gtk_text_iter_forward_char(&iter);

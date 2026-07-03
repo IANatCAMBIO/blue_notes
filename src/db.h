@@ -1,5 +1,5 @@
 /* ===========================================================================
- * db.h — SQLite persistence layer for Orange Notes
+ * db.h — SQLite persistence layer for Blue Notes
  *
  * All notes, folders and tags live in a single SQLite database file stored
  * in the user's data directory (e.g. ~/.local/share/orange-notes/notes.db).
@@ -19,8 +19,8 @@
  * note lives at the top level ("Notes" root).
  * =========================================================================== */
 
-#ifndef ORANGE_DB_H
-#define ORANGE_DB_H
+#ifndef BLUE_DB_H
+#define BLUE_DB_H
 
 #include <glib.h>
 #include <sqlite3.h>
@@ -279,4 +279,4 @@ gboolean on_db_setting_delete(OnDatabase *db, const gchar *key);
  * Returns a newly allocated string; g_free() it.                            */
 gchar *on_db_folder_path(OnDatabase *db, gint64 folder_id);
 
-#endif /* ORANGE_DB_H */
+#endif /* BLUE_DB_H */

@@ -1,4 +1,4 @@
-# Orange Notes
+# Blue Notes
 
 An Apple Notes–style notes application written in plain C with GTK3 and
 SQLite. Notes are rich text (WYSIWYG) with inline images, code blocks,
@@ -23,7 +23,7 @@ exportable to HTML or Markdown — from the GUI or the command line.
   drag any selected note onto a sidebar folder to move the whole
   selection, or use the right-click menu — Open, Export as
   HTML/Markdown, Delete.
-- **Ctrl/Cmd+N** creates a note in the selected folder. The orange logo
+- **Ctrl/Cmd+N** creates a note in the selected folder. The trumpet logo
   at the toolbar's right edge opens the About dialog (program info plus
   live database statistics).
 
@@ -102,7 +102,7 @@ Everything lives in a single SQLite database:
 - `~/.local/share/orange-notes/notes.db` by default (GLib's user-data
   directory). *File → Settings… → Database* can point the app at a custom
   folder instead — e.g. a shared drive used by two machines (never open
-  it from both at once). The choice is stored in `orange_notes.ini` in
+  it from both at once). The choice is stored in `blue_notes.ini` in
   the same directory as the binary. If the configured database cannot be
   opened at startup, the app reports the error and exits — it never
   silently opens a different database.
@@ -153,20 +153,20 @@ A recognized subcommand runs headless against the same database (including
 a configured shared location) and exits — no windows:
 
 ```
-orange_notes tag list                         orange_notes tag delete NAME
-orange_notes folder list                      orange_notes folder add PATH
-orange_notes folder delete PATH               orange_notes note list [PATH|--all]
-orange_notes note new [--folder PATH] TEXT|-  orange_notes note delete ID [ID...]
-orange_notes note move ID [ID...] PATH        orange_notes note add-image ID FILE
-orange_notes note set-modified ID TIMESTAMP   orange_notes backup FILE.db
-orange_notes export-md DIR                    orange_notes export-html DIR
+blue_notes tag list                         blue_notes tag delete NAME
+blue_notes folder list                      blue_notes folder add PATH
+blue_notes folder delete PATH               blue_notes note list [PATH|--all]
+blue_notes note new [--folder PATH] TEXT|-  blue_notes note delete ID [ID...]
+blue_notes note move ID [ID...] PATH        blue_notes note add-image ID FILE
+blue_notes note set-modified ID TIMESTAMP   blue_notes backup FILE.db
+blue_notes export-md DIR                    blue_notes export-html DIR
 ```
 
 Folders are addressed by path (`"Work/Projects"`, created like `mkdir -p`
 by `folder add`); notes by the ids `note list` prints. `note new` takes
 its content from the argument or stdin (`-`); the first line becomes the
 title. Output is tab-separated for easy scripting; exit codes: 0 success,
-1 usage, 2 failure. `orange_notes help` shows the full reference.
+1 usage, 2 failure. `blue_notes help` shows the full reference.
 
 ## Migrating from Apple Notes
 
@@ -235,7 +235,7 @@ Semantics worth knowing when querying directly:
 - `settings` holds exactly one key: the instance lock. While a GUI has
   the database open, `in_use` is set to `"user@host (pid N, since …)"`
   and removed on exit — respect it before writing from your own tools.
-  (App preferences live in `orange_notes.ini` next to the binary, not
+  (App preferences live in `blue_notes.ini` next to the binary, not
   in the database.)
 
 Example — every note with its full folder path:
@@ -253,7 +253,7 @@ FROM notes n LEFT JOIN fpath p ON n.folder_id = p.id
 ORDER BY 1;
 ```
 
-`content` is ONBF ("Orange Notes Binary Format"), a simple little-endian
+`content` is ONBF ("Orange Notes Binary Format" — the historical name behind the ONBF magic bytes), a simple little-endian
 record stream — 4-byte magic `ONBF`, a `u32` version (currently 5), then
 typed records until a `0x00` end marker:
 
@@ -272,7 +272,7 @@ parsing ONBF yourself when possible.
 
 Two practical cautions: the app sets a 5-second busy timeout, so brief
 external readers coexist fine, but long write transactions from other
-tools will stall it; and back up with `orange_notes backup FILE.db`
+tools will stall it; and back up with `blue_notes backup FILE.db`
 (SQLite's online backup API) rather than copying the file while the app
 is running.
 
@@ -290,5 +290,5 @@ is running.
 | `src/search_window.[ch]`  | Cross-note search window                            |
 | `src/settings_window.[ch]`| The Settings window                                 |
 | `src/export.[ch]`         | HTML and Markdown exporters                         |
-| `icons/`                  | Bundled elementary icons (see its README)           |
-| `tools/gen_icon.c`        | Regenerates the `orange.png` app logo               |
+| `icons/`                  | Bundled PNG icons + app logo (see its README)       |
+| `tools/import-apple-notes.sh` | Apple Notes migration script                    |

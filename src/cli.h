@@ -8,22 +8,22 @@
  *
  * Commands follow a noun-verb structure:
  *
- *   orange_notes tag list
- *   orange_notes tag delete NAME
- *   orange_notes folder list
- *   orange_notes folder add PATH            (nested, created like mkdir -p)
- *   orange_notes folder delete PATH
- *   orange_notes note list [PATH|--all]
- *   orange_notes note new [--folder PATH] CONTENT|-   (- reads stdin)
- *   orange_notes note delete ID [ID...]
- *   orange_notes note move ID [ID...] PATH  (/ = top level)
- *   orange_notes backup FILE.db
- *   orange_notes export-md DIR
- *   orange_notes export-html DIR
+ *   blue_notes tag list
+ *   blue_notes tag delete NAME
+ *   blue_notes folder list
+ *   blue_notes folder add PATH            (nested, created like mkdir -p)
+ *   blue_notes folder delete PATH
+ *   blue_notes note list [PATH|--all]
+ *   blue_notes note new [--folder PATH] CONTENT|-   (- reads stdin)
+ *   blue_notes note delete ID [ID...]
+ *   blue_notes note move ID [ID...] PATH  (/ = top level)
+ *   blue_notes backup FILE.db
+ *   blue_notes export-md DIR
+ *   blue_notes export-html DIR
  * =========================================================================== */
 
-#ifndef ORANGE_CLI_H
-#define ORANGE_CLI_H
+#ifndef BLUE_CLI_H
+#define BLUE_CLI_H
 
 /* ---------------------------------------------------------------------------
  * on_cli_run() — dispatch a command-line invocation.
@@ -33,4 +33,4 @@
  * ------------------------------------------------------------------------- */
 int on_cli_run(int argc, char **argv);
 
-#endif /* ORANGE_CLI_H */
+#endif /* BLUE_CLI_H */

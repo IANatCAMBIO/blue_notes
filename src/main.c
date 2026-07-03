@@ -1,5 +1,5 @@
 /* ===========================================================================
- * main.c — Orange Notes application entry point
+ * main.c — Blue Notes application entry point
  *
  * Wires everything together: opens the SQLite database, creates the
  * shared OnApp context, and shows the library window when the
@@ -36,12 +36,11 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
         return;
     }
 
-    /* Default window icon: orange.png next to the icons/ folder.           */
-    gchar *base = g_path_get_dirname(app->icons_dir);
-    gchar *icon_path = g_build_filename(base, "orange.png", NULL);
+    /* Default window icon: the app logo from the icons/ folder.            */
+    gchar *icon_path = g_build_filename(app->icons_dir, "trumpet.png",
+                                        NULL);
     gtk_window_set_default_icon_from_file(icon_path, NULL);
     g_free(icon_path);
-    g_free(base);
 
     /* Bundled scalable theme icons (icons/theme/hicolor/...): provides
      * SVG pan-*-symbolic arrows so tree expanders render crisply on
@@ -108,7 +107,7 @@ on_sigterm(gpointer user_data)
 int
 main(int argc, char *argv[])
 {
-    /* The application config (orange_notes.ini) lives next to the
+    /* The application config (blue_notes.ini) lives next to the
      * binary; resolve its location before anything reads it.               */
     on_app_config_init(argv[0]);
 
@@ -135,7 +134,7 @@ main(int argc, char *argv[])
                      : NULL;
     OnDatabase *db = on_db_open(db_path);
     if (db == NULL) {
-        g_printerr("orange_notes: could not open the notes database at "
+        g_printerr("blue_notes: could not open the notes database at "
                    "%s\n(if another instance is still shutting down, "
                    "try again in a few seconds)\n",
                    db_path != NULL ? db_path : "the default location");
@@ -210,7 +209,7 @@ main(int argc, char *argv[])
     app.first_line_h1 = g_strcmp0(flh, "1") == 0;
     g_free(flh);
 
-    app.gtk_app = gtk_application_new("org.example.orange-notes",
+    app.gtk_app = gtk_application_new("org.example.blue-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app.gtk_app, "activate",
                      G_CALLBACK(on_activate), &app);

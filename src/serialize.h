@@ -2,7 +2,7 @@
  * serialize.h — ONBF binary note format
  *
  * Converts a GtkTextBuffer (rich text + inline images) to and from the
- * "Orange Notes Binary Format" (ONBF) blob stored in SQLite.
+ * "Blue Notes Binary Format" (ONBF) blob stored in SQLite.
  *
  * ONBF layout (all integers little-endian):
  *
@@ -35,8 +35,8 @@
  * deserialized buffer.
  * =========================================================================== */
 
-#ifndef ORANGE_SERIALIZE_H
-#define ORANGE_SERIALIZE_H
+#ifndef BLUE_SERIALIZE_H
+#define BLUE_SERIALIZE_H
 
 #include <gtk/gtk.h>
 
@@ -92,7 +92,7 @@ gboolean on_char_is_checkbox(gunichar c, gboolean *out_checked);
 #define ON_TAGNAME_TAG         "on-tag"
 
 /* ---------------------------------------------------------------------------
- * on_buffer_ensure_tags() — create the standard Orange Notes tag set on
+ * on_buffer_ensure_tags() — create the standard Blue Notes tag set on
  * `buffer`'s tag table if not already present.  Both the editor window and
  * the exporter call this before touching a buffer, so the two always agree
  * on tag names and appearance.
@@ -223,4 +223,4 @@ OnTable *on_anchor_get_table(GtkTextChildAnchor *anchor);
  * ------------------------------------------------------------------------- */
 GList *on_buffer_collect_tags(GtkTextBuffer *buffer);
 
-#endif /* ORANGE_SERIALIZE_H */
+#endif /* BLUE_SERIALIZE_H */

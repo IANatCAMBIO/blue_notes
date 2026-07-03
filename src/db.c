@@ -1,5 +1,5 @@
 /* ===========================================================================
- * db.c — SQLite persistence layer for Orange Notes (implementation)
+ * db.c — SQLite persistence layer for Blue Notes (implementation)
  *
  * See db.h for the public API and schema overview.  All functions log
  * failures through g_warning() and return a "failed" value rather than

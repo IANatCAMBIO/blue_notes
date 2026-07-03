@@ -20,8 +20,8 @@
  * opens it in its own editor window.
  * =========================================================================== */
 
-#ifndef ORANGE_LIBRARY_WINDOW_H
-#define ORANGE_LIBRARY_WINDOW_H
+#ifndef BLUE_LIBRARY_WINDOW_H
+#define BLUE_LIBRARY_WINDOW_H
 
 #include "app.h"
 #include "search_window.h"
@@ -59,4 +59,4 @@ void on_library_get_scope(OnApp *app, OnSearchScope *scope, gint64 *id,
  * ------------------------------------------------------------------------- */
 void on_library_apply_native_menubar(OnApp *app, gboolean native);
 
-#endif /* ORANGE_LIBRARY_WINDOW_H */
+#endif /* BLUE_LIBRARY_WINDOW_H */

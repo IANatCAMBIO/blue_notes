@@ -1,14 +1,14 @@
 # =============================================================================
-# Orange Notes — Makefile
+# Blue Notes — Makefile
 #
-# Builds the Orange Notes application (a GTK3 + SQLite notes app written in
+# Builds the Blue Notes application (a GTK3 + SQLite notes app written in
 # plain C).  Requires GTK3 and SQLite3, discovered via pkg-config.
 #
 # On macOS with MacPorts:
 #     sudo port install pkgconf gtk3 +quartz
 #
 # Targets:
-#     make          — build the `orange_notes` binary
+#     make          — build the `blue_notes` binary
 #     make clean    — remove build artifacts
 #     make run      — build and launch the app
 # =============================================================================
@@ -56,7 +56,7 @@ SRCS     := src/main.c \
 OBJS     := $(SRCS:src/%.c=build/%.o)
 
 # The final executable name.
-BIN      := orange_notes
+BIN      := blue_notes
 
 # Default target: build the application binary.
 all: $(BIN)

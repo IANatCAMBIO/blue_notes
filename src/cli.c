@@ -8,7 +8,7 @@
  *   2 — operation failed (missing folder, database error, …)
  *
  * The database is resolved exactly like the GUI resolves it: the custom
- * location from ~/.config/orange-notes/config.ini when set, otherwise
+ * location from blue_notes.ini (next to the binary) when set, otherwise
  * the default per-user path.
  * =========================================================================== */
 
@@ -233,7 +233,7 @@ cmd_new_note(OnDatabase *db, const gchar *folder_path, const gchar *content)
     gint64 folder;                   /* destination folder id               */
     if (!resolve_folder_path(db, folder_path, FALSE, &folder)) {
         fprintf(stderr, "error: no such folder: %s "
-                        "(create it with add-folder)\n", folder_path);
+                        "(create it with 'folder add')\n", folder_path);
         return 2;
     }
 
@@ -472,7 +472,7 @@ static int
 usage(FILE *out)
 {
     fputs(
-"Usage: orange_notes [COMMAND ...]   (no command starts the GUI)\n"
+"Usage: blue_notes [COMMAND ...]   (no command starts the GUI)\n"
 "\n"
 "  tag list                          print every tag with its note count\n"
 "  tag delete NAME                   remove a tag from the database\n"

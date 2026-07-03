@@ -13,8 +13,8 @@
  * written as PNG files next to the note and referenced relatively.
  * =========================================================================== */
 
-#ifndef ORANGE_EXPORT_H
-#define ORANGE_EXPORT_H
+#ifndef BLUE_EXPORT_H
+#define BLUE_EXPORT_H
 
 #include "app.h"
 
@@ -48,4 +48,4 @@ gint on_export_all(OnApp *app, const gchar *dest_dir, OnExportFormat format,
 gboolean on_export_note(OnApp *app, gint64 note_id, const gchar *dest_dir,
                         OnExportFormat format);
 
-#endif /* ORANGE_EXPORT_H */
+#endif /* BLUE_EXPORT_H */

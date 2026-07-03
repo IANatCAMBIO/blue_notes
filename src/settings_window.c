@@ -303,7 +303,7 @@ void
 on_settings_window_open(OnApp *app)
 {
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(window), "Orange Notes - Settings");
+    gtk_window_set_title(GTK_WINDOW(window), "Blue Notes - Settings");
     gtk_window_set_default_size(GTK_WINDOW(window), 420, -1);
     gtk_window_set_transient_for(GTK_WINDOW(window),
                                  GTK_WINDOW(app->library_window));
@@ -375,7 +375,7 @@ on_settings_window_open(OnApp *app)
         gtk_label_set_markup(GTK_LABEL(warn),
             "<small><i>Toolbar icons are SVG files and need the librsvg "
             "loader to display:\nsudo port install librsvg "
-            "(then restart Orange Notes)</i></small>");
+            "(then restart Blue Notes)</i></small>");
         gtk_label_set_xalign(GTK_LABEL(warn), 0.0);
         gtk_widget_set_margin_start(warn, 12);
         gtk_box_pack_start(GTK_BOX(vbox), warn, FALSE, FALSE, 2);

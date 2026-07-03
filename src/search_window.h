@@ -17,8 +17,8 @@
  * library.  Case-sensitive and regular-expression matching are optional.
  * =========================================================================== */
 
-#ifndef ORANGE_SEARCH_WINDOW_H
-#define ORANGE_SEARCH_WINDOW_H
+#ifndef BLUE_SEARCH_WINDOW_H
+#define BLUE_SEARCH_WINDOW_H
 
 #include "app.h"
 
@@ -44,4 +44,4 @@ typedef enum {
  * ------------------------------------------------------------------------- */
 void on_search_window_open(OnApp *app, gboolean scope_to_sel);
 
-#endif /* ORANGE_SEARCH_WINDOW_H */
+#endif /* BLUE_SEARCH_WINDOW_H */

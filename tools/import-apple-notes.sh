@@ -1,10 +1,10 @@
 #!/bin/sh
 # ===========================================================================
-# import-apple-notes.sh — migrate Apple Notes into Orange Notes
+# import-apple-notes.sh — migrate Apple Notes into Blue Notes
 #
 # Exports every folder and note from Notes.app via its AppleScript
 # interface, converts the note bodies from HTML to text with textutil,
-# and imports them through the orange_notes CLI.  Everything lands under
+# and imports them through the blue_notes CLI.  Everything lands under
 # an "Apple Notes Import" folder, mirroring the Apple Notes hierarchy.
 #
 # Usage:
@@ -17,26 +17,26 @@
 #     from Notes' scripting interface).  Non-image attachments (PDFs,
 #     scans, …) are skipped with a warning.
 #   - "Recently Deleted" is skipped.
-#   - Safe to re-run, but re-running imports duplicates (Orange Notes
+#   - Safe to re-run, but re-running imports duplicates (Blue Notes
 #     ids differ) — delete the "Apple Notes Import" folder first.
 # ===========================================================================
 
 set -eu
 
-# The orange_notes binary lives next to this repo's tools/ directory.
-BIN="$(cd "$(dirname "$0")/.." && pwd)/orange_notes"
+# The blue_notes binary lives next to this repo's tools/ directory.
+BIN="$(cd "$(dirname "$0")/.." && pwd)/blue_notes"
 if [ ! -x "$BIN" ]; then
     echo "error: $BIN not found — run make first" >&2
     exit 1
 fi
 
-# Import destination root inside Orange Notes.
+# Import destination root inside Blue Notes.
 DEST_ROOT="Apple Notes Import"
 
-# One upfront heads-up if the Orange Notes GUI has the database open
+# One upfront heads-up if the Blue Notes GUI has the database open
 # (individual commands would otherwise repeat this warning per note).
 if "$BIN" folder list 2>&1 >/dev/null | grep -q "in use"; then
-    echo "note: Orange Notes is running — imported notes will appear"
+    echo "note: Blue Notes is running — imported notes will appear"
     echo "      after you restart it (or switch folders to refresh)."
 fi
 
@@ -157,7 +157,7 @@ if [ ! -s "$TMP/manifest.tsv" ]; then
 fi
 
 total=$(grep -c . "$TMP/manifest.tsv")
-echo "Importing into Orange Notes..."
+echo "Importing into Blue Notes..."
 
 imported=0
 failed=0
