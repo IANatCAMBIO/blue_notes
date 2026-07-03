@@ -227,8 +227,10 @@ add_folder_rows(OnLibrary *lw, gint64 parent_id, GtkTreeIter *parent_iter,
     GList *folders = on_db_folder_list(lw->app->db, parent_id);
     for (GList *l = folders; l != NULL; l = l->next) {
         OnFolder *f = l->data;       /* one child folder                    */
-        gchar *display = g_strdup_printf(   /* name + note count            */
-            "%s (%d)", f->name, count_from_map(note_counts, f->id));
+        gchar *display = lw->app->sidebar_counts    /* name (+ note count)  */
+            ? g_strdup_printf("%s (%d)", f->name,
+                              count_from_map(note_counts, f->id))
+            : g_strdup(f->name);
         GtkTreeIter iter;
         gtk_tree_store_append(lw->sidebar_store, &iter, parent_iter);
         gtk_tree_store_set(lw->sidebar_store, &iter,
@@ -270,8 +272,9 @@ refresh_sidebar(OnLibrary *lw)
     GHashTable *tag_counts  = on_db_tag_count_map(lw->app->db);
 
     /* "Notes" root — selecting it shows the top-level notes.               */
-    gchar *root_label = g_strdup_printf(
-        "Notes (%d)", count_from_map(note_counts, 0));
+    gchar *root_label = lw->app->sidebar_counts
+        ? g_strdup_printf("Notes (%d)", count_from_map(note_counts, 0))
+        : g_strdup("Notes");
     GtkTreeIter root;                /* the fixed root row                  */
     gtk_tree_store_append(lw->sidebar_store, &root, NULL);
     gtk_tree_store_set(lw->sidebar_store, &root,
@@ -297,8 +300,10 @@ refresh_sidebar(OnLibrary *lw)
         for (GList *l = tags; l != NULL; l = l->next) {
             OnTag *t = l->data;      /* one tag                             */
             gchar *raw   = g_strdup_printf("#%s", t->name);
-            gchar *label = g_strdup_printf(
-                "#%s (%d)", t->name, count_from_map(tag_counts, t->id));
+            gchar *label = lw->app->sidebar_counts
+                ? g_strdup_printf("#%s (%d)", t->name,
+                                  count_from_map(tag_counts, t->id))
+                : g_strdup(raw);
             GtkTreeIter iter;
             gtk_tree_store_append(lw->sidebar_store, &iter, &header);
             gtk_tree_store_set(lw->sidebar_store, &iter,
@@ -317,7 +322,9 @@ refresh_sidebar(OnLibrary *lw)
      * location; notes stay in their folders.                               */
     gint n_pinned = on_db_note_count_pinned(lw->app->db);
     if (n_pinned > 0) {
-        gchar *label = g_strdup_printf("Pinned Notes (%d)", n_pinned);
+        gchar *label = lw->app->sidebar_counts
+            ? g_strdup_printf("Pinned Notes (%d)", n_pinned)
+            : g_strdup("Pinned Notes");
         GtkTreeIter iter;
         gtk_tree_store_append(lw->sidebar_store, &iter, NULL);
         gtk_tree_store_set(lw->sidebar_store, &iter,
@@ -1347,6 +1354,21 @@ on_view_grid(GtkWidget *widget, gpointer user_data)
     refresh_notes(lw);               /* fill the thumbnails list mode skips */
 }
 
+/* on_toggle_view() — toolbar List/Grid button: switch to whichever notes
+ * view is not currently showing.                                            */
+static void
+on_toggle_view(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    const gchar *mode =              /* "list" or "grid"                    */
+        gtk_stack_get_visible_child_name(GTK_STACK(lw->stack));
+    if (g_strcmp0(mode, "list") == 0)
+        on_view_grid(NULL, lw);
+    else
+        on_view_list(NULL, lw);
+}
+
 /* ---------------------------------------------------------------------------
  * run_export() — pick a destination directory and export every note in
  * the requested format, then report the result.
@@ -1871,8 +1893,9 @@ add_tool_button(OnLibrary *lw, GtkWidget *toolbar, const gchar *icon,
 }
 
 /* ---------------------------------------------------------------------------
- * build_action_bar() — the toolbar above the notes pane: note actions on
- * the left, the List/Grid switcher pushed to the right.
+ * build_action_bar() — the single unified toolbar spanning the window:
+ * a folder-actions area, a drawn separator, a note-actions area, another
+ * separator, Search — and the About logo pushed to the right edge.
  * Returns the toolbar widget.
  * ------------------------------------------------------------------------- */
 static GtkWidget *
@@ -1882,14 +1905,37 @@ build_action_bar(OnLibrary *lw)
     gtk_toolbar_set_icon_size(GTK_TOOLBAR(toolbar),
                               GTK_ICON_SIZE_SMALL_TOOLBAR);
 
-    add_tool_button(lw, toolbar, "document-new", "+", "New Note",
+    /* --- folder area ---------------------------------------------------- */
+    add_tool_button(lw, toolbar, "new-folder", "+\xf0\x9f\x93\x81",
+                    "New Folder", "Create a folder inside the selection",
+                    G_CALLBACK(on_new_folder));
+    add_tool_button(lw, toolbar, "delete-folder", "\xe2\x9c\x95",
+                    "Delete Folder", "Delete the selected folder",
+                    G_CALLBACK(on_delete_folder));
+    /* Rename lives in the folder's right-click menu only.                  */
+
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
+                       gtk_separator_tool_item_new(), -1);
+
+    /* --- notes area ------------------------------------------------------*/
+    add_tool_button(lw, toolbar, "file", "+", "New Note",
                     "Create a note in the current folder",
                     G_CALLBACK(on_new_note));
-    add_tool_button(lw, toolbar, "edit-delete", "\xe2\x9c\x95",
+    add_tool_button(lw, toolbar, "delete", "\xe2\x9c\x95",
                     "Delete Note", "Delete the selected note",
                     G_CALLBACK(on_delete_note));
+    add_tool_button(lw, toolbar, "view", "\xe2\x8a\x9e",
+                    "List/Grid", "Toggle between list and grid view",
+                    G_CALLBACK(on_toggle_view));
 
-    /* Expanding separator pushes the view switcher to the right edge.      */
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
+                       gtk_separator_tool_item_new(), -1);
+
+    add_tool_button(lw, toolbar, "search", "\xf0\x9f\x94\x8d",
+                    "Search", "Search notes (Ctrl+F)",
+                    G_CALLBACK(on_open_search));
+
+    /* Expanding separator pushes the About button to the right edge.       */
     GtkToolItem *spacer = gtk_separator_tool_item_new();
     gtk_separator_tool_item_set_draw(GTK_SEPARATOR_TOOL_ITEM(spacer),
                                      FALSE);
@@ -1947,83 +1993,6 @@ build_action_bar(OnLibrary *lw)
 }
 
 /* ---------------------------------------------------------------------------
- * build_sidebar_toolbar() — the toolbar above the folder/tag tree:
- * New Folder, Rename Folder, Delete Folder, and Search.
- * Returns the toolbar widget.
- * ------------------------------------------------------------------------- */
-static GtkWidget *
-build_sidebar_toolbar(OnLibrary *lw)
-{
-    GtkWidget *toolbar = gtk_toolbar_new();
-    gtk_toolbar_set_icon_size(GTK_TOOLBAR(toolbar),
-                              GTK_ICON_SIZE_SMALL_TOOLBAR);
-
-    add_tool_button(lw, toolbar, "list-add", "+\xf0\x9f\x93\x81",
-                    "New Folder", "Create a folder inside the selection",
-                    G_CALLBACK(on_new_folder));
-    add_tool_button(lw, toolbar, "list-remove", "\xe2\x9c\x95",
-                    "Delete Folder", "Delete the selected folder",
-                    G_CALLBACK(on_delete_folder));
-    /* Rename lives in the folder's right-click menu only.                  */
-
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
-                       gtk_separator_tool_item_new(), -1);
-
-    add_tool_button(lw, toolbar, "edit-find", "\xf0\x9f\x94\x8d",
-                    "Search", "Search notes",
-                    G_CALLBACK(on_open_search));
-
-    on_app_register_toolbar(lw->app, ON_TOOLBAR_LIBRARY, toolbar);
-    return toolbar;
-}
-
-/* ---------------------------------------------------------------------------
- * sidebar_min_width_update() — make the sidebar at least as wide as its
- * toolbar's natural size plus a little slack, so every button stays
- * visible in any toolbar style (including icons-above-text).
- *   toolbar — the sidebar toolbar.
- *   box     — the sidebar container whose minimum width is being set.
- * ------------------------------------------------------------------------- */
-static void
-sidebar_min_width_update(GtkWidget *toolbar, GtkWidget *box)
-{
-    gint min_w, nat_w;               /* the toolbar's width requests        */
-    gtk_widget_get_preferred_width(toolbar, &min_w, &nat_w);
-
-    /* Only write on change — this also runs from size-allocate, where an
-     * unconditional set_size_request would re-trigger allocation forever.  */
-    gint cur_w, cur_h;               /* the box's current size request      */
-    gtk_widget_get_size_request(box, &cur_w, &cur_h);
-    if (cur_w != nat_w + 5)
-        gtk_widget_set_size_request(box, nat_w + 5, -1);
-}
-
-/* on_sidebar_toolbar_style_changed() — re-fit the sidebar width whenever
- * the toolbar switches between text/icons/both.                             */
-static void
-on_sidebar_toolbar_style_changed(GtkToolbar *toolbar,
-                                 GtkToolbarStyle style, gpointer user_data)
-{
-    (void)style;
-    sidebar_min_width_update(GTK_WIDGET(toolbar),
-                             GTK_WIDGET(user_data));
-}
-
-/* on_sidebar_toolbar_size_allocate() — the toolbar's metrics are only
- * final once it is realized and allocated; before that, the preferred
- * width measured at construction comes out too small and the buttons
- * start truncated.  Re-fitting here keeps the minimum correct from the
- * first frame on (the change guard above prevents allocate loops).          */
-static void
-on_sidebar_toolbar_size_allocate(GtkWidget *toolbar,
-                                 GdkRectangle *allocation,
-                                 gpointer user_data)
-{
-    (void)allocation;
-    sidebar_min_width_update(toolbar, GTK_WIDGET(user_data));
-}
-
-/* ---------------------------------------------------------------------------
  * about_button_fit_style() — the About button shows the centered logo in
  * every toolbar style; the "About" text appears ONLY in text-only mode
  * (where there would otherwise be nothing to click).  The item is a plain
@@ -2064,7 +2033,8 @@ on_action_toolbar_style_changed(GtkToolbar *toolbar,
 
 /* ---------------------------------------------------------------------------
  * on_library_key_press() — window-level shortcuts: Ctrl/Cmd+N creates a
- * note in the currently selected folder.
+ * note in the currently selected folder; Ctrl/Cmd+F opens the search
+ * window.
  * ------------------------------------------------------------------------- */
 static gboolean
 on_library_key_press(GtkWidget *widget, GdkEventKey *event,
@@ -2072,10 +2042,16 @@ on_library_key_press(GtkWidget *widget, GdkEventKey *event,
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
-    if ((event->state & (GDK_CONTROL_MASK | GDK_META_MASK)) &&
-        gdk_keyval_to_lower(event->keyval) == GDK_KEY_n) {
-        on_new_note(NULL, lw);
-        return TRUE;
+    if (event->state & (GDK_CONTROL_MASK | GDK_META_MASK)) {
+        guint key = gdk_keyval_to_lower(event->keyval);
+        if (key == GDK_KEY_n) {
+            on_new_note(NULL, lw);
+            return TRUE;
+        }
+        if (key == GDK_KEY_f) {
+            on_open_search(NULL, lw);
+            return TRUE;
+        }
     }
     return FALSE;
 }
@@ -2167,25 +2143,13 @@ on_library_window_create(OnApp *app)
     gtk_container_add(GTK_CONTAINER(sidebar_scroll),
                       GTK_WIDGET(lw->sidebar));
 
-    /* Sidebar column: its toolbar on top, the tree below.  The minimum
-     * width always fits the toolbar's buttons (+5px), tracked across
-     * toolbar-style changes.                                               */
-    GtkWidget *sidebar_toolbar = build_sidebar_toolbar(lw);
+    /* Sidebar column: just the tree (all buttons live in the unified
+     * toolbar above the paned).  Its minimum width is whatever the tree
+     * content needs — the scrolled window never scrolls horizontally, so
+     * it requests the tree's full natural width.                           */
     GtkWidget *sidebar_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_pack_start(GTK_BOX(sidebar_box), sidebar_toolbar,
-                       FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(sidebar_box),
-                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
-                       FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(sidebar_box), sidebar_scroll,
                        TRUE, TRUE, 0);
-    sidebar_min_width_update(sidebar_toolbar, sidebar_box);
-    g_signal_connect(sidebar_toolbar, "style-changed",
-                     G_CALLBACK(on_sidebar_toolbar_style_changed),
-                     sidebar_box);
-    g_signal_connect_after(sidebar_toolbar, "size-allocate",
-                           G_CALLBACK(on_sidebar_toolbar_size_allocate),
-                           sidebar_box);
 
     /* --- notes list view ---------------------------------------------------*/
     lw->notes_list = GTK_TREE_VIEW(
@@ -2298,17 +2262,9 @@ on_library_window_create(OnApp *app)
     gtk_stack_set_visible_child_name(GTK_STACK(lw->stack), "list");
 
     /* --- assemble -----------------------------------------------------------*/
-    GtkWidget *right = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_pack_start(GTK_BOX(right), build_action_bar(lw),
-                       FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(right),
-                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
-                       FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(right), lw->stack, TRUE, TRUE, 0);
-
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_paned_pack1(GTK_PANED(paned), sidebar_box, FALSE, FALSE);
-    gtk_paned_pack2(GTK_PANED(paned), right, TRUE, FALSE);
+    gtk_paned_pack2(GTK_PANED(paned), lw->stack, TRUE, FALSE);
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *menubar = build_menubar(lw);
@@ -2316,6 +2272,11 @@ on_library_window_create(OnApp *app)
      * macOS menu bar (see on_library_apply_native_menubar).                */
     g_object_set_data(G_OBJECT(lw->window), "on-menubar", menubar);
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), build_action_bar(lw),
+                       FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox),
+                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
+                       FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     gtk_container_add(GTK_CONTAINER(lw->window), vbox);
 

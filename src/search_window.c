@@ -78,8 +78,8 @@ typedef struct {
 } OnSearch;
 
 /* Fallback dimensions before any search window has been resized.            */
-#define SEARCH_WIN_DEFAULT_W 680
-#define SEARCH_WIN_DEFAULT_H 460
+#define SEARCH_WIN_DEFAULT_W 575
+#define SEARCH_WIN_DEFAULT_H 360
 
 /* ---------------------------------------------------------------------------
  * SearchHit — one matching note, fully formatted by the worker so the
@@ -467,11 +467,11 @@ on_search_destroy(GtkWidget *widget, gpointer user_data)
     (void)widget;
     OnSearch *sw = user_data;        /* owning search window                */
     search_job_cancel(sw);
-    if (sw->win_w > 0 && sw->win_h > 0 && !sw->app->read_only) {
+    if (sw->win_w > 0 && sw->win_h > 0) {
         gchar *w = g_strdup_printf("%d", sw->win_w);
         gchar *h = g_strdup_printf("%d", sw->win_h);
-        on_db_setting_set(sw->app->db, "search_win_w", w);
-        on_db_setting_set(sw->app->db, "search_win_h", h);
+        on_app_config_set("search_win_w", w);
+        on_app_config_set("search_win_h", h);
         g_free(w);
         g_free(h);
     }
@@ -491,8 +491,8 @@ on_search_window_open(OnApp *app, gboolean scope_to_sel)
     /* Open at whatever size the last search window was left at.            */
     gint win_w = SEARCH_WIN_DEFAULT_W;
     gint win_h = SEARCH_WIN_DEFAULT_H;
-    gchar *w_str = on_db_setting_get(app->db, "search_win_w");
-    gchar *h_str = on_db_setting_get(app->db, "search_win_h");
+    gchar *w_str = on_app_config_get("search_win_w");
+    gchar *h_str = on_app_config_get("search_win_h");
     if (w_str != NULL && h_str != NULL) {
         gint w = (gint)g_ascii_strtoll(w_str, NULL, 10);
         gint h = (gint)g_ascii_strtoll(h_str, NULL, 10);

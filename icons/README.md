@@ -1,13 +1,13 @@
 # Orange Notes — toolbar icons
 
-These SVGs come from the **elementary** icon theme (GPL-3.0,
-<https://github.com/elementary/icons>): 24px action icons for the library
-toolbars, plus the monochrome `edit-copy-symbolic.svg` for the code-block
-copy button.
+Custom PNG icons for the toolbars, plus one SVG kept from the
+**elementary** icon theme (GPL-3.0,
+<https://github.com/elementary/icons>): `dialog-warning.svg` for
+confirmation dialogs.
 
 SVG rendering requires the librsvg gdk-pixbuf loader:
-`sudo port install librsvg` (then restart Orange Notes). Without it, all
-buttons show small text glyphs instead of icons.
+`sudo port install librsvg` (then restart Orange Notes). Without it,
+SVG-based icons show small text glyphs instead.
 
 ## Replacing icons
 
@@ -17,13 +17,13 @@ is missing or cannot be decoded, the button falls back to a text glyph.
 
 | File                     | Used for                       |
 |--------------------------|--------------------------------|
-| `document-new.svg`       | New Note                       |
-| `list-add.svg`           | New Folder                     |
-| `list-remove.svg`        | Delete Folder                  |
-| `edit-delete.svg`        | Delete Note                    |
-| `edit-find.svg`          | Search                         |
-| `edit-copy-symbolic.svg` | Code-block copy button         |
-| `insert-image.svg`       | Insert Image (editor)          |
+| `file.png`               | New Note                       |
+| `delete.png`             | Delete Note                    |
+| `new-folder.png`         | New Folder                     |
+| `delete-folder.png`      | Delete Folder                  |
+| `view.png`               | List/Grid view toggle          |
+| `search.png`             | Search                         |
+| `copy.png`               | Code-block copy button         |
 | `dialog-warning.svg`     | Delete-confirmation dialogs    |
 
 These names are looked up but have no bundled file — the editor's

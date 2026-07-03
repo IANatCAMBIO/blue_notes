@@ -87,9 +87,22 @@ on_code_copy_toggled(GtkToggleButton *check, gpointer user_data)
 {
     OnApp *app = user_data;          /* application context                 */
     app->code_copy_buttons = gtk_toggle_button_get_active(check);
-    on_db_setting_set(app->db, "code_copy_button",
+    on_app_config_set("code_copy_button",
                       app->code_copy_buttons ? "1" : "0");
     on_editor_rebuild_code_buttons_all(app);
+}
+
+/* on_sidebar_counts_toggled() — show/hide the note counts next to
+ * folders and tags in the library sidebar, live.                            */
+static void
+on_sidebar_counts_toggled(GtkToggleButton *check, gpointer user_data)
+{
+    OnApp *app = user_data;          /* application context                 */
+    app->sidebar_counts = gtk_toggle_button_get_active(check);
+    on_app_config_set("sidebar_counts",
+                      app->sidebar_counts ? "1" : "0");
+    if (app->notify_notes_changed != NULL)
+        app->notify_notes_changed(app);  /* rebuild the sidebar labels      */
 }
 
 #ifdef HAVE_GTKOSX
@@ -100,7 +113,7 @@ on_native_menubar_toggled(GtkToggleButton *check, gpointer user_data)
 {
     OnApp *app = user_data;          /* application context                 */
     gboolean native = gtk_toggle_button_get_active(check);
-    on_db_setting_set(app->db, "native_menubar", native ? "1" : "0");
+    on_app_config_set("native_menubar", native ? "1" : "0");
     on_library_apply_native_menubar(app, native);
 }
 #endif /* HAVE_GTKOSX */
@@ -217,12 +230,12 @@ on_db_choose_clicked(GtkButton *btn, gpointer user_data)
 static void
 on_viewer_entry_changed(GtkEditable *editable, gpointer user_data)
 {
-    OnApp *app = user_data;          /* application context                 */
+    (void)user_data;
     const gchar *text = gtk_entry_get_text(GTK_ENTRY(editable));
     if (text != NULL && *text != '\0')
-        on_db_setting_set(app->db, "image_viewer", text);
+        on_app_config_set("image_viewer", text);
     else
-        on_db_setting_delete(app->db, "image_viewer");
+        on_app_config_set("image_viewer", NULL);
 }
 
 /* on_viewer_browse_clicked() — pick the viewer program with a file
@@ -254,7 +267,7 @@ on_line_numbers_toggled(GtkToggleButton *check, gpointer user_data)
 {
     OnApp *app = user_data;          /* application context                 */
     app->code_line_numbers = gtk_toggle_button_get_active(check);
-    on_db_setting_set(app->db, "code_line_numbers",
+    on_app_config_set("code_line_numbers",
                       app->code_line_numbers ? "1" : "0");
     on_editor_apply_line_numbers_all(app);
 }
@@ -310,6 +323,15 @@ on_settings_window_open(OnApp *app)
 
     gtk_box_pack_start(GTK_BOX(vbox), grid, FALSE, FALSE, 0);
 
+    GtkWidget *counts_check = gtk_check_button_new_with_label(
+        "Show note counts next to folders and tags");
+    gtk_widget_set_margin_start(counts_check, 12);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(counts_check),
+                                 app->sidebar_counts);
+    g_signal_connect(counts_check, "toggled",
+                     G_CALLBACK(on_sidebar_counts_toggled), app);
+    gtk_box_pack_start(GTK_BOX(vbox), counts_check, FALSE, FALSE, 0);
+
 #ifdef __APPLE__
     /* Native macOS menu bar belongs with the other appearance choices.     */
     GtkWidget *mac_check = gtk_check_button_new_with_label(
@@ -317,7 +339,7 @@ on_settings_window_open(OnApp *app)
     gtk_widget_set_margin_start(mac_check, 12);
 #ifdef HAVE_GTKOSX
     {
-        gchar *native = on_db_setting_get(app->db, "native_menubar");
+        gchar *native = on_app_config_get("native_menubar");
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mac_check),
                                      g_strcmp0(native, "1") == 0);
         g_free(native);
@@ -382,7 +404,7 @@ on_settings_window_open(OnApp *app)
     gtk_entry_set_placeholder_text(GTK_ENTRY(viewer_entry),
                                    "System default");
     {
-        gchar *viewer = on_db_setting_get(app->db, "image_viewer");
+        gchar *viewer = on_app_config_get("image_viewer");
         if (viewer != NULL) {
             gtk_entry_set_text(GTK_ENTRY(viewer_entry), viewer);
             g_free(viewer);

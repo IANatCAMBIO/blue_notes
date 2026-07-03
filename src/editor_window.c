@@ -708,9 +708,16 @@ on_code_copy_clicked(GtkButton *btn, gpointer user_data)
 }
 
 /* ---------------------------------------------------------------------------
- * code_buttons_update_positions() — pin every copy button to the current
- * on-screen upper-right corner of its block.  Cheap; safe to call from
- * scroll and resize handlers.
+ * code_buttons_update_positions() — anchor every copy button to the
+ * upper-right corner of its block, in BUFFER coordinates.
+ *
+ * GTK3 model (verified empirically by origin-probing a test child, see
+ * CLAUDE.md): text-window children are anchored to the TEXT — they ride
+ * scrolling at 1x on their own, and a move_child() issued while
+ * scrolled does not even take effect until the next validate/allocate
+ * cycle.  So positions must be buffer-anchored and must NOT be
+ * recomputed from the scroll position; this runs only when content or
+ * geometry changes (rebuild, size-allocate), never on scroll.
  * ------------------------------------------------------------------------- */
 static void
 code_buttons_update_positions(OnEditor *ed)
@@ -719,8 +726,7 @@ code_buttons_update_positions(OnEditor *ed)
         gtk_text_view_get_window(ed->view, GTK_TEXT_WINDOW_TEXT);
     if (text_win == NULL)
         return;
-    gint win_width  = gdk_window_get_width(text_win);
-    gint win_height = gdk_window_get_height(text_win);
+    gint win_width = gdk_window_get_width(text_win);
 
     for (GSList *l = ed->code_buttons; l != NULL; l = l->next) {
         GtkWidget *btn = l->data;    /* one floating copy button            */
@@ -732,7 +738,6 @@ code_buttons_update_positions(OnEditor *ed)
          * every state (normal/hover/active), so positioning can rely on
          * the constant instead of chasing theme-dependent allocations.     */
         const gint bw = CODE_BTN_SIZE;
-        const gint bh = CODE_BTN_SIZE;
 
         GtkTextIter it;              /* block start position                */
         gtk_text_buffer_get_iter_at_mark(ed->buffer, &it, mark);
@@ -745,30 +750,14 @@ code_buttons_update_positions(OnEditor *ed)
         gint line_y, line_h;         /* line extent in buffer coords        */
         gtk_text_view_get_line_yrange(ed->view, &it, &line_y, &line_h);
 
-        gint wx, wy;                 /* same location in window coords      */
-        gtk_text_view_buffer_to_window_coords(ed->view,
-                                              GTK_TEXT_WINDOW_TEXT,
-                                              0, line_y, &wx, &wy);
-        gint block_top = wy;         /* top edge of the shaded block        */
-
-        /* Children in the text window do not scroll with the buffer, so
-         * hide the button whenever its block's top edge is off screen —
-         * otherwise it would float over unrelated text.                    */
-        if (block_top < -2 || block_top > win_height - bh) {
-            gtk_widget_hide(btn);
-            continue;
-        }
-        gtk_widget_show(btn);
         /* Equal CODE_BTN_MARGIN insets from the shaded top/right edges.
-         * GTK3 quirk (verified empirically): children of the TEXT window
-         * are allocated with the view's top margin added AGAIN on top of
-         * the requested y, while buffer_to_window_coords already includes
-         * it — so subtract it once to avoid double-counting.               */
+         * move_child() coordinates land as-is (no top-margin shift on
+         * this path — verified on screen; only the INITIAL allocation of
+         * a freshly added child re-adds the margin).                       */
         gtk_text_view_move_child(
             ed->view, btn,
             win_width - CODEBLOCK_RIGHT_MARGIN - bw - CODE_BTN_MARGIN,
-            block_top + CODE_BTN_MARGIN
-                - gtk_text_view_get_top_margin(ed->view));
+            line_y + CODE_BTN_MARGIN);
     }
 }
 
@@ -863,7 +852,7 @@ code_buttons_rebuild(OnEditor *ed)
          * button even while overlaying code text (normal relief keeps the
          * theme's frame instead of the hover-only flat look).              */
         GtkWidget *btn = gtk_button_new();
-        GtkWidget *icon = on_app_icon_image_sized(ed->app, "edit-copy-symbolic", 16);
+        GtkWidget *icon = on_app_icon_image_sized(ed->app, "copy", 16);
         if (icon == NULL)
             icon = gtk_label_new("\xe2\x8e\x98");    /* ⎘ fallback glyph    */
         gtk_container_add(GTK_CONTAINER(btn), icon);
@@ -1073,14 +1062,10 @@ on_editor_rebuild_code_buttons_all(OnApp *app)
     }
 }
 
-/* on_view_scrolled() / on_view_size_allocate() — keep buttons pinned.       */
-static void
-on_view_scrolled(GtkAdjustment *adj, gpointer user_data)
-{
-    (void)adj;
-    code_buttons_update_positions((OnEditor *)user_data);
-}
-
+/* on_view_size_allocate() — re-anchor buttons when the view's geometry
+ * changes (width affects their x; reflow affects their line_y).  Scroll
+ * needs NO handling: the buttons are text-window children and ride the
+ * scroll on their own.                                                      */
 static void
 on_view_size_allocate(GtkWidget *widget, GdkRectangle *allocation,
                       gpointer user_data)
@@ -1102,8 +1087,16 @@ static gint
 image_effective_width(GdkPixbuf *orig, gint display_width)
 {
     gint w = gdk_pixbuf_get_width(orig);
-    return (display_width > 0) ? MIN(display_width, w)
-                               : MIN(w, ON_IMAGE_DEFAULT_WIDTH);
+    gint h = gdk_pixbuf_get_height(orig);
+    if (display_width > 0)
+        return MIN(display_width, w);
+
+    /* Thumbnail mode: fit inside ON_IMAGE_THUMB_W × ON_IMAGE_THUMB_H
+     * (aspect preserved), never upscaling.                                 */
+    gint tw = MIN(w, ON_IMAGE_THUMB_W);
+    if (h > 0 && h * tw > ON_IMAGE_THUMB_H * w)  /* still too tall at tw   */
+        tw = w * ON_IMAGE_THUMB_H / h;
+    return MAX(tw, 1);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1287,7 +1280,7 @@ on_img_open(GtkMenuItem *item, gpointer user_data)
         return;
     }
 
-    gchar *viewer = on_db_setting_get(ed->app->db, "image_viewer");
+    gchar *viewer = on_app_config_get("image_viewer");
 #ifdef __APPLE__
     const gchar *opener = "open";
 #else
@@ -2787,38 +2780,43 @@ build_toolbar(OnEditor *ed)
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
                        gtk_separator_tool_item_new(), -1);
 
-    GtkToolItem *img_item = on_app_tool_item_new(
-        ed->app, FALSE, "insert-image", "\xf0\x9f\x96\xbc",
-        "Image\xe2\x80\xa6",
-        "Insert an image from a file (or just paste one)");
-    g_signal_connect(img_item, "clicked",
-                     G_CALLBACK(on_insert_image_clicked), ed);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), img_item, -1);
+    /* One "Insert ▾" dropdown replaces the Image/Table/Emoji buttons.  A
+     * GtkMenuButton + GtkMenu is used instead of a GtkComboBox: the
+     * combo's popup grab is unreliable inside a toolbar (it could close
+     * the moment the pointer moved); a real menu holds its grab.           */
+    GtkWidget *insert_menu = gtk_menu_new();
+    static const struct {
+        const gchar *label;          /* menu-item text                      */
+        GCallback    cb;             /* existing insert handler             */
+    } INSERTS[] = {
+        { "_Image\xe2\x80\xa6", G_CALLBACK(on_insert_image_clicked) },
+        { "_Table",             G_CALLBACK(on_insert_table_clicked) },
+        { "_Emoji\xe2\x80\xa6", G_CALLBACK(on_emoji_clicked) },
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(INSERTS); i++) {
+        GtkWidget *mi = gtk_menu_item_new_with_mnemonic(INSERTS[i].label);
+        g_signal_connect(mi, "activate", INSERTS[i].cb, ed);
+        gtk_widget_show(mi);
+        gtk_menu_shell_append(GTK_MENU_SHELL(insert_menu), mi);
+    }
 
-    GtkToolItem *table_item = on_app_tool_item_new(
-        ed->app, FALSE, "insert-table", "\xe2\x8a\x9e", "Table",
-        "Insert a 3\xc3\x97""3 table (right-click a cell to add or "
-        "remove rows and columns)");
-    g_signal_connect(table_item, "clicked",
-                     G_CALLBACK(on_insert_table_clicked), ed);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), table_item, -1);
+    GtkWidget *insert_btn = gtk_menu_button_new();
+    gtk_button_set_label(GTK_BUTTON(insert_btn), "Insert");
+    gtk_menu_button_set_popup(GTK_MENU_BUTTON(insert_btn), insert_menu);
+    gtk_widget_set_tooltip_text(insert_btn,
+        "Insert an image, a table, or an emoji at the cursor");
 
-    GtkToolItem *emoji_item = on_app_tool_item_new(
-        ed->app, FALSE, "face-smile", "\xf0\x9f\x99\x82", "Emoji",
-        "Insert an emoji (Ctrl+.)");
-    g_signal_connect(emoji_item, "clicked",
-                     G_CALLBACK(on_emoji_clicked), ed);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), emoji_item, -1);
+    GtkToolItem *insert_item = gtk_tool_item_new();
+    gtk_container_add(GTK_CONTAINER(insert_item), insert_btn);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), insert_item, -1);
 
-    /* In-note search, pinned to the toolbar's right edge (Ctrl+F), set
-     * off from the formatting buttons by a drawn separator.                */
+    /* In-note search, pinned to the toolbar's right edge (Ctrl+F) by an
+     * expanding blank spacer.                                              */
     GtkToolItem *spacer = gtk_separator_tool_item_new();
     gtk_separator_tool_item_set_draw(GTK_SEPARATOR_TOOL_ITEM(spacer),
                                      FALSE);
     gtk_tool_item_set_expand(spacer, TRUE);
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar), spacer, -1);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
-                       gtk_separator_tool_item_new(), -1);
 
     ed->search_entry = gtk_search_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(ed->search_entry),
@@ -2972,9 +2970,6 @@ on_editor_window_open(OnApp *app, gint64 note_id)
                      G_CALLBACK(on_view_size_allocate), ed);
     g_signal_connect_after(ed->view, "draw",
                            G_CALLBACK(on_view_draw), ed);
-    g_signal_connect(gtk_scrollable_get_vadjustment(
-                         GTK_SCROLLABLE(ed->view)),
-                     "value-changed", G_CALLBACK(on_view_scrolled), ed);
     g_signal_connect(ed->window, "destroy",
                      G_CALLBACK(on_editor_destroy), ed);
 

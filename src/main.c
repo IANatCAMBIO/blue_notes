@@ -51,6 +51,16 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
                                        theme_dir);
     g_free(theme_dir);
 
+    /* App-wide dialog polish: every dialog's button row keeps 6px of
+     * space to the bottom edge of the window.                              */
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(css,
+        ".dialog-action-area { margin-bottom: 6px; }", -1, NULL);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+
     /* Shared-database failsafe: claim the in-use marker, or let the user
      * choose read-only/override when another instance holds it.            */
     if (!on_app_db_acquire(app, NULL)) {
@@ -63,7 +73,7 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
 #ifdef HAVE_GTKOSX
     /* Honor the persisted native-menu-bar preference, then let the macOS
      * integration finish its launch handshake.                             */
-    gchar *native = on_db_setting_get(app->db, "native_menubar");
+    gchar *native = on_app_config_get("native_menubar");
     if (g_strcmp0(native, "1") == 0)
         on_library_apply_native_menubar(app, TRUE);
     g_free(native);
@@ -98,6 +108,10 @@ on_sigterm(gpointer user_data)
 int
 main(int argc, char *argv[])
 {
+    /* The application config (orange_notes.ini) lives next to the
+     * binary; resolve its location before anything reads it.               */
+    on_app_config_init(argv[0]);
+
     /* Headless automation: a recognized subcommand runs and exits
      * without ever creating windows (see cli.h for the command list).      */
     int cli_status = on_cli_run(argc, argv);
@@ -110,24 +124,46 @@ main(int argc, char *argv[])
 
     /* Open (or create) the notes database first — without it there is
      * nothing to show.  A custom location (e.g. a shared folder) may be
-     * configured in the config file; fall back to the default if that
-     * location has become unreachable.                                     */
+     * configured in the config file.  There is deliberately NO fallback
+     * to another location: silently opening a different database once
+     * made a user's notes "disappear" (a startup racing the previous
+     * instance's shutdown flush).  One configured database, or a clear
+     * error.                                                               */
     gchar *db_dir = on_app_config_load_db_dir();
     gchar *db_path = (db_dir != NULL)
                      ? g_build_filename(db_dir, "notes.db", NULL)
                      : NULL;
     OnDatabase *db = on_db_open(db_path);
-    if (db == NULL && db_path != NULL) {
-        g_printerr("orange_notes: cannot open %s; using the default "
-                   "database location\n", db_path);
+    if (db == NULL) {
+        g_printerr("orange_notes: could not open the notes database at "
+                   "%s\n(if another instance is still shutting down, "
+                   "try again in a few seconds)\n",
+                   db_path != NULL ? db_path : "the default location");
+        g_free(db_path);
         g_free(db_dir);
-        db_dir = NULL;
-        db = on_db_open(NULL);
+        return 1;
     }
     g_free(db_path);
-    if (db == NULL) {
-        g_printerr("orange_notes: could not open the notes database\n");
-        return 1;
+
+    /* One-time migration: UI settings used to live in the database's
+     * settings table; move any leftovers into the ini (existing ini
+     * values win) and purge them — the table now holds only the in_use
+     * instance lock.                                                       */
+    static const gchar *MIGRATE_KEYS[] = {
+        "toolbar_style_library", "toolbar_style_editor",
+        "code_copy_button", "code_line_numbers", "native_menubar",
+        "sidebar_counts", "image_viewer", "search_win_w", "search_win_h",
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(MIGRATE_KEYS); i++) {
+        gchar *old = on_db_setting_get(db, MIGRATE_KEYS[i]);
+        if (old == NULL)
+            continue;
+        gchar *cur = on_app_config_get(MIGRATE_KEYS[i]);
+        if (cur == NULL)
+            on_app_config_set(MIGRATE_KEYS[i], old);
+        g_free(cur);
+        on_db_setting_delete(db, MIGRATE_KEYS[i]);
+        g_free(old);
     }
 
     /* The shared context handed to every window.                           */
@@ -155,14 +191,19 @@ main(int argc, char *argv[])
     on_app_init_icons_dir(&app, argv[0]);
 
     /* Code-block copy buttons are on unless explicitly disabled.           */
-    gchar *ccb = on_db_setting_get(db, "code_copy_button");
+    gchar *ccb = on_app_config_get("code_copy_button");
     app.code_copy_buttons = g_strcmp0(ccb, "0") != 0;
     g_free(ccb);
 
     /* Code-block line numbers are off unless explicitly enabled.           */
-    gchar *cln = on_db_setting_get(db, "code_line_numbers");
+    gchar *cln = on_app_config_get("code_line_numbers");
     app.code_line_numbers = g_strcmp0(cln, "1") == 0;
     g_free(cln);
+
+    /* Sidebar folder/tag counts (hidden unless explicitly enabled).        */
+    gchar *sbc = on_app_config_get("sidebar_counts");
+    app.sidebar_counts = g_strcmp0(sbc, "1") == 0;
+    g_free(sbc);
 
     app.gtk_app = gtk_application_new("org.example.orange-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);

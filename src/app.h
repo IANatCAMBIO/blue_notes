@@ -47,6 +47,9 @@
  *   code_copy_buttons — whether code blocks show their floating copy
  *                    button (File → Settings…); persisted as the
  *                    "code_copy_button" setting.
+ *   sidebar_counts — whether the library sidebar shows note counts next
+ *                    to folders and tags; persisted as the
+ *                    "sidebar_counts" setting (default off).
  *   db_dir         — custom directory holding notes.db (owned string), or
  *                    NULL for the default location.  Persisted in the
  *                    config FILE (~/.config/orange-notes/config.ini), not
@@ -73,6 +76,7 @@ typedef struct OnApp {
     gchar           *icons_dir;
     gboolean         code_copy_buttons;
     gboolean         code_line_numbers;
+    gboolean         sidebar_counts;
     gchar           *db_dir;
     gboolean         read_only;
     gchar           *lock_token;
@@ -145,6 +149,27 @@ void on_app_set_toolbar_style(OnApp *app, OnToolbarKind kind,
  * app->toolbar_style[] (defaulting to icons-above-text when unset).
  * ------------------------------------------------------------------------- */
 void on_app_load_toolbar_styles(OnApp *app);
+
+/* ---------------------------------------------------------------------------
+ * on_app_config_init() — resolve the application config file once
+ * ("orange_notes.ini" in the same directory as the binary, from `argv0`)
+ * and load it into memory.  All later reads are served from memory; the
+ * file is only written when a setting changes.  Must run before any
+ * other config call; safe to call repeatedly.
+ * ------------------------------------------------------------------------- */
+void on_app_config_init(const gchar *argv0);
+
+/* ---------------------------------------------------------------------------
+ * on_app_config_get() — read one setting from the in-memory config.
+ * Returns a new string (g_free() it), or NULL when unset/empty.
+ * ------------------------------------------------------------------------- */
+gchar *on_app_config_get(const gchar *key);
+
+/* ---------------------------------------------------------------------------
+ * on_app_config_set() — change one setting: updates the in-memory config
+ * AND writes the ini file through.  NULL removes the key.
+ * ------------------------------------------------------------------------- */
+void on_app_config_set(const gchar *key, const gchar *value);
 
 /* ---------------------------------------------------------------------------
  * on_app_config_load_db_dir() — read the custom database directory from

@@ -173,9 +173,11 @@ void on_anchor_set_image(GtkTextChildAnchor *anchor, GdkPixbuf *original,
 GdkPixbuf *on_anchor_get_image(GtkTextChildAnchor *anchor,
                                gint *display_width);
 
-/* Default on-screen (logical) width for freshly inserted images — small
- * thumbnails by default; enlarge via the image's right-click menu.         */
-#define ON_IMAGE_DEFAULT_WIDTH 320
+/* Bounding box for the default thumbnail display of images (logical px):
+ * a freshly inserted image is scaled to fit inside this, aspect kept;
+ * enlarge via the image's right-click menu.                                 */
+#define ON_IMAGE_THUMB_W 200
+#define ON_IMAGE_THUMB_H 125
 
 /* ---------------------------------------------------------------------------
  * OnTable — the data behind an embedded table anchor.

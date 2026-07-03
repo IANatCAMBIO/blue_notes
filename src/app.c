@@ -21,20 +21,27 @@ static const gchar *STYLE_SETTING_KEYS[ON_TOOLBAR_N_KINDS] = {
     "toolbar_style_editor",
 };
 
+/* ---------------------------------------------------------------------------
+ * exe_dir_from_argv0() — the directory containing the executable; when
+ * launched via a bare name from PATH there is no directory part, so fall
+ * back to the current working directory.  Returns a new string.
+ * ------------------------------------------------------------------------- */
+static gchar *
+exe_dir_from_argv0(const gchar *argv0)
+{
+    if (argv0 != NULL && strchr(argv0, G_DIR_SEPARATOR) != NULL) {
+        gchar *abs = g_canonicalize_filename(argv0, NULL);
+        gchar *dir = g_path_get_dirname(abs);
+        g_free(abs);
+        return dir;
+    }
+    return g_get_current_dir();
+}
+
 void
 on_app_init_icons_dir(OnApp *app, const gchar *argv0)
 {
-    /* Prefer the directory containing the executable; when launched via a
-     * bare name from PATH there is no directory part, so fall back to the
-     * current working directory.                                           */
-    gchar *exe_dir;                  /* directory containing the binary     */
-    if (argv0 != NULL && strchr(argv0, G_DIR_SEPARATOR) != NULL) {
-        gchar *abs = g_canonicalize_filename(argv0, NULL);
-        exe_dir = g_path_get_dirname(abs);
-        g_free(abs);
-    } else {
-        exe_dir = g_get_current_dir();
-    }
+    gchar *exe_dir = exe_dir_from_argv0(argv0);
     app->icons_dir = g_build_filename(exe_dir, "icons", NULL);
     g_free(exe_dir);
 }
@@ -224,59 +231,84 @@ on_app_set_toolbar_style(OnApp *app, OnToolbarKind kind,
         (style == GTK_TOOLBAR_TEXT)  ? "text"
       : (style == GTK_TOOLBAR_ICONS) ? "icons"
                                      : "both";
-    on_db_setting_set(app->db, STYLE_SETTING_KEYS[kind], value);
+    on_app_config_set(STYLE_SETTING_KEYS[kind], value);
 }
 
 /* ---------------------------------------------------------------------------
- * config_file_path() — "~/.config/orange-notes/config.ini", creating the
- * directory. Returns a new string; g_free() it.
+ * The application config: "orange_notes.ini" in the same directory as
+ * the binary.  on_app_config_init() resolves the path and loads the
+ * whole file into memory ONCE; every read is served from memory and the
+ * file is only touched again to write a modification through.  All keys
+ * live under one [orange-notes] group.
  * ------------------------------------------------------------------------- */
-static gchar *
-config_file_path(void)
+static gchar    *config_ini_path = NULL;   /* resolved ini path             */
+static GKeyFile *config_kf       = NULL;   /* in-memory settings            */
+
+#define CONFIG_GROUP "orange-notes"
+
+void
+on_app_config_init(const gchar *argv0)
 {
-    gchar *dir = g_build_filename(g_get_user_config_dir(),
-                                  "orange-notes", NULL);
-    g_mkdir_with_parents(dir, 0700);
-    gchar *path = g_build_filename(dir, "config.ini", NULL);
-    g_free(dir);
-    return path;
+    if (config_kf != NULL)
+        return;                      /* already resolved and loaded         */
+    gchar *exe_dir = exe_dir_from_argv0(argv0);
+    config_ini_path = g_build_filename(exe_dir, "orange_notes.ini", NULL);
+    g_free(exe_dir);
+
+    config_kf = g_key_file_new();
+    g_key_file_load_from_file(config_kf, config_ini_path,
+                              G_KEY_FILE_NONE, NULL);  /* absent file OK    */
+}
+
+/* config_write() — flush the in-memory settings to the ini file.            */
+static void
+config_write(void)
+{
+    GError *err = NULL;
+    if (!g_key_file_save_to_file(config_kf, config_ini_path, &err)) {
+        g_warning("config: cannot save %s: %s", config_ini_path,
+                  err->message);
+        g_clear_error(&err);
+    }
+}
+
+gchar *
+on_app_config_get(const gchar *key)
+{
+    if (config_kf == NULL)
+        return NULL;
+    gchar *value = g_key_file_get_string(config_kf, CONFIG_GROUP, key,
+                                         NULL);
+    if (value != NULL && *value == '\0') {
+        g_free(value);
+        value = NULL;
+    }
+    return value;
+}
+
+void
+on_app_config_set(const gchar *key, const gchar *value)
+{
+    if (config_kf == NULL)
+        return;
+    if (value != NULL)
+        g_key_file_set_string(config_kf, CONFIG_GROUP, key, value);
+    else
+        g_key_file_remove_key(config_kf, CONFIG_GROUP, key, NULL);
+    config_write();
 }
 
 gchar *
 on_app_config_load_db_dir(void)
 {
-    gchar *path = config_file_path();
-    GKeyFile *kf = g_key_file_new();
-    gchar *dir = NULL;               /* result, NULL when unset             */
-    if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL))
-        dir = g_key_file_get_string(kf, "orange-notes", "db_dir", NULL);
-    g_key_file_free(kf);
-    g_free(path);
-    if (dir != NULL && *dir == '\0') {
-        g_free(dir);
-        dir = NULL;
-    }
-    return dir;
+    return on_app_config_get("db_dir");
 }
 
 /* config_save_db_dir() — persist (or clear, with NULL) the custom db dir.   */
 static void
 config_save_db_dir(const gchar *dir)
 {
-    gchar *path = config_file_path();
-    GKeyFile *kf = g_key_file_new();
-    g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL);
-    if (dir != NULL)
-        g_key_file_set_string(kf, "orange-notes", "db_dir", dir);
-    else
-        g_key_file_remove_key(kf, "orange-notes", "db_dir", NULL);
-    GError *err = NULL;
-    if (!g_key_file_save_to_file(kf, path, &err)) {
-        g_warning("config: cannot save %s: %s", path, err->message);
-        g_clear_error(&err);
-    }
-    g_key_file_free(kf);
-    g_free(path);
+    on_app_config_set("db_dir", dir);
 }
 
 void
@@ -492,7 +524,7 @@ void
 on_app_load_toolbar_styles(OnApp *app)
 {
     for (gint kind = 0; kind < ON_TOOLBAR_N_KINDS; kind++) {
-        gchar *value = on_db_setting_get(app->db, STYLE_SETTING_KEYS[kind]);
+        gchar *value = on_app_config_get(STYLE_SETTING_KEYS[kind]);
         GtkToolbarStyle style = GTK_TOOLBAR_ICONS;   /* the default         */
         if (value != NULL) {
             if (g_strcmp0(value, "text") == 0)

@@ -102,8 +102,10 @@ Everything lives in a single SQLite database:
 - `~/.local/share/orange-notes/notes.db` by default (GLib's user-data
   directory). *File → Settings… → Database* can point the app at a custom
   folder instead — e.g. a shared drive used by two machines (never open
-  it from both at once). The choice is stored in
-  `~/.config/orange-notes/config.ini`.
+  it from both at once). The choice is stored in `orange_notes.ini` in
+  the same directory as the binary. If the configured database cannot be
+  opened at startup, the app reports the error and exits — it never
+  silently opens a different database.
 - *File → Back Up Database…* snapshots the live database to a file;
   *File → Restore Database…* replaces the current data with a backup
   (keeping the old file as `notes.db.pre-restore`).
@@ -230,10 +232,11 @@ Semantics worth knowing when querying directly:
   backfills it on first search). Treat it as read-only convenience — the
   `content` blob is the source of truth.
 - `tags.name` is stored without the leading `#`.
-- `settings` holds app preferences (toolbar styles, `image_viewer`, …)
-  and the instance lock: while a GUI has the database open, the key
-  `in_use` is set to `"user@host (pid N, since …)"` and removed on exit.
-  Respect it before writing from your own tools.
+- `settings` holds exactly one key: the instance lock. While a GUI has
+  the database open, `in_use` is set to `"user@host (pid N, since …)"`
+  and removed on exit — respect it before writing from your own tools.
+  (App preferences live in `orange_notes.ini` next to the binary, not
+  in the database.)
 
 Example — every note with its full folder path:
 

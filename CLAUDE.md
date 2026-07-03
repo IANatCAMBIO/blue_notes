@@ -29,7 +29,7 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
 | `src/serialize.[ch]` | ONBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
-| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid, DnD, sortable headers, context menus, menubar (File/View), native-menubar hook |
+| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid, DnD, sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook |
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles (library vs editor), code-copy-button toggle, native macOS menubar toggle |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
@@ -60,18 +60,31 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
   scale) at each anchor; export/search/thumbnails read anchor data
   offscreen and never need widgets. Default display width 320
   (`ON_IMAGE_DEFAULT_WIDTH`); right-click menu toggles thumbnail/full.
-- Settings table keys: `toolbar_style_library`, `toolbar_style_editor`
+- ALL UI settings live in the ini (`[orange-notes]` group), loaded into
+  memory ONCE by `on_app_config_init()` and written through on change
+  (`on_app_config_get/set`); the file is never re-read while running.
+  Keys: `db_dir`, `toolbar_style_library`, `toolbar_style_editor`
   (`text|icons|both`, default icons), `code_copy_button` (`1|0`),
-  `code_line_numbers` (`1|0`), `native_menubar` (`1|0`), `image_viewer`
-  (program path; unset = system default), `search_win_w`/`search_win_h`
-  (last search-window size, the default for the next one).
-- **Custom DB location** (shared-folder support) lives in the CONFIG FILE
-  `~/.config/orange-notes/config.ini` (`[orange-notes] db_dir=`), never in
-  the DB. `on_app_switch_database()` switches live: closes all editors
-  (flushing saves), swaps the handle, copies the current file to the
-  target if no notes.db exists there, persists, refreshes the library.
-  Failure reverts to the old DB. main.c falls back to the default
-  location if the configured one is unreachable at startup.
+  `code_line_numbers` (`1|0`), `native_menubar` (`1|0`),
+  `sidebar_counts` (`1|0`, default 0 — folder/tag counts in the
+  sidebar), `image_viewer` (program path; unset = system default),
+  `search_win_w`/`search_win_h` (last search-window size, the default
+  for the next one). The DB settings table holds ONLY the `in_use`
+  instance lock (it must be in the DB — it coordinates instances across
+  machines); main.c migrates any legacy UI keys out of it at startup.
+- **Custom DB location** (shared-folder support) lives in the CONFIG
+  FILE `orange_notes.ini` NEXT TO THE BINARY (`[orange-notes] db_dir=`;
+  resolved from argv[0] by `on_app_config_init()`, which must run before
+  any config read — main() calls it first thing), never in the DB.
+  `on_app_switch_database()` switches live: closes all editors (flushing
+  saves), swaps the handle, copies the current file to the target if no
+  notes.db exists there, persists, refreshes the library. Failure
+  reverts to the old DB. If the configured DB can't be opened at
+  startup, main.c ERRORS OUT — deliberately NO fallback to the default
+  location: a silent fallback once made a user's notes "disappear" and
+  strands writes in the wrong file (the trigger was a relaunch racing
+  the dying instance's final flush past the 5 s busy timeout). One
+  configured database, or a clear error.
 - **Backup/Restore** (File menu): `on_db_backup_to()` uses SQLite's
   online backup API on the live DB; `on_app_restore_database()` closes
   editors, keeps the old file as `notes.db.pre-restore`, copies the
@@ -87,16 +100,23 @@ SVG pixbuf loader the icons need. After toggling a dependency, run
 
 ## Hard-won GTK3 quirks (do not re-learn these)
 
-1. **Text-window children double-count the top margin.** Children added
-   via `gtk_text_view_add_child_in_window(GTK_TEXT_WINDOW_TEXT)` are
-   allocated at `requested_y + top_margin`, while
-   `buffer_to_window_coords` already includes the margin — so subtract
-   `gtk_text_view_get_top_margin()` once when positioning (x is NOT
-   shifted). Verified by pixel-scanning an offscreen render.
-2. Those children **do not scroll** with the buffer: reposition on
-   vadjustment `value-changed`, view `size-allocate`, and rebuild on
-   buffer changes (idle-coalesced); hide buttons whose block scrolled
-   off-screen.
+1. **Text-window children are BUFFER-anchored.** Children added via
+   `gtk_text_view_add_child_in_window(GTK_TEXT_WINDOW_TEXT)` take their
+   position in buffer coordinates — they ride scrolling at 1x on their
+   own. The view's top margin is re-added ONLY on the initial
+   allocation of a freshly added child; positions set later via
+   `gtk_text_view_move_child()` land as-is (verified on screen), so add
+   at 0,0 and position everything through move_child with plain buffer
+   coordinates. Probing tip: use `gdk_window_get_origin` on a realized
+   window — offscreen pixel-scans do NOT composite these children.
+2. **Never reposition those children on scroll.** A `move_child()`
+   issued while scrolled doesn't take effect until the next
+   validate/allocate cycle, so scroll-driven "corrections" (especially
+   ones computed via `buffer_to_window_coords`, which double-apply the
+   scroll) land late and misalign the widget by the scroll delta.
+   Reposition only when content or geometry changes: rebuild on buffer
+   changes (idle-coalesced) and view `size-allocate`. No off-screen
+   hiding is needed — they scroll and clip naturally.
 3. The floating copy button must be **pinned to an exact size in CSS for
    all states** (`button, button:hover, button:active { min-width/height;
    padding:0 }`) — theme hover styling otherwise changes its allocation
