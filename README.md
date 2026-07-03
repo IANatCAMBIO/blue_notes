@@ -5,6 +5,8 @@ SQLite. Notes are rich text (WYSIWYG) with inline images, code blocks,
 tables, task lists and `#tags`, organized into nested folders, and
 exportable to HTML or Markdown — from the GUI or the command line.
 
+![Blue Notes](Screenshot.png)
+
 ## Features
 
 ### Library window
