@@ -2,9 +2,9 @@
  * app.c — shared application helpers (implementation)
  *
  * Icon loading and the app-wide toolbar-style machinery.  Icons live in a
- * plain folder of PNG files next to the executable ("icons/"), named by
- * the usual freedesktop action names (edit-copy.png, folder-new.png, …) so
- * users can swap any of them by replacing the file.
+ * plain folder of SVG/PNG files next to the executable ("icons/"), named
+ * by the usual freedesktop action names (edit-delete.svg, list-add.svg,
+ * …) so users can swap any of them by replacing the file.
  * =========================================================================== */
 
 #include "app.h"

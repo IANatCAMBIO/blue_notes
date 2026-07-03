@@ -115,11 +115,6 @@ gint64 on_db_folder_create(OnDatabase *db, gint64 parent_id, const gchar *name);
 /* Rename folder `id` to `name`. Returns TRUE on success.                    */
 gboolean on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name);
 
-/* Move folder `id` under `new_parent_id` (0 = top level).
- * Refuses cycles (moving a folder into its own descendant).
- * Returns TRUE on success.                                                  */
-gboolean on_db_folder_move(OnDatabase *db, gint64 id, gint64 new_parent_id);
-
 /* Delete folder `id`; all descendant folders and contained notes are
  * removed by ON DELETE CASCADE. Returns TRUE on success.                    */
 gboolean on_db_folder_delete(OnDatabase *db, gint64 id);

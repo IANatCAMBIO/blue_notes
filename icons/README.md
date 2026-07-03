@@ -2,8 +2,8 @@
 
 These SVGs come from the **elementary** icon theme (GPL-3.0,
 <https://github.com/elementary/icons>): 24px action icons for the library
-toolbars, and monochrome `actions/symbolic` variants (`*-symbolic.svg`)
-for the editor's formatting toolbar and the code-block copy button.
+toolbars, plus the monochrome `edit-copy-symbolic.svg` for the code-block
+copy button.
 
 SVG rendering requires the librsvg gdk-pixbuf loader:
 `sudo port install librsvg` (then restart Orange Notes). Without it, all
@@ -15,21 +15,26 @@ The app loads each icon by filename (`<name>.svg`, then `<name>.png`) —
 drop in any 24×24-ish image with the right name to replace one. If a file
 is missing or cannot be decoded, the button falls back to a text glyph.
 
-| File                            | Used for                       |
-|---------------------------------|--------------------------------|
-| `document-new.png`              | New Note                       |
-| `folder-new.png`                | New Folder                     |
-| `document-properties.png`       | Rename Folder                  |
-| `edit-delete.png`               | Delete Note / Delete Folder    |
-| `edit-find.png`                 | Search                         |
-| `edit-copy.png`                 | Code-block copy button         |
-| `insert-image.png`              | Insert Image                   |
-| `format-text-bold.png`          | Bold                           |
-| `format-text-italic.png`        | Italic                         |
-| `format-text-underline.png`     | Underline                      |
-| `format-text-strikethrough.png` | Strikethrough                  |
+| File                     | Used for                       |
+|--------------------------|--------------------------------|
+| `document-new.svg`       | New Note                       |
+| `list-add.svg`           | New Folder                     |
+| `list-remove.svg`        | Delete Folder                  |
+| `edit-delete.svg`        | Delete Note                    |
+| `edit-find.svg`          | Search                         |
+| `edit-copy-symbolic.svg` | Code-block copy button         |
+| `insert-image.svg`       | Insert Image (editor)          |
+| `dialog-warning.svg`     | Delete-confirmation dialogs    |
 
-These names are looked up but have no bundled file yet (text-glyph
-fallbacks are shown until you add them): `view-list.png`, `view-grid.png`,
-`heading-1.png`, `heading-2.png`, `body-text.png`, `list-bullet.png`,
-`list-number.png`, `code-block.png`.
+These names are looked up but have no bundled file — the editor's
+formatting buttons deliberately use crisp Pango text glyphs (B/I/U/S,
+H1/H2, ¶, •, 1., { }, ⬜) instead of icons.  Add a file with one of these
+names to override a glyph: `heading-1`, `heading-2`, `body-text`,
+`list-bullet`, `list-number`, `list-check`, `code-block`.
+
+`theme/` is a minimal bundled icon THEME (prepended to GTK's search
+path at startup): sharp symbolic replacements for the stock arrows GTK
+itself draws — sidebar expanders (`pan-*`), the in-note search entry
+(`edit-find`/`edit-clear`), and the find prev/next buttons
+(`go-up`/`go-down`). These are looked up by GTK, not by the app's icon
+loader; keep `theme/hicolor/index.theme` in sync if you add sizes.

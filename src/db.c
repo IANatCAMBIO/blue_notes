@@ -234,52 +234,6 @@ on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name)
     return ok;
 }
 
-/* ---------------------------------------------------------------------------
- * folder_is_descendant() — TRUE if `candidate` is `ancestor` itself or one
- * of its descendants.  Used to refuse cyclic folder moves.
- *   db        — open database.
- *   ancestor  — the folder being moved.
- *   candidate — the proposed new parent.
- * ------------------------------------------------------------------------- */
-static gboolean
-folder_is_descendant(OnDatabase *db, gint64 ancestor, gint64 candidate)
-{
-    /* Walk upward from `candidate` to the root, looking for `ancestor`.    */
-    gint64 cur = candidate;              /* current folder in the walk      */
-    while (cur > 0) {
-        if (cur == ancestor)
-            return TRUE;
-        sqlite3_stmt *stmt = prepare(db,
-            "SELECT COALESCE(parent_id, 0) FROM folders WHERE id=?");
-        if (stmt == NULL)
-            return TRUE;                 /* fail safe: refuse the move      */
-        sqlite3_bind_int64(stmt, 1, cur);
-        cur = (sqlite3_step(stmt) == SQLITE_ROW)
-                  ? sqlite3_column_int64(stmt, 0) : 0;
-        sqlite3_finalize(stmt);
-    }
-    return FALSE;
-}
-
-gboolean
-on_db_folder_move(OnDatabase *db, gint64 id, gint64 new_parent_id)
-{
-    if (folder_is_descendant(db, id, new_parent_id)) {
-        g_warning("db: refusing to move folder %" G_GINT64_FORMAT
-                  " into its own subtree", id);
-        return FALSE;
-    }
-    sqlite3_stmt *stmt = prepare(db,
-        "UPDATE folders SET parent_id=? WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    bind_id_or_null(stmt, 1, new_parent_id);
-    sqlite3_bind_int64(stmt, 2, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
-}
-
 gboolean
 on_db_folder_delete(OnDatabase *db, gint64 id)
 {

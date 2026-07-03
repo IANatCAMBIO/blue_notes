@@ -22,9 +22,9 @@
 
 #include "app.h"
 
-/* What the search may be scoped to (mirrors the library selection).        */
+/* What a scoped search targets (mirrors the library selection; the
+ * "All Notes" radio bypasses scoping entirely).                             */
 typedef enum {
-    ON_SCOPE_ALL,                    /* every note in the database          */
     ON_SCOPE_FOLDER,                 /* one folder's direct notes           */
     ON_SCOPE_TAG,                    /* notes carrying one tag              */
 } OnSearchScope;
