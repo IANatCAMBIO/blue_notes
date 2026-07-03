@@ -103,7 +103,8 @@ Everything lives in a single SQLite database:
   directory). *File → Settings… → Database* can point the app at a custom
   folder instead — e.g. a shared drive used by two machines (never open
   it from both at once). The choice is stored in `blue_notes.ini` in
-  the same directory as the binary. If the configured database cannot be
+  the same directory as the binary (created on first launch from
+  `blue_notes.ini.defaults`). If the configured database cannot be
   opened at startup, the app reports the error and exits — it never
   silently opens a different database.
 - *File → Back Up Database…* snapshots the live database to a file;

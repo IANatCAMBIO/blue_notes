@@ -255,6 +255,26 @@ on_app_config_init(const gchar *argv0)
     config_ini_path = g_build_filename(exe_dir, "blue_notes.ini", NULL);
     g_free(exe_dir);
 
+    /* First launch (no ini yet): seed it from the shipped defaults file
+     * sitting next to it, so a fresh install starts with sane settings.    */
+    if (!g_file_test(config_ini_path, G_FILE_TEST_EXISTS)) {
+        gchar *defaults_path = g_strdup_printf("%s.defaults",
+                                               config_ini_path);
+        gchar *contents = NULL;      /* defaults file body                  */
+        gsize  len = 0;
+        if (g_file_get_contents(defaults_path, &contents, &len, NULL)) {
+            GError *err = NULL;
+            if (!g_file_set_contents(config_ini_path, contents, len,
+                                     &err)) {
+                g_warning("config: cannot seed %s: %s", config_ini_path,
+                          err->message);
+                g_clear_error(&err);
+            }
+            g_free(contents);
+        }
+        g_free(defaults_path);
+    }
+
     config_kf = g_key_file_new();
     g_key_file_load_from_file(config_kf, config_ini_path,
                               G_KEY_FILE_NONE, NULL);  /* absent file OK    */

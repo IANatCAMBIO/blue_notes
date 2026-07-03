@@ -66,6 +66,10 @@ sees the new flags.
 - ALL UI settings live in the ini (`[blue-notes]` group), loaded into
   memory ONCE by `on_app_config_init()` and written through on change
   (`on_app_config_get/set`); the file is never re-read while running.
+  On first launch (no ini) it is seeded from `blue_notes.ini.defaults`
+  next to the binary (committed; empty `db_dir` = default DB location).
+  The live ini is gitignored — its rewrites drop comments and carry
+  per-machine values.
   Keys: `db_dir`, `toolbar_style_library`, `toolbar_style_editor`
   (`text|icons|both`, default icons), `code_copy_button` (`1|0`),
   `code_line_numbers` (`1|0`), `native_menubar` (`1|0`),
