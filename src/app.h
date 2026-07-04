@@ -86,6 +86,8 @@ typedef struct OnApp {
     gboolean         first_line_h1;
     gchar           *db_dir;
     gboolean         db_integrity_check;
+    gboolean         db_transient;     /* TRUE when the current DB was opened
+                                        * for this session only (not default) */
 } OnApp;
 
 /* ---------------------------------------------------------------------------

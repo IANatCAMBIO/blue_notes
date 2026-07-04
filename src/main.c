@@ -377,8 +377,10 @@ main(int argc, char *argv[])
         g_ptr_array_free(app.toolbars[k], TRUE);
 
     /* Snapshot the DB file's MD5 so the next launch can detect external
-     * changes.  Must run AFTER on_db_close so the file is fully flushed.  */
-    if (app.db_integrity_check && app.db != NULL) {
+     * changes.  Must run AFTER on_db_close so the file is fully flushed.
+     * Skip when the session was a transient open (not the default DB) —
+     * the stored hash must reflect the configured DB, not a one-time one.   */
+    if (app.db_integrity_check && app.db != NULL && !app.db_transient) {
         gchar *db_path_snap = g_strdup(app.db->path);
         on_db_close(app.db);
         app.db = NULL;

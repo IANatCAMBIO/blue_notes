@@ -414,11 +414,14 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
     on_db_close(app->db);
     app->db = NULL;
 
-    /* Bring the notes along: always into an empty location, and over an
-     * occupied one only with the user's explicit consent from above.       */
-    if ((overwrite || !g_file_test(target, G_FILE_TEST_EXISTS)) &&
-        g_file_test(old_path, G_FILE_TEST_EXISTS))
-        copy_file(old_path, target);
+    /* Move the database to the new location (copy then delete original),
+     * unless the user chose to use an existing file there instead.         */
+    gboolean did_copy = FALSE;
+    if (g_file_test(old_path, G_FILE_TEST_EXISTS)) {
+        if (overwrite || !g_file_test(target, G_FILE_TEST_EXISTS))
+            did_copy = copy_file(old_path, target);
+        /* "Use Existing" path: did_copy stays FALSE, old file is untouched. */
+    }
 
     app->db = on_db_open(target);
     gboolean ok = app->db != NULL;   /* did the new location work?          */
@@ -437,8 +440,16 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
         gtk_widget_destroy(msg);
         app->db = on_db_open(old_path);
     } else {
+        /* Delete the original file: the data now lives at the new path.   */
+        if (did_copy) {
+            GFile *fold = g_file_new_for_path(old_path);
+            if (!g_file_delete(fold, NULL, NULL))
+                g_warning("config: could not remove old db at %s", old_path);
+            g_object_unref(fold);
+        }
         g_free(app->db_dir);
         app->db_dir = g_strdup(new_dir);
+        app->db_transient = FALSE;
         on_app_config_set("db_hash", NULL);
         config_save_db_dir(new_dir);
     }

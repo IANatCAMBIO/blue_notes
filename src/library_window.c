@@ -1146,6 +1146,106 @@ on_backup_db(GtkWidget *widget, gpointer user_data)
 }
 
 /* ---------------------------------------------------------------------------
+ * on_open_db() — File → Open Database…: let the user pick any .db file and
+ * open it, either as the new permanent default or for this session only.
+ * ------------------------------------------------------------------------- */
+static void
+on_open_db(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;
+    OnApp     *app = lw->app;
+
+    /* Step 1: pick the file. */
+    GtkWidget *chooser = gtk_file_chooser_dialog_new(
+        "Open Database", GTK_WINDOW(lw->window),
+        GTK_FILE_CHOOSER_ACTION_OPEN,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Open",   GTK_RESPONSE_ACCEPT,
+        NULL);
+    GtkFileFilter *ff = gtk_file_filter_new();
+    gtk_file_filter_add_pattern(ff, "*.db");
+    gtk_file_filter_set_name(ff, "SQLite Database (*.db)");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), ff);
+
+    gchar *file_path = NULL;
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT)
+        file_path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
+    gtk_widget_destroy(chooser);
+
+    if (file_path == NULL)
+        return;
+
+    /* Already open: nothing to do. */
+    if (g_strcmp0(file_path, app->db->path) == 0) {
+        g_free(file_path);
+        return;
+    }
+
+    /* Step 2: ask how to open it. */
+    gchar *display = g_path_get_basename(file_path);
+    GtkWidget *dlg = gtk_message_dialog_new(
+        GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+        "Open “%s” as your new default database, or for this "
+        "session only?", display);
+    g_free(display);
+    gtk_window_set_title(GTK_WINDOW(dlg), "Blue Notes - Open Database");
+    gtk_dialog_add_buttons(GTK_DIALOG(dlg),
+        "_Cancel",         GTK_RESPONSE_CANCEL,
+        "_Session Only",   1,
+        "Set as _Default", 2,
+        NULL);
+    gint resp = gtk_dialog_run(GTK_DIALOG(dlg));
+    gtk_widget_destroy(dlg);
+
+    if (resp == GTK_RESPONSE_CANCEL || resp == GTK_RESPONSE_DELETE_EVENT) {
+        g_free(file_path);
+        return;
+    }
+    gboolean set_default = (resp == 2);
+
+    /* Step 3: switch to the chosen database. */
+    on_app_close_all_editors(app);
+    gchar *old_path = g_strdup(app->db->path);
+    on_db_close(app->db);
+    app->db = on_db_open(file_path);
+
+    if (app->db == NULL) {
+        GtkWidget *err = gtk_message_dialog_new(
+            GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
+            GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            "Could not open:\n%s", file_path);
+        gtk_window_set_title(GTK_WINDOW(err), "Blue Notes - Database Error");
+        gtk_dialog_run(GTK_DIALOG(err));
+        gtk_widget_destroy(err);
+        /* Revert to old database. */
+        app->db = on_db_open(old_path);
+        g_free(old_path);
+        g_free(file_path);
+        return;
+    }
+
+    if (set_default) {
+        gchar *new_dir = g_path_get_dirname(file_path);
+        g_free(app->db_dir);
+        app->db_dir = g_strdup(new_dir);
+        app->db_transient = FALSE;
+        on_app_config_set("db_dir",  new_dir);
+        on_app_config_set("db_hash", NULL);
+        g_free(new_dir);
+    } else {
+        app->db_transient = TRUE;   /* session only: don't persist anything */
+    }
+
+    g_free(old_path);
+    g_free(file_path);
+
+    if (app->notify_notes_changed != NULL)
+        app->notify_notes_changed(app);
+}
+
+/* ---------------------------------------------------------------------------
  * on_restore_db() — File → Restore Database…: replace the current
  * database with a backup file (after confirmation; the replaced file is
  * kept as notes.db.pre-restore).
@@ -1890,6 +1990,8 @@ build_menubar(OnLibrary *lw)
                   G_CALLBACK(on_export_markdown), lw);
     gtk_menu_shell_append(GTK_MENU_SHELL(file_menu),
                           gtk_separator_menu_item_new());
+    add_menu_item(file_menu, "_Open Database\xe2\x80\xa6",
+                  G_CALLBACK(on_open_db), lw);
     add_menu_item(file_menu, "_Back Up Database\xe2\x80\xa6",
                   G_CALLBACK(on_backup_db), lw);
     add_menu_item(file_menu, "Restore _Database\xe2\x80\xa6",
