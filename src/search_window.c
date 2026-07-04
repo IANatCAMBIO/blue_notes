@@ -116,8 +116,6 @@ search_hit_free(gpointer data)
  *   cancelled      — set (atomically, from the main thread) when the
  *                    window closes or a newer search supersedes this one.
  *   db_path        — database file to open privately (owned).
- *   read_only      — the app's read-only flag; suppresses the body_text
- *                    backfill writeback.
  *   query          — the search text (owned).
  *   case_sensitive — plain-match case option.
  *   regex          — compiled pattern, or NULL for plain matching (GRegex
@@ -133,7 +131,6 @@ struct SearchJob {
     OnSearch  *sw;
     gint       cancelled;
     gchar     *db_path;
-    gboolean   read_only;
     gchar     *query;
     gboolean   case_sensitive;
     GRegex    *regex;
@@ -180,7 +177,7 @@ search_job_cancel(OnSearch *sw)
  * private connection.  Returns a newly allocated string.
  * ------------------------------------------------------------------------- */
 static gchar *
-note_plain_text(OnDatabase *db, gint64 note_id, gboolean read_only)
+note_plain_text(OnDatabase *db, gint64 note_id)
 {
     gchar *cached = on_db_note_body_text(db, note_id);
     if (cached != NULL)
@@ -193,8 +190,7 @@ note_plain_text(OnDatabase *db, gint64 note_id, gboolean read_only)
 
     gchar *text = on_note_extract_text(blob, blob_len);
     g_free(blob);
-    if (!read_only)
-        on_db_note_set_body_text(db, note_id, text);
+    on_db_note_set_body_text(db, note_id, text);
     return text;
 }
 
@@ -311,7 +307,7 @@ search_worker(gpointer user_data)
         if (g_atomic_int_get(&job->cancelled))
             break;                   /* superseded/closed: stop early       */
         OnNoteMeta *m = l->data;     /* one candidate                       */
-        gchar *body = note_plain_text(db, m->id, job->read_only);
+        gchar *body = note_plain_text(db, m->id);
 
         gboolean match;              /* does this note match the query?     */
         if (job->regex != NULL)
@@ -388,7 +384,6 @@ run_search(OnSearch *sw)
     SearchJob *job = g_new0(SearchJob, 1);
     job->sw             = sw;
     job->db_path        = g_strdup(sw->app->db->path);
-    job->read_only      = sw->app->read_only;
     job->query          = g_strdup(query);
     job->case_sensitive = case_sensitive;
     job->regex          = regex;     /* ownership passes to the job         */

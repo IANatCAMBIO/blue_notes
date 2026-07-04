@@ -285,6 +285,16 @@ on_first_line_h1_toggled(GtkToggleButton *check, gpointer user_data)
                       app->first_line_h1 ? "1" : "0");
 }
 
+/* on_db_integrity_check_toggled() — enable/disable the startup hash check.  */
+static void
+on_db_integrity_check_toggled(GtkToggleButton *check, gpointer user_data)
+{
+    OnApp *app = user_data;
+    app->db_integrity_check = gtk_toggle_button_get_active(check);
+    on_app_config_set("db_integrity_check",
+                      app->db_integrity_check ? "1" : "0");
+}
+
 /* ---------------------------------------------------------------------------
  * section_label() — bold section header for the settings layout.
  * ------------------------------------------------------------------------- */
@@ -483,6 +493,15 @@ on_settings_window_open(OnApp *app)
                      G_CALLBACK(on_db_custom_toggled), dbs);
     g_signal_connect(dbs->choose_btn, "clicked",
                      G_CALLBACK(on_db_choose_clicked), dbs);
+
+    GtkWidget *hash_check = gtk_check_button_new_with_label(
+        "Check database integrity on startup (detect external changes)");
+    gtk_widget_set_margin_start(hash_check, 12);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(hash_check),
+                                 app->db_integrity_check);
+    g_signal_connect(hash_check, "toggled",
+                     G_CALLBACK(on_db_integrity_check_toggled), app);
+    gtk_box_pack_start(GTK_BOX(vbox), hash_check, FALSE, FALSE, 0);
 
     /* --- close button ---------------------------------------------------------*/
     GtkWidget *close_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);

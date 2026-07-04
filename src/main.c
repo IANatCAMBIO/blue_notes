@@ -20,6 +20,155 @@
 #endif
 
 /* ---------------------------------------------------------------------------
+ * integrity_collect() — sqlite3_exec callback: accumulates non-"ok" rows
+ * from a PRAGMA integrity_check result into the GString passed as `data`.
+ * ------------------------------------------------------------------------- */
+static int
+integrity_collect(void *data, int argc, char **argv, char **col_names)
+{
+    (void)col_names;
+    GString *out = data;
+    for (int i = 0; i < argc; i++) {
+        if (argv[i] != NULL && g_strcmp0(argv[i], "ok") != 0) {
+            if (out->len > 0)
+                g_string_append_c(out, '\n');
+            g_string_append(out, argv[i]);
+        }
+    }
+    return 0;
+}
+
+/* startup_integrity_check() — run PRAGMA integrity_check and show results.
+ * Returns TRUE if the check passed (caller may proceed to open normally).   */
+static gboolean
+startup_integrity_check(OnApp *app)
+{
+    GString *errors = g_string_new(NULL);
+    sqlite3_exec(app->db->handle, "PRAGMA integrity_check",
+                 integrity_collect, errors, NULL);
+    gboolean ok = (errors->len == 0);
+
+    if (ok) {
+        GtkWidget *d = gtk_message_dialog_new(
+            NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+            "The database passed the integrity check.");
+        gtk_window_set_title(GTK_WINDOW(d), "Blue Notes - Integrity Check");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+    } else {
+        GtkWidget *d = gtk_message_dialog_new(
+            NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            "The integrity check found errors:\n\n%s", errors->str);
+        gtk_window_set_title(GTK_WINDOW(d),
+                             "Blue Notes - Integrity Check Failed");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+    }
+    g_string_free(errors, TRUE);
+    return ok;
+}
+
+/* startup_choose_db() — let the user pick a different database file at
+ * launch time and switch app->db onto it.  Returns TRUE on success.         */
+static gboolean
+startup_choose_db(OnApp *app)
+{
+    GtkWidget *chooser = gtk_file_chooser_dialog_new(
+        "Choose Database File", NULL,
+        GTK_FILE_CHOOSER_ACTION_OPEN,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Open",   GTK_RESPONSE_ACCEPT,
+        NULL);
+    gtk_window_set_title(GTK_WINDOW(chooser),
+                         "Blue Notes - Choose Database");
+    GtkFileFilter *ff = gtk_file_filter_new();
+    gtk_file_filter_add_pattern(ff, "*.db");
+    gtk_file_filter_set_name(ff, "SQLite Database (*.db)");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), ff);
+
+    gchar *file_path = NULL;
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT)
+        file_path = gtk_file_chooser_get_filename(
+            GTK_FILE_CHOOSER(chooser));
+    gtk_widget_destroy(chooser);
+
+    if (file_path == NULL)
+        return FALSE;               /* user cancelled                        */
+
+    on_db_close(app->db);
+    app->db = on_db_open(file_path);
+    if (app->db == NULL) {
+        GtkWidget *err = gtk_message_dialog_new(
+            NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            "Could not open the selected database:\n%s", file_path);
+        gtk_window_set_title(GTK_WINDOW(err), "Blue Notes - Database Error");
+        gtk_dialog_run(GTK_DIALOG(err));
+        gtk_widget_destroy(err);
+        g_free(file_path);
+        return FALSE;
+    }
+
+    gchar *new_dir = g_path_get_dirname(file_path);
+    g_free(app->db_dir);
+    app->db_dir = g_strdup(new_dir);
+    on_app_config_set("db_dir",  new_dir);
+    on_app_config_set("db_hash", NULL);   /* clear stale hash               */
+    g_free(new_dir);
+    g_free(file_path);
+    return TRUE;
+}
+
+/* startup_check_db_hash() — compare the stored MD5 hash against the current
+ * DB file.  If they differ, show a warning dialog offering three choices.
+ * Returns TRUE when the app should proceed, FALSE to quit.                  */
+static gboolean
+startup_check_db_hash(OnApp *app)
+{
+    gchar *stored = on_app_config_get("db_hash");
+    if (stored == NULL)
+        return TRUE;    /* no prior hash — first run or feature just enabled  */
+
+    gchar *current = on_app_db_compute_hash(app->db->path);
+    gboolean changed = (current == NULL ||
+                        g_strcmp0(stored, current) != 0);
+    g_free(current);
+    g_free(stored);
+
+    if (!changed)
+        return TRUE;    /* hash matches — proceed normally                    */
+
+    /* Loop so a failed integrity check can re-present the warning dialog.   */
+    for (;;) {
+        GtkWidget *dlg = gtk_message_dialog_new(
+            NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE,
+            "The database has changed since last access.\n\n"
+            "This may have been done by another Blue Notes instance, "
+            "or it could indicate database corruption.");
+        gtk_window_set_title(GTK_WINDOW(dlg),
+                             "Blue Notes - Database Changed");
+        gtk_dialog_add_buttons(GTK_DIALOG(dlg),
+            "_Open Normally",        1,
+            "Run _Integrity Check",  2,
+            "Choose _Different DB",  3,
+            NULL);
+        gint resp = gtk_dialog_run(GTK_DIALOG(dlg));
+        gtk_widget_destroy(dlg);
+
+        if (resp == 1) {
+            return TRUE;                        /* open as-is                */
+        } else if (resp == 2) {
+            if (startup_integrity_check(app))
+                return TRUE;                    /* passed — proceed          */
+            /* failed — loop back to the warning dialog                      */
+        } else if (resp == 3) {
+            return startup_choose_db(app);      /* TRUE=ok, FALSE=quit       */
+        } else {
+            return FALSE;                       /* dialog closed — quit      */
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * on_activate() — GtkApplication "activate" handler: show the library
  * window, or just raise it if the app is activated a second time.
  *   gtk_app   — the application.
@@ -60,9 +209,8 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);
 
-    /* Shared-database failsafe: claim the in-use marker, or let the user
-     * choose read-only/override when another instance holds it.            */
-    if (!on_app_db_acquire(app, NULL)) {
+    /* DB integrity check: warn if the file changed since last exit.        */
+    if (app->db_integrity_check && !startup_check_db_hash(app)) {
         g_application_quit(G_APPLICATION(app->gtk_app));
         return;
     }
@@ -83,8 +231,7 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
 /* ---------------------------------------------------------------------------
  * on_sigterm() — terminate gracefully on SIGTERM (pkill, logout, system
  * shutdown): destroying every window flushes editor autosaves and lets
- * the main loop end, so the database's in-use marker is released like a
- * normal quit instead of being stranded like a crash.
+ * the main loop end cleanly.
  * ------------------------------------------------------------------------- */
 static gboolean
 on_sigterm(gpointer user_data)
@@ -146,8 +293,7 @@ main(int argc, char *argv[])
 
     /* One-time migration: UI settings used to live in the database's
      * settings table; move any leftovers into the ini (existing ini
-     * values win) and purge them — the table now holds only the in_use
-     * instance lock.                                                       */
+     * values win) and purge them.                                          */
     static const gchar *MIGRATE_KEYS[] = {
         "toolbar_style_library", "toolbar_style_editor",
         "code_copy_button", "code_line_numbers", "native_menubar",
@@ -165,6 +311,9 @@ main(int argc, char *argv[])
         g_free(old);
     }
 
+    /* Remove any legacy "in_use" instance lock left by an older version.   */
+    on_db_setting_delete(db, "in_use");
+
     /* The shared context handed to every window.                           */
     OnApp app = {
         .gtk_app              = NULL,
@@ -180,8 +329,6 @@ main(int argc, char *argv[])
         .toolbars             = { NULL, NULL },
         .icons_dir            = NULL,
         .db_dir               = NULL,
-        .read_only            = FALSE,
-        .lock_token           = NULL,
     };
     app.db_dir = db_dir;             /* ownership transferred               */
     for (gint k = 0; k < ON_TOOLBAR_N_KINDS; k++)
@@ -209,6 +356,11 @@ main(int argc, char *argv[])
     app.first_line_h1 = g_strcmp0(flh, "1") == 0;
     g_free(flh);
 
+    /* DB integrity check is enabled unless explicitly disabled.            */
+    gchar *dic = on_app_config_get("db_integrity_check");
+    app.db_integrity_check = g_strcmp0(dic, "0") != 0;
+    g_free(dic);
+
     app.gtk_app = gtk_application_new("org.example.blue-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app.gtk_app, "activate",
@@ -218,16 +370,29 @@ main(int argc, char *argv[])
     int status = g_application_run(G_APPLICATION(app.gtk_app), argc, argv);
 
     /* Windows (and their final autosaves) are done by the time run()
-     * returns, so the database can be closed safely now.                   */
+     * returns, so the database can be closed and hashed safely now.        */
     g_object_unref(app.gtk_app);
     g_hash_table_destroy(app.editors);
     for (gint k = 0; k < ON_TOOLBAR_N_KINDS; k++)
         g_ptr_array_free(app.toolbars[k], TRUE);
-    /* The in-use marker must never outlive a clean exit.                   */
-    on_app_db_release(&app);
+
+    /* Snapshot the DB file's MD5 so the next launch can detect external
+     * changes.  Must run AFTER on_db_close so the file is fully flushed.  */
+    if (app.db_integrity_check && app.db != NULL) {
+        gchar *db_path_snap = g_strdup(app.db->path);
+        on_db_close(app.db);
+        app.db = NULL;
+        gchar *hash = on_app_db_compute_hash(db_path_snap);
+        if (hash != NULL) {
+            on_app_config_set("db_hash", hash);
+            g_free(hash);
+        }
+        g_free(db_path_snap);
+    } else {
+        on_db_close(app.db);
+    }
 
     g_free(app.icons_dir);
     g_free(app.db_dir);
-    on_db_close(app.db);
     return status;
 }

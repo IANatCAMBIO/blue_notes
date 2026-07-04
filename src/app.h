@@ -58,6 +58,9 @@
  *                    config FILE (blue_notes.ini next to the binary), not
  *                    the database — the database's own location cannot
  *                    live inside it.
+ *   db_integrity_check — when TRUE, the MD5 of the database file is
+ *                    written to the ini on exit and verified on the next
+ *                    launch; a mismatch triggers a warning dialog.
  * ------------------------------------------------------------------------- */
 
 /* Which family a toolbar belongs to — each has its own style setting.       */
@@ -82,8 +85,7 @@ typedef struct OnApp {
     gboolean         sidebar_counts;
     gboolean         first_line_h1;
     gchar           *db_dir;
-    gboolean         read_only;
-    gchar           *lock_token;
+    gboolean         db_integrity_check;
 } OnApp;
 
 /* ---------------------------------------------------------------------------
@@ -215,28 +217,9 @@ gboolean on_app_switch_database(OnApp *app, const gchar *new_dir);
 gboolean on_app_restore_database(OnApp *app, const gchar *backup_path);
 
 /* ---------------------------------------------------------------------------
- * on_app_db_acquire() — single-instance failsafe for shared databases.
- *
- * Checks the database's "in_use" marker.  When free, claims it with a
- * user@host/pid token (stored in app->lock_token).  When another
- * instance holds it, a dialog offers:
- *   - Open Read-Only : app->read_only is set and the SQLite connection
- *     is put in query_only mode (the engine refuses all writes);
- *   - Override Lock  : claim it anyway (for after a crash left a stale
- *     marker);
- *   - Quit           : returns FALSE — the caller should not proceed.
- *
- *   app    — the application context (db must be open).
- *   parent — window to parent the conflict dialog on, or NULL.
- * Returns TRUE when the app may use the database (owned or read-only).
+ * on_app_db_compute_hash() — compute the MD5 hex digest of the database
+ * file at `path`.  Returns a new string (g_free it), or NULL on I/O error.
  * ------------------------------------------------------------------------- */
-gboolean on_app_db_acquire(OnApp *app, GtkWindow *parent);
-
-/* ---------------------------------------------------------------------------
- * on_app_db_release() — clear the "in_use" marker, but ONLY if it still
- * holds our own token (never clobbers a lock someone else overrode).
- * Called at exit and before switching databases.
- * ------------------------------------------------------------------------- */
-void on_app_db_release(OnApp *app);
+gchar *on_app_db_compute_hash(const gchar *path);
 
 #endif /* BLUE_APP_H */

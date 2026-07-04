@@ -2217,10 +2217,7 @@ on_library_window_create(OnApp *app)
 
     /* --- window (standard titlebar, no HeaderBar) ------------------------*/
     lw->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(lw->window),
-                         app->read_only
-                         ? "Blue Notes - Library (Read-Only)"
-                         : "Blue Notes - Library");
+    gtk_window_set_title(GTK_WINDOW(lw->window), "Blue Notes - Library");
     gtk_window_set_default_size(GTK_WINDOW(lw->window), 900, 620);
     gtk_application_add_window(app->gtk_app, GTK_WINDOW(lw->window));
     g_object_set_data_full(G_OBJECT(lw->window), "on-library", lw,

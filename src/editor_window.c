@@ -2609,9 +2609,6 @@ on_search_stop(GtkSearchEntry *entry, gpointer user_data)
 static void
 editor_save(OnEditor *ed)
 {
-    if (ed->app->read_only)
-        return;                      /* the engine would refuse anyway      */
-
     gsize   blob_len = 0;            /* BNBF blob size                      */
     guint8 *blob = on_note_serialize(ed->buffer, &blob_len);
     gchar  *title = on_buffer_first_line(ed->buffer);
@@ -2666,8 +2663,6 @@ on_autosave_timeout(gpointer user_data)
 static void
 editor_queue_autosave(OnEditor *ed)
 {
-    if (ed->app->read_only)
-        return;
     ed->dirty = TRUE;                /* there is now something to save      */
     if (ed->autosave_source != 0)
         g_source_remove(ed->autosave_source);
@@ -2927,7 +2922,7 @@ on_editor_window_open(OnApp *app, gint64 note_id)
     gtk_text_buffer_create_tag(ed->buffer, "on-emoji",
                                "letter-spacing", 5 * PANGO_SCALE, NULL);
 
-    gtk_text_view_set_editable(ed->view, !app->read_only);
+    gtk_text_view_set_editable(ed->view, TRUE);
     gtk_text_view_set_wrap_mode(ed->view, GTK_WRAP_WORD_CHAR);
     gtk_text_view_set_left_margin(ed->view, 16);
     gtk_text_view_set_right_margin(ed->view, 16);

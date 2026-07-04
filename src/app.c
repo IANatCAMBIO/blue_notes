@@ -10,9 +10,6 @@
 #include "app.h"
 
 #include <string.h>
-#include <unistd.h>
-
-static gchar *lock_token_new(void);
 
 /* Settings-table keys under which the toolbar styles are persisted,
  * indexed by OnToolbarKind.                                                 */
@@ -412,7 +409,6 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
 
     /* Flush and detach everything that touches the current database.       */
     on_app_close_all_editors(app);
-    on_app_db_release(app);
 
     gchar *old_path = g_strdup(app->db->path);   /* current db file         */
     on_db_close(app->db);
@@ -427,16 +423,6 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
     app->db = on_db_open(target);
     gboolean ok = app->db != NULL;   /* did the new location work?          */
 
-    /* The new database may be held by another instance.                    */
-    if (ok && !on_app_db_acquire(app,
-                                 app->library_window != NULL
-                                 ? GTK_WINDOW(app->library_window)
-                                 : NULL)) {
-        on_db_close(app->db);        /* user declined: back out             */
-        app->db = NULL;
-        ok = FALSE;
-    }
-
     if (!ok) {
         /* Fall back to the previous database so the app stays usable.      */
         g_warning("config: cannot use %s; reverting to %s",
@@ -450,11 +436,10 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
         gtk_dialog_run(GTK_DIALOG(msg));
         gtk_widget_destroy(msg);
         app->db = on_db_open(old_path);
-        if (app->db != NULL)
-            on_app_db_acquire(app, NULL);   /* re-claim our old lock        */
     } else {
         g_free(app->db_dir);
         app->db_dir = g_strdup(new_dir);
+        on_app_config_set("db_hash", NULL);
         config_save_db_dir(new_dir);
     }
 
@@ -468,11 +453,7 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
 gboolean
 on_app_restore_database(OnApp *app, const gchar *backup_path)
 {
-    if (app->read_only)
-        return FALSE;                /* never restore over a locked db      */
-
     on_app_close_all_editors(app);
-    on_app_db_release(app);
 
     gchar *db_path = g_strdup(app->db->path);    /* active db file          */
     on_db_close(app->db);
@@ -492,13 +473,7 @@ on_app_restore_database(OnApp *app, const gchar *backup_path)
         ok = FALSE;
     }
 
-    /* The restored file may carry the backup's stale in-use marker;
-     * claim it as ours (we own this session).                              */
-    if (app->db != NULL) {
-        app->lock_token = lock_token_new();
-        on_db_setting_set(app->db, "in_use", app->lock_token);
-    }
-
+    on_app_config_set("db_hash", NULL);   /* stale hash; recompute on exit  */
     g_free(safety);
     g_free(db_path);
     if (app->notify_notes_changed != NULL)
@@ -506,81 +481,17 @@ on_app_restore_database(OnApp *app, const gchar *backup_path)
     return ok && app->db != NULL;
 }
 
-/* ---------------------------------------------------------------------------
- * lock_token_new() — the identity string written into the "in_use"
- * marker: enough for the other side's conflict dialog to name us.
- * ------------------------------------------------------------------------- */
-static gchar *
-lock_token_new(void)
+gchar *
+on_app_db_compute_hash(const gchar *path)
 {
-    GDateTime *now = g_date_time_new_now_local();
-    gchar *when = g_date_time_format(now, "%Y-%m-%d %H:%M");
-    g_date_time_unref(now);
-    gchar *token = g_strdup_printf("%s@%s (pid %d, since %s)",
-                                   g_get_user_name(), g_get_host_name(),
-                                   (int)getpid(), when);
-    g_free(when);
-    return token;
-}
-
-gboolean
-on_app_db_acquire(OnApp *app, GtkWindow *parent)
-{
-    g_clear_pointer(&app->lock_token, g_free);
-    app->read_only = FALSE;
-
-    gchar *holder = on_db_setting_get(app->db, "in_use");
-    if (holder != NULL && *holder != '\0') {
-        /* Someone (possibly a crashed instance) holds the database.        */
-        GtkWidget *dialog = gtk_message_dialog_new(
-            parent, GTK_DIALOG_MODAL,
-            GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE,
-            "This database is in use by:\n%s\n\n"
-            "Open it read-only, or override the lock if that instance "
-            "crashed without releasing it.", holder);
-        gtk_window_set_title(GTK_WINDOW(dialog),
-                             "Blue Notes - Database In Use");
-        gtk_dialog_add_buttons(GTK_DIALOG(dialog),
-                               "_Quit",           GTK_RESPONSE_CANCEL,
-                               "Open _Read-Only", 1,
-                               "_Override Lock",  2,
-                               NULL);
-        gint response = gtk_dialog_run(GTK_DIALOG(dialog));
-        gtk_widget_destroy(dialog);
-        g_free(holder);
-
-        if (response == 1) {
-            /* Enforced by the engine itself: every write on this
-             * connection now fails with SQLITE_READONLY.                   */
-            app->read_only = TRUE;
-            sqlite3_exec(app->db->handle, "PRAGMA query_only = ON",
-                         NULL, NULL, NULL);
-            return TRUE;
-        }
-        if (response != 2)
-            return FALSE;            /* Quit (or closed the dialog)         */
-        /* Override: fall through and claim.                                */
-    } else {
-        g_free(holder);
-    }
-
-    app->lock_token = lock_token_new();
-    on_db_setting_set(app->db, "in_use", app->lock_token);
-    return TRUE;
-}
-
-void
-on_app_db_release(OnApp *app)
-{
-    if (app->lock_token == NULL || app->db == NULL)
-        return;
-    /* Only remove the marker if it is still OURS — another instance may
-     * have overridden it, and its lock must survive our exit.              */
-    gchar *holder = on_db_setting_get(app->db, "in_use");
-    if (g_strcmp0(holder, app->lock_token) == 0)
-        on_db_setting_delete(app->db, "in_use");
-    g_free(holder);
-    g_clear_pointer(&app->lock_token, g_free);
+    gchar *data = NULL;
+    gsize  len  = 0;
+    if (!g_file_get_contents(path, &data, &len, NULL))
+        return NULL;
+    gchar *hash = g_compute_checksum_for_data(G_CHECKSUM_MD5,
+                                              (const guchar *)data, len);
+    g_free(data);
+    return hash;
 }
 
 void
