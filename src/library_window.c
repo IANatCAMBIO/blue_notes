@@ -124,6 +124,7 @@ typedef struct {
     gint          shown_kind;
     gint64        shown_id;
     GtkWidget    *sidebar_box;
+    GtkWidget    *sidebar_paned;         /* horizontal paned holding the sidebar */
 } OnLibrary;
 
 /* ---------------------------------------------------------------------------
@@ -1216,13 +1217,13 @@ on_about(GtkWidget *widget, gpointer user_data)
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
 
-    /* 64x64-logical logo from trumpet.png, decoded at the display's
+    /* 128x128-logical logo from trumpet.png, decoded at the display's
      * scale factor so it stays sharp on Retina (quirk #5).                 */
     gint sf = gtk_widget_get_scale_factor(lw->window);
     gchar *icon_path = g_build_filename(lw->app->icons_dir, "trumpet.png",
                                         NULL);
     GdkPixbuf *logo = gdk_pixbuf_new_from_file_at_size(icon_path,
-                                                       64 * sf, 64 * sf,
+                                                       128 * sf, 128 * sf,
                                                        NULL);
     g_free(icon_path);
 
@@ -1238,11 +1239,11 @@ on_about(GtkWidget *widget, gpointer user_data)
          * sized), then swap that image's content for a cairo surface
          * with the device scale — the pixbuf API renders 1 buffer px
          * per logical px and looks soft on HiDPI.                          */
-        GdkPixbuf *at_64 = (sf > 1)
-            ? gdk_pixbuf_scale_simple(logo, 64, 64, GDK_INTERP_BILINEAR)
+        GdkPixbuf *at_128 = (sf > 1)
+            ? gdk_pixbuf_scale_simple(logo, 128, 128, GDK_INTERP_BILINEAR)
             : g_object_ref(logo);
-        gtk_about_dialog_set_logo(GTK_ABOUT_DIALOG(dialog), at_64);
-        g_object_unref(at_64);
+        gtk_about_dialog_set_logo(GTK_ABOUT_DIALOG(dialog), at_128);
+        g_object_unref(at_128);
 
         if (sf > 1) {
             GtkWidget *img = find_gtk_image(
@@ -2139,6 +2140,70 @@ library_free(gpointer data)
     g_free(lw);
 }
 
+/* sb_fit_ctx — working state passed through gtk_tree_model_foreach() for
+ * the sidebar width measurement walk.                                       */
+typedef struct {
+    PangoLayout *lay;   /* reused layout (same font as the sidebar)          */
+    gint         max_w; /* running maximum row pixel width                   */
+} SbFitCtx;
+
+/* sb_fit_measure() — foreach callback: measure one sidebar row and update
+ * the running maximum in ctx->max_w.
+ *   model / path / iter — standard foreach signature.
+ *   data                — SbFitCtx *.
+ * Returns FALSE to continue the walk.                                       */
+static gboolean
+sb_fit_measure(GtkTreeModel *model, GtkTreePath *path,
+               GtkTreeIter *iter, gpointer data)
+{
+    SbFitCtx *ctx  = data;
+    gchar    *name = NULL;
+    gint      kind;
+    gtk_tree_model_get(model, iter, SB_NAME, &name, SB_KIND, &kind, -1);
+    if (name && *name) {
+        gboolean bold = (kind == SB_KIND_ROOT  ||
+                         kind == SB_KIND_TAGS_HEADER ||
+                         kind == SB_KIND_PINNED);
+        PangoAttrList *al = pango_attr_list_new();
+        if (bold)
+            pango_attr_list_insert(al,
+                pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+        pango_layout_set_attributes(ctx->lay, al);
+        pango_attr_list_unref(al);
+        pango_layout_set_text(ctx->lay, name, -1);
+
+        gint tw, th;
+        pango_layout_get_pixel_size(ctx->lay, &tw, &th);
+
+        /* 22 px per depth level covers the GTK3 expander column width +
+         * level-indentation; 10 px base for cell left/right padding.        */
+        gint depth = gtk_tree_path_get_depth(path);
+        gint row_w = tw + depth * 22 + 10;
+        if (row_w > ctx->max_w)
+            ctx->max_w = row_w;
+    }
+    g_free(name);
+    return FALSE;
+}
+
+/* on_sidebar_fit_to_content() — idle callback: set the paned divider to the
+ * sidebar tree view's content width, measured with Pango so that ellipsizing
+ * on the cell renderer doesn't cause get_preferred_width() to return a tiny
+ * value.  Runs once after the window is realized and the model is populated. */
+static gboolean
+on_sidebar_fit_to_content(gpointer user_data)
+{
+    OnLibrary *lw = user_data;
+    SbFitCtx ctx;
+    ctx.lay   = gtk_widget_create_pango_layout(GTK_WIDGET(lw->sidebar), NULL);
+    ctx.max_w = 160;   /* floor: never collapse the sidebar to unusable width */
+    gtk_tree_model_foreach(GTK_TREE_MODEL(lw->sidebar_store),
+                           sb_fit_measure, &ctx);
+    g_object_unref(ctx.lay);
+    gtk_paned_set_position(GTK_PANED(lw->sidebar_paned), ctx.max_w);
+    return G_SOURCE_REMOVE;
+}
+
 GtkWidget *
 on_library_window_create(OnApp *app)
 {
@@ -2201,6 +2266,8 @@ on_library_window_create(OnApp *app)
         /* Section rows (Notes root, Tags, Pinned Notes) render bold.       */
         gtk_tree_view_column_set_cell_data_func(
             name_col, name_cell, sidebar_name_cell_func, NULL, NULL);
+        gtk_tree_view_column_set_sizing(name_col,
+                                        GTK_TREE_VIEW_COLUMN_AUTOSIZE);
         gtk_tree_view_append_column(lw->sidebar, name_col);
     }
 
@@ -2334,6 +2401,7 @@ on_library_window_create(OnApp *app)
                      "alignment",   PANGO_ALIGN_CENTER,
                      "wrap-mode",   PANGO_WRAP_WORD_CHAR,
                      "wrap-width",  THUMB_SIZE,
+                     "weight",      PANGO_WEIGHT_BOLD,
                      NULL);
         gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(lw->notes_grid),
                                    txt, FALSE);
@@ -2369,6 +2437,7 @@ on_library_window_create(OnApp *app)
 
     /* --- assemble -----------------------------------------------------------*/
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    lw->sidebar_paned = paned;
     gtk_paned_pack1(GTK_PANED(paned), sidebar_box, FALSE, FALSE);
     gtk_paned_pack2(GTK_PANED(paned), lw->stack, TRUE, FALSE);
 
@@ -2391,5 +2460,10 @@ on_library_window_create(OnApp *app)
     refresh_notes(lw);
 
     gtk_widget_show_all(lw->window);
+
+    /* Fit the sidebar pane to its content width on first show.  Done in an
+     * idle so the tree view is fully realized and has measured its rows.     */
+    g_idle_add(on_sidebar_fit_to_content, lw);
+
     return lw->window;
 }
