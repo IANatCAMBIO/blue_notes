@@ -1412,25 +1412,54 @@ on_view_populate_popup(GtkTextView *view, GtkWidget *popup,
 
 /* ---------------------------------------------------------------------------
  * on_paste_clipboard() — intercept Ctrl+V: if the clipboard holds an image
- * (e.g. a screenshot), embed it instead of letting the default text paste
- * run.  Plain text pastes fall through to GTK's default handler.
+ * (e.g. a screenshot), embed it and swallow the default paste; otherwise fall
+ * through so GTK pastes text / rich text normally.
+ *
+ * We probe SPECIFIC image atoms rather than gtk_clipboard_wait_is_image_
+ * available / gtk_clipboard_wait_for_image: those request the special TARGETS
+ * atom, which on macOS makes GDK enumerate every NSPasteboard type and convert
+ * each via gdk_atom_intern (gdkselection-quartz.c) — a call that asserts on
+ * Apple-private types whose UTI has no MIME string.  gtk_clipboard_wait_for_
+ * contents on one concrete image atom goes straight to [NSPasteboard
+ * dataForType:] with no enumeration.  It is synchronous on the Quartz backend,
+ * so the image is embedded before we decide whether to stop the emission.
+ *
+ * The default text-paste path (and the right-click/selection-bubble menus)
+ * still hit that TARGETS enumeration internally; the resulting benign
+ * "gdk_atom_intern: assertion 'atom_name != NULL'" critical is filtered at the
+ * source by quartz_log_filter() in main.c.
  * ------------------------------------------------------------------------- */
+static const gchar * const PASTE_IMG_ATOMS[] = {
+    "image/png",                /* public.png  — web / app images            */
+    "image/tiff",               /* public.tiff — macOS screenshots           */
+    "image/jpeg",
+    "image/bmp",
+};
+
 static void
 on_paste_clipboard(GtkTextView *view, gpointer user_data)
 {
-    OnEditor *ed = user_data;        /* owning editor                       */
+    OnEditor     *ed = user_data;    /* owning editor                        */
     GtkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(view),
                                                 GDK_SELECTION_CLIPBOARD);
-    if (!gtk_clipboard_wait_is_image_available(cb))
-        return;                      /* not an image: default paste runs    */
 
-    GdkPixbuf *pixbuf = gtk_clipboard_wait_for_image(cb);
-    if (pixbuf != NULL) {
-        insert_image_pixbuf(ed, pixbuf);
-        g_object_unref(pixbuf);
+    for (guint i = 0; i < G_N_ELEMENTS(PASTE_IMG_ATOMS); i++) {
+        GtkSelectionData *sel = gtk_clipboard_wait_for_contents(
+            cb, gdk_atom_intern_static_string(PASTE_IMG_ATOMS[i]));
+        if (sel == NULL)
+            continue;
+        GdkPixbuf *pixbuf = gtk_selection_data_get_length(sel) > 0
+            ? gtk_selection_data_get_pixbuf(sel) : NULL;
+        gtk_selection_data_free(sel);
+        if (pixbuf != NULL) {
+            insert_image_pixbuf(ed, pixbuf);
+            g_object_unref(pixbuf);
+            /* Swallow the signal so the default handler doesn't also paste. */
+            g_signal_stop_emission_by_name(view, "paste-clipboard");
+            return;
+        }
     }
-    /* Swallow the signal so the default handler doesn't also paste.        */
-    g_signal_stop_emission_by_name(view, "paste-clipboard");
+    /* Not an image: let GTK's default handler paste text / rich text.       */
 }
 
 /* ---------------------------------------------------------------------------

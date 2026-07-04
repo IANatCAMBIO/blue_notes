@@ -19,6 +19,42 @@
 #include <gtkosxapplication.h>
 #endif
 
+#ifdef __APPLE__
+/* ---------------------------------------------------------------------------
+ * quartz_log_filter() — GLogFunc that drops one specific, benign GDK
+ * assertion emitted on macOS and forwards everything else unchanged.
+ *
+ * When GTK enumerates the clipboard's targets (the "TARGETS" atom — done
+ * whenever the right-click/selection menus appear, on rich-text paste, and in
+ * drag negotiation), the GDK Quartz backend converts each NSPasteboard type
+ * to a GdkAtom via gdk_atom_intern(uti.preferredMIMEType.UTF8String)
+ * (gdk/quartz/gdkselection-quartz.c).  Modern macOS pasteboards routinely
+ * carry Apple-private types whose UTI has no MIME string, so UTF8String is
+ * NULL and gdk_atom_intern trips its "atom_name != NULL" g_return_if_fail.
+ * The check is non-fatal — gdk_atom_intern returns GDK_NONE and the
+ * enumeration keeps going with the valid types — but it prints a Gdk-CRITICAL
+ * on every affected paste/menu.  We cannot reach the upstream call site, so we
+ * silence just this message and pass all other logs through untouched.
+ *   domain  — log domain ("Gdk" for the offending message).
+ *   level   — log level flags.
+ *   message — the formatted log text.
+ *   data    — unused.
+ * ------------------------------------------------------------------------- */
+static void
+quartz_log_filter(const gchar   *domain,
+                  GLogLevelFlags level,
+                  const gchar   *message,
+                  gpointer       data)
+{
+    (void)data;
+    if (message != NULL &&
+        strstr(message, "gdk_atom_intern") != NULL &&
+        strstr(message, "atom_name != NULL") != NULL)
+        return;                      /* benign macOS pasteboard artifact     */
+    g_log_default_handler(domain, level, message, data);
+}
+#endif /* __APPLE__ */
+
 /* ---------------------------------------------------------------------------
  * integrity_collect() — sqlite3_exec callback: accumulates non-"ok" rows
  * from a PRAGMA integrity_check result into the GString passed as `data`.
@@ -254,6 +290,14 @@ on_sigterm(gpointer user_data)
 int
 main(int argc, char *argv[])
 {
+#ifdef __APPLE__
+    /* Silence one benign, upstream GDK-Quartz clipboard critical (see
+     * quartz_log_filter).  Installed before GTK so it covers every paste.   */
+    g_log_set_handler("Gdk",
+                      G_LOG_LEVEL_CRITICAL | G_LOG_FLAG_RECURSION,
+                      quartz_log_filter, NULL);
+#endif
+
     /* The application config (blue_notes.ini) lives next to the
      * binary; resolve its location before anything reads it.               */
     on_app_config_init(argv[0]);

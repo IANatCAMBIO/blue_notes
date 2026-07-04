@@ -198,12 +198,15 @@ scroll_keep_queue(GtkAdjustment *adj, gdouble value)
 }
 
 /* view_vadjustment() — the vadjustment of the scrolled window holding
- * `view` (every scrollable view here sits directly in one).                 */
+ * `view` (every scrollable view here sits directly in one).  Returns NULL
+ * if the parent isn't realized as a GtkScrolledWindow yet.                  */
 static GtkAdjustment *
 view_vadjustment(GtkWidget *view)
 {
-    return gtk_scrolled_window_get_vadjustment(
-        GTK_SCROLLED_WINDOW(gtk_widget_get_parent(view)));
+    GtkWidget *parent = gtk_widget_get_parent(view);
+    if (!GTK_IS_SCROLLED_WINDOW(parent))
+        return NULL;
+    return gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(parent));
 }
 
 /* ===========================================================================
@@ -263,8 +266,8 @@ refresh_sidebar(OnLibrary *lw)
     /* Clearing the store zeroes the sidebar scrollbar; a sidebar rebuild
      * is never a navigation (counts changed, a folder was added, …), so
      * the position is always put back.                                     */
-    GtkAdjustment *vadj = view_vadjustment(GTK_WIDGET(lw->sidebar));
-    gdouble scroll_pos = gtk_adjustment_get_value(vadj);
+    GtkAdjustment *vadj      = view_vadjustment(GTK_WIDGET(lw->sidebar));
+    gdouble        scroll_pos = vadj ? gtk_adjustment_get_value(vadj) : 0.0;
 
     lw->populating++;
     gtk_tree_store_clear(lw->sidebar_store);
@@ -564,10 +567,11 @@ refresh_notes(OnLibrary *lw)
      * notes pane is scrolled so the rebuild doesn't jump to the top.       */
     gboolean keep_scroll = lw->shown_kind == lw->sel_kind &&
                            lw->shown_id   == lw->sel_id;
-    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(
-        GTK_SCROLLED_WINDOW(
-            gtk_stack_get_visible_child(GTK_STACK(lw->stack))));
-    gdouble scroll_pos = gtk_adjustment_get_value(vadj);
+    GtkWidget     *vis_child = gtk_stack_get_visible_child(GTK_STACK(lw->stack));
+    GtkAdjustment *vadj      = GTK_IS_SCROLLED_WINDOW(vis_child)
+        ? gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(vis_child))
+        : NULL;
+    gdouble scroll_pos = vadj ? gtk_adjustment_get_value(vadj) : 0.0;
 
     lw->populating++;
     gtk_list_store_clear(lw->notes_store);
