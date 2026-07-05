@@ -2816,7 +2816,10 @@ build_toolbar(OnEditor *ed)
                     "Bulleted list", ON_FMT_LIST_BULLET);
     add_para_button(ed, toolbar, "list-number", "1.", "Numbered",
                     "Numbered list", ON_FMT_LIST_NUMBER);
-    add_para_button(ed, toolbar, "list-check", ON_CHECK_UNCHECKED, "Tasks",
+    /* Fallback glyph is a plain text square (U+25A1 □), not the ⬜ color
+     * emoji: it renders in the text font like the •/1. glyphs and avoids
+     * the emoji's oversized advance in the toolbar.                        */
+    add_para_button(ed, toolbar, "list-check", "\xe2\x96\xa1", "Tasks",
                     "Task list with checkboxes (click a box to toggle)",
                     ON_FMT_LIST_CHECK);
 
