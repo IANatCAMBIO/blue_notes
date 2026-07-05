@@ -264,11 +264,6 @@ GHashTable *on_db_tag_count_map(OnDatabase *db);
  * (g_free() it), or NULL if the key was never set.                         */
 gchar *on_db_setting_get(OnDatabase *db, const gchar *key);
 
-/* Store persistent setting `key` = `value` (upsert).
- * Returns TRUE on success.                                                 */
-gboolean on_db_setting_set(OnDatabase *db, const gchar *key,
-                           const gchar *value);
-
 /* Remove persistent setting `key`. Returns TRUE on success.                */
 gboolean on_db_setting_delete(OnDatabase *db, const gchar *key);
 

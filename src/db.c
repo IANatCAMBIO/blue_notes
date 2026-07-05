@@ -858,20 +858,6 @@ on_db_setting_get(OnDatabase *db, const gchar *key)
 }
 
 gboolean
-on_db_setting_set(OnDatabase *db, const gchar *key, const gchar *value)
-{
-    sqlite3_stmt *stmt = prepare(db,
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, value, -1, SQLITE_TRANSIENT);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
-}
-
-gboolean
 on_db_setting_delete(OnDatabase *db, const gchar *key)
 {
     sqlite3_stmt *stmt = prepare(db, "DELETE FROM settings WHERE key=?");

@@ -236,20 +236,6 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
                                        theme_dir);
     g_free(theme_dir);
 
-    /* App-wide dialog polish: every dialog's button row sits 10px from the
-     * window's sides and bottom, with 6px between adjacent buttons.  The
-     * per-button left margin (skipping the first) makes the gaps exactly 6px
-     * without also padding the outer edges.                                 */
-    GtkCssProvider *css = gtk_css_provider_new();
-    gtk_css_provider_load_from_data(css,
-        ".dialog-action-area { margin: 0 10px 10px 10px; }\n"
-        ".dialog-action-area button:not(:first-child) { margin-left: 6px; }",
-        -1, NULL);
-    gtk_style_context_add_provider_for_screen(
-        gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
-        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_object_unref(css);
-
     /* DB integrity check: warn if the file changed since last exit.        */
     if (app->db_integrity_check && !startup_check_db_hash(app)) {
         g_application_quit(G_APPLICATION(app->gtk_app));
