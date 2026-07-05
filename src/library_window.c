@@ -1996,6 +1996,8 @@ build_menubar(OnLibrary *lw)
                           gtk_separator_menu_item_new());
     add_menu_item(file_menu, "_Open Database\xe2\x80\xa6",
                   G_CALLBACK(on_open_db), lw);
+    gtk_menu_shell_append(GTK_MENU_SHELL(file_menu),
+                          gtk_separator_menu_item_new());
     add_menu_item(file_menu, "_Back Up Database\xe2\x80\xa6",
                   G_CALLBACK(on_backup_db), lw);
     add_menu_item(file_menu, "Restore _Database\xe2\x80\xa6",
