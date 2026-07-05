@@ -437,7 +437,10 @@ on_result_activated(GtkTreeView *view, GtkTreePath *path,
         return;
     gint64 id;                       /* note id of the row                  */
     gtk_tree_model_get(GTK_TREE_MODEL(sw->store), &iter, SR_ID, &id, -1);
-    on_editor_window_open(sw->app, id);
+    /* Carry the current query into the editor so the same term is
+     * highlighted in the note (plain text; a regex query is seeded as-is).  */
+    const gchar *term = gtk_entry_get_text(GTK_ENTRY(sw->entry));
+    on_editor_window_open_search(sw->app, id, term);
 }
 
 /* on_search_configure() — track the window's live size so it can be

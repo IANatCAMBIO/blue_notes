@@ -131,6 +131,8 @@ typedef struct {
     gint            popup_y;
 
     GtkWidget      *search_entry;
+    gchar          *pending_search;   /* initial in-note query, applied once */
+    guint           initial_search_idle;
     gboolean        dirty;
     gboolean        tags_modified;
     gboolean        auto_h1;
@@ -2623,6 +2625,36 @@ on_search_stop(GtkSearchEntry *entry, gpointer user_data)
     gtk_widget_grab_focus(GTK_WIDGET(ed->view));
 }
 
+/* ---------------------------------------------------------------------------
+ * editor_apply_search_term() — put `term` in the in-note search box,
+ * highlight every match and jump to the first.  Used when a note is opened
+ * from the library search window so the searched-for text is highlighted at
+ * once.  on_search_changed is called explicitly rather than waiting for the
+ * GtkSearchEntry's debounced "search-changed".  NULL/empty is a no-op.
+ * ------------------------------------------------------------------------- */
+static void
+editor_apply_search_term(OnEditor *ed, const gchar *term)
+{
+    if (term == NULL || *term == '\0')
+        return;
+    gtk_entry_set_text(GTK_ENTRY(ed->search_entry), term);
+    on_search_changed(GTK_SEARCH_ENTRY(ed->search_entry), ed);
+    editor_search_next(ed);
+}
+
+/* on_initial_search_idle() — apply ed->pending_search once the freshly
+ * opened window is realized and allocated (so editor_search_next's
+ * scroll-to-match lands, mirroring on_scroll_idle's deferral).               */
+static gboolean
+on_initial_search_idle(gpointer user_data)
+{
+    OnEditor *ed = user_data;        /* owning editor                       */
+    ed->initial_search_idle = 0;
+    editor_apply_search_term(ed, ed->pending_search);
+    g_clear_pointer(&ed->pending_search, g_free);
+    return G_SOURCE_REMOVE;
+}
+
 /* ===========================================================================
  * saving
  * =========================================================================== */
@@ -2721,6 +2753,11 @@ on_editor_destroy(GtkWidget *widget, gpointer user_data)
         g_source_remove(ed->scroll_idle);
         ed->scroll_idle = 0;
     }
+    if (ed->initial_search_idle != 0) {
+        g_source_remove(ed->initial_search_idle);
+        ed->initial_search_idle = 0;
+    }
+    g_clear_pointer(&ed->pending_search, g_free);
     g_slist_free(ed->code_buttons);  /* widgets die with the window         */
     ed->code_buttons = NULL;
 
@@ -2910,13 +2947,25 @@ build_toolbar(OnEditor *ed)
     return toolbar;
 }
 
-GtkWidget *
-on_editor_window_open(OnApp *app, gint64 note_id)
+/* ---------------------------------------------------------------------------
+ * editor_window_open_full() — shared implementation behind the two public
+ * open functions.  `search_term` (may be NULL) pre-populates the in-note
+ * search box and jumps to the first match, so a note opened from the library
+ * search window lands with its hit highlighted.
+ * ------------------------------------------------------------------------- */
+static GtkWidget *
+editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
 {
-    /* Already open?  Just raise the existing window.                       */
+    /* Already open?  Just raise the existing window (and re-run the search
+     * if one was requested — the note may already be up from a prior open). */
     GtkWidget *existing = g_hash_table_lookup(app->editors, &note_id);
     if (existing != NULL) {
         gtk_window_present(GTK_WINDOW(existing));
+        if (search_term != NULL && *search_term != '\0') {
+            OnEditor *ed = g_object_get_data(G_OBJECT(existing), "on-editor");
+            if (ed != NULL)
+                editor_apply_search_term(ed, search_term);
+        }
         return existing;
     }
 
@@ -3039,8 +3088,28 @@ on_editor_window_open(OnApp *app, gint64 note_id)
     g_hash_table_insert(app->editors, key, ed->window);
     g_object_set_data(G_OBJECT(ed->window), "on-editor", ed);
 
+    /* Opened from search: apply the query once the window is realized and
+     * allocated so the scroll-to-match lands (see on_scroll_idle).          */
+    if (search_term != NULL && *search_term != '\0') {
+        ed->pending_search = g_strdup(search_term);
+        ed->initial_search_idle = g_idle_add(on_initial_search_idle, ed);
+    }
+
     on_db_note_meta_free(meta);
     gtk_widget_show_all(ed->window);
     gtk_widget_grab_focus(GTK_WIDGET(ed->view));
     return ed->window;
+}
+
+GtkWidget *
+on_editor_window_open(OnApp *app, gint64 note_id)
+{
+    return editor_window_open_full(app, note_id, NULL);
+}
+
+GtkWidget *
+on_editor_window_open_search(OnApp *app, gint64 note_id,
+                             const gchar *search_term)
+{
+    return editor_window_open_full(app, note_id, search_term);
 }

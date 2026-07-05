@@ -32,6 +32,21 @@
 GtkWidget *on_editor_window_open(OnApp *app, gint64 note_id);
 
 /* ---------------------------------------------------------------------------
+ * on_editor_window_open_search() — like on_editor_window_open(), but also
+ * pre-populates the editor's in-note search box with `search_term` and jumps
+ * to the first match.  Used when a note is opened from the library's search
+ * window so the searched-for text is highlighted straight away.  A NULL or
+ * empty term behaves exactly like on_editor_window_open().
+ *
+ *   app         — global application context.
+ *   note_id     — id of the note to edit.
+ *   search_term — text to seed the in-note search with (may be NULL).
+ * Returns the editor's GtkWindow, or NULL if the note does not exist.
+ * ------------------------------------------------------------------------- */
+GtkWidget *on_editor_window_open_search(OnApp *app, gint64 note_id,
+                                        const gchar *search_term);
+
+/* ---------------------------------------------------------------------------
  * on_editor_rebuild_code_buttons_all() — re-evaluate the code-block copy
  * buttons in every open editor window.  Called by the settings window
  * when the "show copy button" preference changes.
