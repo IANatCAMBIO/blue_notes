@@ -13,6 +13,7 @@
 #include "app.h"
 #include "cli.h"
 #include "db.h"
+#include "ipc.h"
 #include "library_window.h"
 
 #ifdef HAVE_GTKOSX
@@ -235,11 +236,15 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
                                        theme_dir);
     g_free(theme_dir);
 
-    /* App-wide dialog polish: every dialog's button row keeps 6px of
-     * space to the bottom edge of the window.                              */
+    /* App-wide dialog polish: every dialog's button row sits 10px from the
+     * window's sides and bottom, with 6px between adjacent buttons.  The
+     * per-button left margin (skipping the first) makes the gaps exactly 6px
+     * without also padding the outer edges.                                 */
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css,
-        ".dialog-action-area { margin-bottom: 6px; }", -1, NULL);
+        ".dialog-action-area { margin: 0 10px 10px 10px; }\n"
+        ".dialog-action-area button:not(:first-child) { margin-left: 6px; }",
+        -1, NULL);
     gtk_style_context_add_provider_for_screen(
         gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -252,6 +257,11 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     }
 
     on_library_window_create(app);
+
+    /* Listen for "quicknote"/"note open" from later CLI invocations, then
+     * run any action a CLI already queued because no instance was running.  */
+    on_ipc_server_start(app);
+    on_ipc_run_pending(app);
 
 #ifdef HAVE_GTKOSX
     /* Honor the persisted native-menu-bar preference, then let the macOS
@@ -411,7 +421,20 @@ main(int argc, char *argv[])
                      G_CALLBACK(on_activate), &app);
     g_unix_signal_add(SIGTERM, on_sigterm, &app);
 
-    int status = g_application_run(G_APPLICATION(app.gtk_app), argc, argv);
+    /* A "quicknote"/"note open" that found no running instance falls
+     * through to here to start the GUI.  Those leftover words are not GTK
+     * options — run with a clean argv so GApplication doesn't try to open
+     * them as files ("This application can not open files").                */
+    int status;                      /* main-loop exit status               */
+    if (on_ipc_has_pending()) {
+        char *solo_argv[] = { argv[0], NULL };
+        status = g_application_run(G_APPLICATION(app.gtk_app), 1, solo_argv);
+    } else {
+        status = g_application_run(G_APPLICATION(app.gtk_app), argc, argv);
+    }
+
+    /* Stop serving CLI commands and unlink the socket before teardown.      */
+    on_ipc_server_stop();
 
     /* Windows (and their final autosaves) are done by the time run()
      * returns, so the database can be closed and hashed safely now.        */

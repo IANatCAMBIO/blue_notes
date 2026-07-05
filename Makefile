@@ -45,6 +45,7 @@ SRCS     := src/main.c \
             src/app.c \
             src/cli.c \
             src/db.c \
+            src/ipc.c \
             src/serialize.c \
             src/editor_window.c \
             src/library_window.c \

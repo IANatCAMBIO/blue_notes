@@ -16,10 +16,23 @@
 #include "app.h"
 #include "db.h"
 #include "export.h"
+#include "ipc.h"
 #include "serialize.h"
 
 #include <stdio.h>
 #include <string.h>
+
+/* Stdin substitute used while a command runs inside a GUI instance on behalf
+ * of a remote CLI (see on_cli_set_stdin_data): the instance has no access to
+ * the CLI's stdin, so "note new -" reads this pre-slurped text instead.  NULL
+ * in the normal headless path, where the real stdin is read directly.        */
+static const gchar *cli_stdin_data = NULL;
+
+void
+on_cli_set_stdin_data(const gchar *data)
+{
+    cli_stdin_data = data;
+}
 
 /* ---------------------------------------------------------------------------
  * cli_open_db() — open the same database the GUI would use.
@@ -51,16 +64,12 @@ cli_open_db(void)
 }
 
 /* ---------------------------------------------------------------------------
- * resolve_folder_path() — walk "A/B/C" through the folder tree.
- *   db     — open database.
- *   path   — folder path; "" or "/" mean the top level.
- *   create — TRUE to create missing components (mkdir -p style).
- *   out_id — receives the folder id (0 = top level).
- * Returns TRUE if the full path resolved (or was created).
+ * on_cli_resolve_folder_path() — walk "A/B/C" through the folder tree.
+ * (See cli.h — exported so the IPC note-path resolver can reuse it.)
  * ------------------------------------------------------------------------- */
-static gboolean
-resolve_folder_path(OnDatabase *db, const gchar *path, gboolean create,
-                    gint64 *out_id)
+gboolean
+on_cli_resolve_folder_path(OnDatabase *db, const gchar *path, gboolean create,
+                           gint64 *out_id)
 {
     *out_id = 0;
     if (path == NULL || *path == '\0' || g_strcmp0(path, "/") == 0)
@@ -161,7 +170,7 @@ static int
 cmd_add_folder(OnDatabase *db, const gchar *path)
 {
     gint64 id;                       /* the created/found folder            */
-    if (!resolve_folder_path(db, path, TRUE, &id) || id == 0) {
+    if (!on_cli_resolve_folder_path(db, path, TRUE, &id) || id == 0) {
         fprintf(stderr, "error: could not create folder %s\n", path);
         return 2;
     }
@@ -174,7 +183,7 @@ static int
 cmd_delete_folder(OnDatabase *db, const gchar *path)
 {
     gint64 id;                       /* the folder to delete                */
-    if (!resolve_folder_path(db, path, FALSE, &id) || id == 0) {
+    if (!on_cli_resolve_folder_path(db, path, FALSE, &id) || id == 0) {
         fprintf(stderr, "error: no such folder: %s\n", path);
         return 2;
     }
@@ -208,7 +217,7 @@ cmd_list_notes(OnDatabase *db, const gchar *path)
         notes = on_db_note_list_all(db);
     } else {
         gint64 folder;               /* resolved folder id                  */
-        if (!resolve_folder_path(db, path, FALSE, &folder)) {
+        if (!on_cli_resolve_folder_path(db, path, FALSE, &folder)) {
             fprintf(stderr, "error: no such folder: %s\n", path);
             return 2;
         }
@@ -231,21 +240,27 @@ static int
 cmd_new_note(OnDatabase *db, const gchar *folder_path, const gchar *content)
 {
     gint64 folder;                   /* destination folder id               */
-    if (!resolve_folder_path(db, folder_path, FALSE, &folder)) {
+    if (!on_cli_resolve_folder_path(db, folder_path, FALSE, &folder)) {
         fprintf(stderr, "error: no such folder: %s "
                         "(create it with 'folder add')\n", folder_path);
         return 2;
     }
 
-    /* Pull the content from stdin when asked.                              */
+    /* Pull the content from stdin when asked.  When running on behalf of a
+     * remote CLI inside a GUI instance, cli_stdin_data holds the stdin the
+     * CLI already slurped for us (we cannot read its file descriptor).       */
     gchar *text;                     /* the note body (owned)               */
     if (g_strcmp0(content, "-") == 0) {
-        GString *in = g_string_new(NULL);
-        gchar buf[4096];
-        gsize n;
-        while ((n = fread(buf, 1, sizeof buf, stdin)) > 0)
-            g_string_append_len(in, buf, (gssize)n);
-        text = g_string_free(in, FALSE);
+        if (cli_stdin_data != NULL) {
+            text = g_strdup(cli_stdin_data);
+        } else {
+            GString *in = g_string_new(NULL);
+            gchar buf[4096];
+            gsize n;
+            while ((n = fread(buf, 1, sizeof buf, stdin)) > 0)
+                g_string_append_len(in, buf, (gssize)n);
+            text = g_string_free(in, FALSE);
+        }
     } else {
         text = g_strdup(content);
     }
@@ -381,7 +396,7 @@ static int
 cmd_move_notes(OnDatabase *db, char **ids, int n, const gchar *dest)
 {
     gint64 folder;                   /* destination folder id               */
-    if (!resolve_folder_path(db, dest, FALSE, &folder)) {
+    if (!on_cli_resolve_folder_path(db, dest, FALSE, &folder)) {
         fprintf(stderr, "error: no such folder: %s\n", dest);
         return 2;
     }
@@ -489,6 +504,13 @@ usage(FILE *out)
 "  note add-image ID FILE            append an image file to a note\n"
 "  note set-modified ID TIMESTAMP    set a note's modified date (UNIX\n"
 "                                    seconds; for importers)\n"
+"  note open PATH                    open a note's editor in the running\n"
+"                                    instance (PATH = id or Folder/Title);\n"
+"                                    starts Blue Notes if it is not running\n"
+"\n"
+"  quicknote                         create a note in the root folder and\n"
+"                                    open its editor in the running instance\n"
+"                                    (starts Blue Notes if not running)\n"
 "\n"
 "  backup FILE.db                    snapshot the database to FILE.db\n"
 "  export-md DIR                     export all notes as Markdown into DIR\n"
@@ -548,6 +570,95 @@ dispatch_note(OnDatabase *db, const char *verb, char **argv, int argc)
     return usage(stderr);
 }
 
+/* ---------------------------------------------------------------------------
+ * cli_gui_command() — handle the two commands that act on a GUI editor:
+ * "quicknote" and "note open PATH".  Each first tries to reach a running
+ * instance over the IPC socket; if one answers it did the work and we exit.
+ * Otherwise the request is recorded as a pending action and -1 is returned so
+ * main() starts the GUI, which performs it at activate.
+ *   remote_cmd — the line to send a running instance ("quicknote"/"open ...").
+ *   set_pending — records the same action for the not-running case.
+ * Returns a process exit code, or -1 to start the GUI.
+ * ------------------------------------------------------------------------- */
+static int
+cli_gui_command(const gchar *remote_cmd, void (*set_pending)(void),
+                const gchar *pending_path)
+{
+    gchar *reply = NULL;             /* running instance's message           */
+    OnIpcResult r = on_ipc_try_remote(remote_cmd, &reply);
+    if (r == ON_IPC_NO_SERVER) {
+        /* No instance: arrange for the GUI we are about to start to do it.  */
+        if (set_pending != NULL)
+            set_pending();
+        else
+            on_ipc_set_pending_open(pending_path);
+        return -1;
+    }
+    if (reply != NULL && *reply != '\0')
+        fprintf(r == ON_IPC_OK ? stdout : stderr, "%s\n", reply);
+    g_free(reply);
+    return (r == ON_IPC_OK) ? 0 : 2;
+}
+
+gboolean
+on_cli_command_reads_stdin(int argc, char **argv)
+{
+    /* Only "note new … -" (content argument "-") consumes stdin.            */
+    return argc >= 4 &&
+           g_strcmp0(argv[1], "note") == 0 &&
+           g_strcmp0(argv[2], "new") == 0 &&
+           g_strcmp0(argv[argc - 1], "-") == 0;
+}
+
+gboolean
+on_cli_command_mutates(int argc, char **argv)
+{
+    if (argc < 2)
+        return FALSE;
+    const char *cmd  = argv[1];
+    const char *verb = (argc >= 3) ? argv[2] : "";
+    if (g_strcmp0(cmd, "tag") == 0)
+        return g_strcmp0(verb, "delete") == 0;
+    if (g_strcmp0(cmd, "folder") == 0)
+        return g_strcmp0(verb, "add") == 0 || g_strcmp0(verb, "delete") == 0;
+    if (g_strcmp0(cmd, "note") == 0)
+        return g_strcmp0(verb, "new") == 0 ||
+               g_strcmp0(verb, "delete") == 0 ||
+               g_strcmp0(verb, "move") == 0 ||
+               g_strcmp0(verb, "add-image") == 0 ||
+               g_strcmp0(verb, "set-modified") == 0;
+    return FALSE;                    /* backup / export-* are read-only      */
+}
+
+int
+on_cli_dispatch_db(OnDatabase *db, int argc, char **argv)
+{
+    const char *cmd = argv[1];       /* the noun/flat command               */
+
+    /* Noun groups need a verb.                                             */
+    gboolean is_noun = g_strcmp0(cmd, "tag") == 0 ||
+                       g_strcmp0(cmd, "folder") == 0 ||
+                       g_strcmp0(cmd, "note") == 0;
+    if (is_noun && argc < 3)
+        return usage(stderr);
+
+    if (g_strcmp0(cmd, "tag") == 0)
+        return dispatch_tag(db, argv[2], argv + 3, argc - 3);
+    if (g_strcmp0(cmd, "folder") == 0)
+        return dispatch_folder(db, argv[2], argv + 3, argc - 3);
+    if (g_strcmp0(cmd, "note") == 0)
+        return dispatch_note(db, argv[2], argv + 3, argc - 3);
+    if (g_strcmp0(cmd, "backup") == 0)
+        return (argc == 3) ? cmd_backup(db, argv[2]) : usage(stderr);
+    if (g_strcmp0(cmd, "export-md") == 0)
+        return (argc == 3) ? cmd_export(db, argv[2], ON_EXPORT_MARKDOWN)
+                           : usage(stderr);
+    if (g_strcmp0(cmd, "export-html") == 0)
+        return (argc == 3) ? cmd_export(db, argv[2], ON_EXPORT_HTML)
+                           : usage(stderr);
+    return usage(stderr);            /* unreachable for validated commands   */
+}
+
 int
 on_cli_run(int argc, char **argv)
 {
@@ -558,6 +669,24 @@ on_cli_run(int argc, char **argv)
     if (g_strcmp0(cmd, "help") == 0 || g_strcmp0(cmd, "--help") == 0 ||
         g_strcmp0(cmd, "-h") == 0)
         return usage(stdout);
+
+    /* GUI-interacting commands: open an editor in the running instance, or
+     * start the GUI and do it there.  Handled before the headless db path.  */
+    if (g_strcmp0(cmd, "quicknote") == 0) {
+        if (argc != 2)
+            return usage(stderr);
+        return cli_gui_command("quicknote", on_ipc_set_pending_quicknote,
+                               NULL);
+    }
+    if (g_strcmp0(cmd, "note") == 0 && argc >= 3 &&
+        g_strcmp0(argv[2], "open") == 0) {
+        if (argc != 4)
+            return usage(stderr);
+        gchar *remote = g_strdup_printf("open %s", argv[3]);
+        int rc = cli_gui_command(remote, NULL, argv[3]);
+        g_free(remote);
+        return rc;
+    }
 
     /* Anything that is not a known noun/command falls through to GTK
      * (which has its own option handling for things like --display).       */
@@ -570,30 +699,18 @@ on_cli_run(int argc, char **argv)
     if (!is_noun && !is_flat)
         return -1;
 
-    /* Noun groups need a verb.                                             */
-    if (is_noun && argc < 3)
-        return usage(stderr);
+    /* Route every data command through a running instance when one exists,
+     * so a single process owns the database connection and the GUI refreshes
+     * live.  With no instance, run headless against our own connection.      */
+    gboolean ran = FALSE;            /* did a running instance handle it?    */
+    int rc = on_ipc_try_remote_run(argc, argv, &ran);
+    if (ran)
+        return rc;
 
     OnDatabase *db = cli_open_db();
     if (db == NULL)
         return 2;
-
-    int rc;                          /* the command's exit code             */
-    if (g_strcmp0(cmd, "tag") == 0)
-        rc = dispatch_tag(db, argv[2], argv + 3, argc - 3);
-    else if (g_strcmp0(cmd, "folder") == 0)
-        rc = dispatch_folder(db, argv[2], argv + 3, argc - 3);
-    else if (g_strcmp0(cmd, "note") == 0)
-        rc = dispatch_note(db, argv[2], argv + 3, argc - 3);
-    else if (g_strcmp0(cmd, "backup") == 0)
-        rc = (argc == 3) ? cmd_backup(db, argv[2]) : usage(stderr);
-    else if (g_strcmp0(cmd, "export-md") == 0)
-        rc = (argc == 3) ? cmd_export(db, argv[2], ON_EXPORT_MARKDOWN)
-                         : usage(stderr);
-    else  /* export-html */
-        rc = (argc == 3) ? cmd_export(db, argv[2], ON_EXPORT_HTML)
-                         : usage(stderr);
-
+    rc = on_cli_dispatch_db(db, argc, argv);
     on_db_close(db);
     return rc;
 }
