@@ -25,7 +25,7 @@ is missing or cannot be decoded, the button falls back to a text glyph.
 | `web.png`                | Show/hide the folder pane      |
 | `search.png`             | Search                         |
 | `copy.png`               | Code-block copy button         |
-| `trumpet.png`            | App logo: window icon, About button + dialog |
+| `vinyl.png`            | App logo: window icon, About button + dialog |
 | `dialog-warning.svg`     | Delete-confirmation dialogs    |
 
 These names are looked up but have no bundled file — the editor's

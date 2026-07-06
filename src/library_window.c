@@ -1549,17 +1549,17 @@ on_about(GtkWidget *widget, gpointer user_data)
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
 
-    /* 128x128-logical logo from trumpet.png, decoded at the display's
+    /* 128x128-logical logo from vinyl.png, decoded at the display's
      * scale factor so it stays sharp on Retina (quirk #5).                 */
     gint sf = gtk_widget_get_scale_factor(lw->window);
-    gchar *icon_path = g_build_filename(lw->app->icons_dir, "trumpet.png",
+    gchar *icon_path = g_build_filename(lw->app->icons_dir, "vinyl.png",
                                         NULL);
     GdkPixbuf *logo = gdk_pixbuf_new_from_file_at_size(icon_path,
                                                        128 * sf, 128 * sf,
                                                        NULL);
     g_free(icon_path);
 
-    const gchar *authors[] = { "Ian Campbell", "Claude Sonnet 4.5", NULL };
+    const gchar *authors[] = { "Ian Campbell", "Claude Sonnet 4.5", "And thanks to Blue Note Records. Both for the great double entendre and for amazing music that shaped my youth.", NULL };
 
     GtkWidget *dialog = gtk_about_dialog_new();
     gtk_window_set_transient_for(GTK_WINDOW(dialog),
@@ -2472,7 +2472,7 @@ build_action_bar(OnLibrary *lw)
     gtk_container_add(GTK_CONTAINER(about_item), about_btn);
     {
         gchar *logo_path = g_build_filename(lw->app->icons_dir,
-                                            "trumpet.png", NULL);
+                                            "vinyl.png", NULL);
         gint sf = gtk_widget_get_scale_factor(lw->window);
         GdkPixbuf *pix = gdk_pixbuf_new_from_file_at_size(
             logo_path, 24 * sf, 24 * sf, NULL);
@@ -2484,7 +2484,7 @@ build_action_bar(OnLibrary *lw)
             cairo_surface_destroy(surface);
             g_object_unref(pix);
         } else {
-            logo = gtk_label_new("\xf0\x9f\x8e\xba");    /* 🎺 fallback     */
+            logo = gtk_label_new("\xf0\x9f\x92\xbf");    /* 💿 fallback     */
         }
         GtkWidget *label = gtk_label_new("About");   /* text-mode child     */
 

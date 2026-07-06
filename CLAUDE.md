@@ -12,7 +12,7 @@ export PATH=/opt/local/bin:$PATH   # MacPorts pkg-config
 make          # builds ./blue_notes
 make run
 make app      # dist/BlueNotes-<version>.app (macOS; sips/iconutil;
-              # trumpet.png → .icns; NOT self-contained — needs MacPorts GTK)
+              # vinyl.png → .icns; NOT self-contained — needs MacPorts GTK)
 make deb      # dist/blue-notes_<version>_<arch>.deb (needs dpkg-deb,
 make rpm      # dist/blue-notes-<version>-1.<arch>.rpm  needs rpmbuild —
               # build these ON the target Linux distro; they install to
@@ -38,7 +38,7 @@ sees the new flags.
 
 | File | Purpose |
 |---|---|
-| `src/main.c` | GtkApplication entry; config init + settings migration; sets `icons/trumpet.png` as default window icon |
+| `src/main.c` | GtkApplication entry; config init + settings migration; sets `icons/vinyl.png` as default window icon |
 | `src/app.[ch]` | Shared `OnApp` context: db handle, open-editors map, per-family toolbar styles, icon loading, toolbar registry + right-click style menu |
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
 | `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
@@ -48,7 +48,7 @@ sees the new flags.
 | `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
 | `src/cli.[ch]` | Headless subcommand interface (runs before GTK in main; tags/folders/notes CRUD, backup, export); folders by path, notes by id |
-| `icons/` | custom PNG toolbar icons + `trumpet.png` app logo (window icon, About button/dialog), loaded by basename; see icons/README.md |
+| `icons/` | custom PNG toolbar icons + `vinyl.png` app logo (window icon, About button/dialog), loaded by basename; see icons/README.md |
 | `tools/import-apple-notes.sh` | Apple Notes migration (AppleScript export → CLI import; keeps modification dates) |
 
 ## Data & formats
@@ -113,6 +113,23 @@ sees the new flags.
   strands writes in the wrong file (the trigger was a relaunch racing
   the dying instance's final flush past the 5 s busy timeout). One
   configured database, or a clear error.
+- **Trash is a soft-delete flag, not a folder**: `notes.trashed` /
+  `folders.trashed` columns + the `trash_folder_ids` view (recursive
+  closure — only the TOP deleted folder is flagged; its subtree stays
+  attached and is implicitly trashed via the view). folder_id/parent_id
+  are untouched by deletion — they ARE the restore location; restore
+  clears the flag and re-parents to top level only when the original
+  location is itself still trashed. Moving a note (`on_db_note_move`)
+  always clears the flag (drag out of Trash = restore-to-folder). All
+  normal listings/counts filter through `NOTE_VISIBLE_SQL`; search's
+  All-scope uses `on_db_note_list_all(db, TRUE)` to keep deleted notes
+  findable; export/CLI pass FALSE. CLI note/folder delete remains
+  PERMANENT. Sidebar: "All Notes" section on top (`SB_KIND_ALL`,
+  newest-first), "Trash" section at the bottom only while non-empty
+  (`SB_KIND_TRASH`, trashed folders as `SB_KIND_TRASH_FOLDER` children);
+  in trash views the Delete paths turn permanent (with confirm) and the
+  note menu becomes Open/Restore/Delete Permanently; GUI note/folder
+  deletes elsewhere just trash with a status message, no dialog.
 - **Backup/Restore** (File menu): `on_db_backup_to()` uses SQLite's
   online backup API on the live DB; `on_app_restore_database()` closes
   editors, keeps the old file as `notes.db.pre-restore`, copies the

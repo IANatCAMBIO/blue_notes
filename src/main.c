@@ -231,7 +231,7 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     }
 
     /* Default window icon: the app logo from the icons/ folder.            */
-    gchar *icon_path = g_build_filename(app->icons_dir, "trumpet.png",
+    gchar *icon_path = g_build_filename(app->icons_dir, "vinyl.png",
                                         NULL);
     gtk_window_set_default_icon_from_file(icon_path, NULL);
     g_free(icon_path);

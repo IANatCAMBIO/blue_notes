@@ -104,12 +104,12 @@ DIST     := dist
 # --- macOS .app bundle -------------------------------------------------------
 # A minimal bundle around the binary: icons/ and the defaults ini sit next
 # to the executable inside Contents/MacOS (the app resolves both relative
-# to argv[0]).  trumpet.png becomes the bundle icon via sips + iconutil.
+# to argv[0]).  vinyl.png becomes the bundle icon via sips + iconutil.
 # The binary still links against the MacPorts GTK dylibs (absolute install
 # names), so the bundle runs on this machine but is NOT self-contained.
 
 APP_DIR  := $(DIST)/BlueNotes-$(VERSION).app
-ICONSET  := $(DIST)/trumpet.iconset
+ICONSET  := $(DIST)/vinyl.iconset
 
 app: $(BIN)
 	@command -v iconutil >/dev/null || \
@@ -123,13 +123,13 @@ app: $(BIN)
 	cp blue_notes.ini.defaults "$(APP_DIR)/Contents/MacOS/"
 	find "$(APP_DIR)" -name .DS_Store -delete
 	for sz in 16 32 128 256 512; do \
-	  sips -z $$sz $$sz icons/trumpet.png \
+	  sips -z $$sz $$sz icons/vinyl.png \
 	       --out "$(ICONSET)/icon_$${sz}x$${sz}.png" >/dev/null; \
 	  dbl=$$((sz * 2)); \
-	  sips -z $$dbl $$dbl icons/trumpet.png \
+	  sips -z $$dbl $$dbl icons/vinyl.png \
 	       --out "$(ICONSET)/icon_$${sz}x$${sz}@2x.png" >/dev/null; \
 	done
-	iconutil -c icns -o "$(APP_DIR)/Contents/Resources/trumpet.icns" \
+	iconutil -c icns -o "$(APP_DIR)/Contents/Resources/vinyl.icns" \
 	         "$(ICONSET)"
 	rm -rf "$(ICONSET)"
 	printf '%s\n' \
@@ -141,7 +141,7 @@ app: $(BIN)
 	  '  <key>CFBundleDisplayName</key><string>Blue Notes</string>' \
 	  '  <key>CFBundleIdentifier</key><string>org.example.blue-notes</string>' \
 	  '  <key>CFBundleExecutable</key><string>blue_notes</string>' \
-	  '  <key>CFBundleIconFile</key><string>trumpet</string>' \
+	  '  <key>CFBundleIconFile</key><string>vinyl</string>' \
 	  '  <key>CFBundlePackageType</key><string>APPL</string>' \
 	  '  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
 	  '  <key>CFBundleVersion</key><string>$(VERSION)</string>' \
@@ -186,7 +186,7 @@ pkgroot: $(BIN)
 	  'Terminal=false' \
 	  'Categories=Utility;Office;' \
 	  > $(PKGROOT)/usr/share/applications/blue-notes.desktop
-	cp icons/trumpet.png \
+	cp icons/vinyl.png \
 	   $(PKGROOT)/usr/share/icons/hicolor/512x512/apps/blue-notes.png
 
 # --- Debian package ------------------------------------------------------------

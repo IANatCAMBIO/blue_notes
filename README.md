@@ -25,7 +25,7 @@ exportable to HTML or Markdown — from the GUI or the command line.
   drag any selected note onto a sidebar folder to move the whole
   selection, or use the right-click menu — Open, Export as
   HTML/Markdown, Delete.
-- **Ctrl/Cmd+N** creates a note in the selected folder. The trumpet logo
+- **Ctrl/Cmd+N** creates a note in the selected folder. The vinyl logo
   at the toolbar's right edge opens the About dialog (program info plus
   live database statistics).
 
