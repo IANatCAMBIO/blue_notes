@@ -551,21 +551,28 @@ sanitize_filename(const gchar *title)
 
 /* ---------------------------------------------------------------------------
  * unique_path() — build "<dir>/<base><ext>", appending " (2)", " (3)"…
- * to the base if the file already exists.  Returns the full path and, via
- * out_base, the final base name (both newly allocated).
+ * to the base if the path was already emitted THIS RUN (`used`, may be
+ * NULL for single-note exports).  Uniquifying against the set rather
+ * than the disk makes exports re-runnable mirrors: a second export into
+ * the same directory overwrites its previous output instead of growing
+ * an endless "Note (2)", "Note (3)"… series.  Returns the full path
+ * and, via out_base, the final base name (both newly allocated).
  * ------------------------------------------------------------------------- */
 static gchar *
 unique_path(const gchar *dir, const gchar *base, const gchar *ext,
-            gchar **out_base)
+            GHashTable *used, gchar **out_base)
 {
     gchar *final_base = g_strdup(base);  /* base name actually used         */
     gchar *path = g_strdup_printf("%s/%s%s", dir, final_base, ext);
-    for (gint n = 2; g_file_test(path, G_FILE_TEST_EXISTS); n++) {
+    for (gint n = 2;
+         used != NULL && g_hash_table_contains(used, path); n++) {
         g_free(final_base);
         g_free(path);
         final_base = g_strdup_printf("%s (%d)", base, n);
         path = g_strdup_printf("%s/%s%s", dir, final_base, ext);
     }
+    if (used != NULL)
+        g_hash_table_add(used, g_strdup(path));
     *out_base = final_base;
     return path;
 }
@@ -576,11 +583,13 @@ unique_path(const gchar *dir, const gchar *base, const gchar *ext,
  *   m        — metadata of the note to export.
  *   note_dir — directory the file is written into (must exist).
  *   format   — output format.
+ *   used     — full paths already emitted this run (see unique_path);
+ *              NULL for single-note exports.
  * Returns TRUE if the file was written.
  * ------------------------------------------------------------------------- */
 static gboolean
 export_one(OnApp *app, OnNoteMeta *m, const gchar *note_dir,
-           OnExportFormat format)
+           OnExportFormat format, GHashTable *used)
 {
     /* Load and deserialize into an offscreen buffer.                       */
     GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
@@ -596,7 +605,7 @@ export_one(OnApp *app, OnNoteMeta *m, const gchar *note_dir,
     const gchar *ext = (format == ON_EXPORT_HTML) ? ".html" : ".md";
     gchar *base = sanitize_filename(m->title);
     gchar *final_base = NULL;        /* base after uniquification           */
-    gchar *path = unique_path(note_dir, base, ext, &final_base);
+    gchar *path = unique_path(note_dir, base, ext, used, &final_base);
 
     /* Render.                                                              */
     OnExportCtx ctx = {
@@ -665,23 +674,38 @@ on_export_all(OnApp *app, const gchar *dest_dir, OnExportFormat format,
     GList *notes = on_db_note_list_all(app->db);
     gint exported = 0;               /* notes successfully written          */
 
+    /* Paths emitted this run (for within-run uniquification) and a
+     * folder_id → ready-made note_dir cache: notes cluster into few
+     * folders, so the path query + mkdir run once per folder, not per
+     * note.                                                                */
+    GHashTable *used = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                             g_free, NULL);
+    GHashTable *dirs = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                             g_free, g_free);
+
     for (GList *l = notes; l != NULL; l = l->next) {
         OnNoteMeta *m = l->data;     /* the note being exported             */
 
         /* Mirror the folder hierarchy under the destination.               */
-        gchar *rel_dir = on_db_folder_path(app->db, m->folder_id);
-        gchar *note_dir = (*rel_dir != '\0')
-                          ? g_build_filename(dest_dir, rel_dir, NULL)
-                          : g_strdup(dest_dir);
-        g_mkdir_with_parents(note_dir, 0755);
+        gchar *note_dir = g_hash_table_lookup(dirs, &m->folder_id);
+        if (note_dir == NULL) {
+            gchar *rel_dir = on_db_folder_path(app->db, m->folder_id);
+            note_dir = (*rel_dir != '\0')
+                       ? g_build_filename(dest_dir, rel_dir, NULL)
+                       : g_strdup(dest_dir);
+            g_free(rel_dir);
+            g_mkdir_with_parents(note_dir, 0755);
+            gint64 *key = g_new(gint64, 1);
+            *key = m->folder_id;
+            g_hash_table_insert(dirs, key, note_dir);
+        }
 
-        if (export_one(app, m, note_dir, format))
+        if (export_one(app, m, note_dir, format, used))
             exported++;
-
-        g_free(note_dir);
-        g_free(rel_dir);
     }
 
+    g_hash_table_destroy(dirs);
+    g_hash_table_destroy(used);
     on_db_note_list_free(notes);
     return exported;
 }
@@ -697,7 +721,7 @@ on_export_note(OnApp *app, gint64 note_id, const gchar *dest_dir,
     if (m == NULL)
         return FALSE;
 
-    gboolean ok = export_one(app, m, dest_dir, format);
+    gboolean ok = export_one(app, m, dest_dir, format, NULL);
     on_db_note_meta_free(m);
     return ok;
 }

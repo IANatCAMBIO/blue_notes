@@ -9,6 +9,7 @@
 
 #include "app.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* Settings-table keys under which the toolbar styles are persisted,
@@ -322,6 +323,16 @@ on_app_config_set(const gchar *key, const gchar *value)
 {
     if (config_kf == NULL)
         return;
+
+    /* Skip the file rewrite when the value isn't changing — some callers
+     * fire per keystroke (the image-viewer entry) or re-store identical
+     * values (db_hash on an unchanged database).                           */
+    gchar *cur = g_key_file_get_string(config_kf, CONFIG_GROUP, key, NULL);
+    gboolean same = g_strcmp0(cur, value) == 0;
+    g_free(cur);
+    if (same)
+        return;
+
     if (value != NULL)
         g_key_file_set_string(config_kf, CONFIG_GROUP, key, value);
     else
@@ -514,13 +525,23 @@ on_app_restore_database(OnApp *app, const gchar *backup_path)
 gchar *
 on_app_db_compute_hash(const gchar *path)
 {
-    gchar *data = NULL;
-    gsize  len  = 0;
-    if (!g_file_get_contents(path, &data, &len, NULL))
+    /* Stream in chunks: image-heavy databases run to hundreds of MB, and
+     * this runs at startup and exit — slurping the whole file doubled as
+     * a full download on network-mounted databases.                        */
+    FILE *f = fopen(path, "rb");
+    if (f == NULL)
         return NULL;
-    gchar *hash = g_compute_checksum_for_data(G_CHECKSUM_MD5,
-                                              (const guchar *)data, len);
-    g_free(data);
+
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_MD5);
+    guchar buf[256 * 1024];          /* read chunk                          */
+    gsize  got;
+    while ((got = fread(buf, 1, sizeof buf, f)) > 0)
+        g_checksum_update(sum, buf, (gssize)got);
+    gboolean ok = ferror(f) == 0;
+    fclose(f);
+
+    gchar *hash = ok ? g_strdup(g_checksum_get_string(sum)) : NULL;
+    g_checksum_free(sum);
     return hash;
 }
 

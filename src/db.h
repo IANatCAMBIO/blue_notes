@@ -130,6 +130,11 @@ gint64 on_db_note_create(OnDatabase *db, gint64 folder_id);
 /* Permanently delete note `id`. Returns TRUE on success.                    */
 gboolean on_db_note_delete(OnDatabase *db, gint64 id);
 
+/* Permanently delete `n` notes in ONE transaction, pruning orphaned tags
+ * once at the end (on_db_note_delete does both per note — this is the
+ * bulk variant for multi-selection deletes). Returns TRUE on success.       */
+gboolean on_db_notes_delete(OnDatabase *db, const gint64 *ids, gsize n);
+
 /* Move note `id` into folder `folder_id` (0 = top level), appending it at
  * the end of that folder. Returns TRUE on success.                          */
 gboolean on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id);
@@ -244,6 +249,15 @@ void on_db_totals(OnDatabase *db, gint *notes, gint *folders, gint *tags);
  * Returns a GHashTable of gint64* → GINT_TO_POINTER(count); destroy with
  * g_hash_table_destroy(). Missing keys mean zero.                           */
 GHashTable *on_db_note_count_map(OnDatabase *db);
+
+/* Every filled body_text row in ONE query: note id (gint64*) → owned
+ * text.  Cross-note search reads this instead of one SELECT per note —
+ * the whole column is ~1 MB of text even for image-heavy databases,
+ * and per-query latency is what hurts on shared/network DBs.  Rows with
+ * a NULL cache (pre-column saves) are absent; callers fall back to
+ * on_db_note_body_text()/extraction for those.
+ * Destroy with g_hash_table_destroy().                                      */
+GHashTable *on_db_note_body_map(OnDatabase *db);
 
 /* Per-tag note counts in one query; same shape as above.                    */
 GHashTable *on_db_tag_count_map(OnDatabase *db);

@@ -215,20 +215,20 @@ note_full_path(OnDatabase *db, OnNoteMeta *m, GHashTable *cache)
 /* ---------------------------------------------------------------------------
  * text_matches() — does `haystack` contain `needle` under the plain
  * (non-regex) rules?
- *   case_sensitive — FALSE casefolds both sides first.
+ *   needle_ci — the casefolded needle for case-insensitive matching
+ *               (folded ONCE by the caller, not per note), or NULL for
+ *               case-sensitive matching.
  * ------------------------------------------------------------------------- */
 static gboolean
 text_matches(const gchar *haystack, const gchar *needle,
-             gboolean case_sensitive)
+             const gchar *needle_ci)
 {
-    if (case_sensitive)
+    if (needle_ci == NULL)
         return strstr(haystack, needle) != NULL;
 
     gchar *h = g_utf8_casefold(haystack, -1);
-    gchar *n = g_utf8_casefold(needle, -1);
-    gboolean hit = strstr(h, n) != NULL;
+    gboolean hit = strstr(h, needle_ci) != NULL;
     g_free(h);
-    g_free(n);
     return hit;
 }
 
@@ -303,21 +303,32 @@ search_worker(gpointer user_data)
     GHashTable *paths = g_hash_table_new_full(g_direct_hash, g_direct_equal,
                                               NULL, g_free);
 
+    /* All cached note bodies in one query (instead of one SELECT per
+     * candidate); the rare pre-column NULL rows fall back below.  The
+     * query is casefolded once here, not twice per note.                   */
+    GHashTable *bodies = on_db_note_body_map(db);
+    gchar *query_ci = job->case_sensitive
+                      ? NULL : g_utf8_casefold(job->query, -1);
+
     for (GList *l = notes; l != NULL; l = l->next) {
         if (g_atomic_int_get(&job->cancelled))
             break;                   /* superseded/closed: stop early       */
         OnNoteMeta *m = l->data;     /* one candidate                       */
-        gchar *body = note_plain_text(db, m->id);
+        const gchar *body = g_hash_table_lookup(bodies, &m->id);
+        gchar *extracted = NULL;     /* fallback for uncached rows          */
+        if (body == NULL) {
+            extracted = note_plain_text(db, m->id);
+            body = extracted;
+        }
 
         gboolean match;              /* does this note match the query?     */
         if (job->regex != NULL)
             match = g_regex_match(job->regex, m->title, 0, NULL) ||
                     g_regex_match(job->regex, body, 0, NULL);
         else
-            match = text_matches(m->title, job->query,
-                                 job->case_sensitive) ||
-                    text_matches(body, job->query, job->case_sensitive);
-        g_free(body);
+            match = text_matches(m->title, job->query, query_ci) ||
+                    text_matches(body, job->query, query_ci);
+        g_free(extracted);
         if (!match)
             continue;
 
@@ -329,6 +340,8 @@ search_worker(gpointer user_data)
         g_date_time_unref(dt);
         g_ptr_array_add(job->hits, h);
     }
+    g_free(query_ci);
+    g_hash_table_destroy(bodies);
     g_hash_table_destroy(paths);
     on_db_note_list_free(notes);
     on_db_close(db);

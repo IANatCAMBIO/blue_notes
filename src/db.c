@@ -326,6 +326,34 @@ on_db_note_delete(OnDatabase *db, gint64 id)
 }
 
 gboolean
+on_db_notes_delete(OnDatabase *db, const gint64 *ids, gsize n)
+{
+    if (n == 0)
+        return TRUE;
+
+    /* One transaction for the lot — autocommit would fsync per note —
+     * and the orphan-tag prune runs once at the end instead of per note.   */
+    if (!exec_simple(db, "BEGIN IMMEDIATE"))
+        return FALSE;
+
+    sqlite3_stmt *stmt = prepare(db, "DELETE FROM notes WHERE id=?");
+    gboolean ok = stmt != NULL;      /* every delete succeeded so far?      */
+    for (gsize i = 0; ok && i < n; i++) {
+        sqlite3_bind_int64(stmt, 1, ids[i]);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_reset(stmt);
+    }
+    if (stmt != NULL)
+        sqlite3_finalize(stmt);
+
+    if (ok)
+        ok = exec_simple(db,
+            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)");
+    exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
+    return ok;
+}
+
+gboolean
 on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id)
 {
     sqlite3_stmt *stmt = prepare(db,
@@ -835,6 +863,25 @@ on_db_tag_count_map(OnDatabase *db)
 {
     return count_map_from_query(db,
         "SELECT tag_id, COUNT(*) FROM note_tags GROUP BY tag_id");
+}
+
+GHashTable *
+on_db_note_body_map(OnDatabase *db)
+{
+    GHashTable *map = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                            g_free, g_free);
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT id, body_text FROM notes WHERE body_text IS NOT NULL");
+    if (stmt == NULL)
+        return map;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        gint64 *key = g_new(gint64, 1);
+        *key = sqlite3_column_int64(stmt, 0);
+        g_hash_table_insert(map, key,
+            g_strdup((const gchar *)sqlite3_column_text(stmt, 1)));
+    }
+    sqlite3_finalize(stmt);
+    return map;
 }
 
 /* =========================================================================

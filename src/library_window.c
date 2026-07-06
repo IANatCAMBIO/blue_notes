@@ -361,9 +361,12 @@ refresh_sidebar(OnLibrary *lw)
     g_hash_table_destroy(tag_counts);
 
     gtk_tree_view_expand_all(lw->sidebar);
-    lw->populating--;
 
-    /* Restore the previous selection, falling back to the root row.        */
+    /* Restore the previous selection, falling back to the root row.  The
+     * populating guard stays up through the restore: the select_iter
+     * below would otherwise fire the changed handler and rebuild the
+     * notes pane a second time — every refresh_sidebar caller already
+     * pairs it with an explicit refresh_notes.                             */
     GtkTreeSelection *sel = gtk_tree_view_get_selection(lw->sidebar);
     GtkTreeIter iter;                /* candidate row while searching       */
     gboolean restored = FALSE;       /* did we find the old selection?      */
@@ -384,6 +387,13 @@ refresh_sidebar(OnLibrary *lw)
         gtk_tree_model_get(GTK_TREE_MODEL(lw->sidebar_store), &iter,
                            SB_KIND, &kind, SB_ID, &id, -1);
         if (kind == want_kind && id == want_id) {
+            /* The suppressed handler would have refreshed sel_name; do it
+             * here so a renamed folder/tag keeps it current.               */
+            gchar *raw = NULL;
+            gtk_tree_model_get(GTK_TREE_MODEL(lw->sidebar_store), &iter,
+                               SB_RAW, &raw, -1);
+            g_free(lw->sel_name);
+            lw->sel_name = raw;      /* ownership transferred               */
             gtk_tree_selection_select_iter(sel, &iter);
             restored = TRUE;
             break;
@@ -403,10 +413,20 @@ refresh_sidebar(OnLibrary *lw)
     if (!restored) {
         lw->sel_kind = SB_KIND_ROOT;
         lw->sel_id   = 0;
+        g_free(lw->sel_name);
+        lw->sel_name = g_strdup("Notes");
         if (gtk_tree_model_get_iter_first(
                 GTK_TREE_MODEL(lw->sidebar_store), &iter))
             gtk_tree_selection_select_iter(sel, &iter);
     }
+    lw->populating--;
+
+    /* The old selection no longer exists (deleted folder/pruned tag), so
+     * the notes pane still shows its contents: refresh for the new root
+     * selection.  When the selection was restored, the caller's own
+     * refresh_notes covers it.                                             */
+    if (!restored)
+        refresh_notes(lw);
 
     if (scroll_pos > 0)
         scroll_keep_queue(vadj, scroll_pos);
@@ -1039,15 +1059,15 @@ delete_notes_with_confirm(OnLibrary *lw, GArray *ids)
     if (!ok)
         return;
 
+    /* Close open editors first, then delete the lot in one transaction.   */
     for (guint i = 0; i < ids->len; i++) {
         gint64 note_id = g_array_index(ids, gint64, i);
-        /* Close its editor first, if open.                                 */
         GtkWidget *editor =
             g_hash_table_lookup(lw->app->editors, &note_id);
         if (editor != NULL)
             gtk_widget_destroy(editor);
-        on_db_note_delete(lw->app->db, note_id);
     }
+    on_db_notes_delete(lw->app->db, (const gint64 *)ids->data, ids->len);
     refresh_notes(lw);
     refresh_sidebar(lw);             /* tag list/counts may have changed    */
 }

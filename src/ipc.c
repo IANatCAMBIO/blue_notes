@@ -54,8 +54,17 @@ stream_write_all(GOutputStream *o, const void *buf, gsize n)
     return g_output_stream_write_all(o, buf, n, NULL, NULL, NULL);
 }
 
+/* Wire-format sanity bounds.  No legitimate frame comes close to these;
+ * they keep a stray or hostile client from wedging the GUI (which reads
+ * the socket on the main loop) or forcing an absurd allocation from a
+ * bogus length header.                                                      */
+#define IPC_MAX_LINE  (64 * 1024)            /* command/header line bytes  */
+#define IPC_MAX_BLOB  (64 * 1024 * 1024)     /* argv/stdin/output blob     */
+#define IPC_TIMEOUT_S 10                     /* per-socket-op limit (s)    */
+
 /* stream_read_line() — read up to '\n'; return the line without it (owned),
- * or NULL at EOF before any byte.  Byte-at-a-time: header lines are short.   */
+ * or NULL at EOF before any byte or past IPC_MAX_LINE.  Byte-at-a-time:
+ * header lines are short.                                                    */
 static gchar *
 stream_read_line(GInputStream *in)
 {
@@ -72,28 +81,38 @@ stream_read_line(GInputStream *in)
         }
         if (c == '\n')
             break;
+        if (s->len >= IPC_MAX_LINE) {    /* runaway line: give up          */
+            g_string_free(s, TRUE);
+            return NULL;
+        }
         g_string_append_c(s, c);
     }
     return g_string_free(s, FALSE);
 }
 
-/* stream_read_uint_line() — read a decimal length line; -1 on EOF/error.     */
+/* stream_read_uint_line() — read a decimal length line; -1 on EOF, on a
+ * non-numeric line (garbage must fail, not parse as 0 and desync the
+ * protocol), or on a negative value.                                         */
 static gssize
 stream_read_uint_line(GInputStream *in)
 {
     gchar *line = stream_read_line(in);
     if (line == NULL)
         return -1;
-    gssize v = (gssize) g_ascii_strtoll(line, NULL, 10);
+    gchar *end = NULL;               /* first unparsed char                 */
+    gint64 v = g_ascii_strtoll(line, &end, 10);
+    gboolean ok = end != line && *end == '\0' && v >= 0;
     g_free(line);
-    return v;
+    return ok ? (gssize)v : -1;
 }
 
 /* stream_read_blob() — read exactly `n` bytes (owned, NUL-terminated), or
- * NULL on short read.                                                        */
+ * NULL on short read or an over-limit length claim.                          */
 static gchar *
 stream_read_blob(GInputStream *in, gsize n)
 {
+    if (n > IPC_MAX_BLOB)
+        return NULL;
     gchar *buf = g_malloc(n + 1);
     gsize  got = 0;                  /* bytes actually read                 */
     if (!g_input_stream_read_all(in, buf, n, &got, NULL, NULL) || got != n) {
@@ -451,6 +470,11 @@ on_incoming(GSocketService *service, GSocketConnection *conn,
     (void)service; (void)source;
     OnApp *app = user_data;          /* shared application context           */
 
+    /* This handler blocks the GTK main loop while it reads; the timeout
+     * bounds how long a stalled or malicious client can freeze the GUI.    */
+    g_socket_set_timeout(g_socket_connection_get_socket(conn),
+                         IPC_TIMEOUT_S);
+
     GInputStream  *in  = g_io_stream_get_input_stream(G_IO_STREAM(conn));
     GOutputStream *out = g_io_stream_get_output_stream(G_IO_STREAM(conn));
 
@@ -556,6 +580,9 @@ on_ipc_try_remote(const gchar *command, gchar **reply_out)
         g_free(path);
         return ON_IPC_NO_SERVER;
     }
+    /* The whole exchange is one short line each way — never hang the CLI
+     * on a wedged server.                                                  */
+    g_socket_set_timeout(sock, IPC_TIMEOUT_S);
 
     GSocketAddress *addr = g_unix_socket_address_new(path);
     gboolean connected = g_socket_connect(sock, addr, NULL, NULL);
@@ -609,6 +636,9 @@ on_ipc_try_remote_run(int argc, char **argv, gboolean *ran)
         g_free(path);
         return 0;
     }
+    /* Bound the connect + request send; the response wait is unbounded
+     * again below — the server may legitimately run a long command.        */
+    g_socket_set_timeout(sock, IPC_TIMEOUT_S);
     GSocketAddress *addr = g_unix_socket_address_new(path);
     gboolean connected = g_socket_connect(sock, addr, NULL, NULL);
     g_object_unref(addr);
@@ -646,6 +676,10 @@ on_ipc_try_remote_run(int argc, char **argv, gboolean *ran)
         stream_write_blob(out, argv[i], strlen(argv[i]));
     stream_write_blob(out, stdin_data, stdin_len);
     g_free(stdin_data);
+
+    /* The command may take as long as it takes (e.g. a full export) —
+     * only the connect/send above are timeout-guarded.                     */
+    g_socket_set_timeout(sock, 0);
 
     /* Response frame: exit code, captured stdout, captured stderr.          */
     gssize rc   = stream_read_uint_line(in);

@@ -125,6 +125,9 @@ typedef struct {
     GtkTextMark    *tag_start;
     GtkWidget      *tag_popup;
     GtkWidget      *tag_listbox;
+    GList          *tag_choices;      /* OnTag* snapshot for the active
+                                       * capture — queried once at '#',
+                                       * filtered in memory per keystroke  */
 
     GSList         *code_buttons;
     guint           code_btn_idle;
@@ -1978,6 +1981,8 @@ tag_capture_end(OnEditor *ed, gboolean apply)
     }
     gtk_text_buffer_delete_mark(ed->buffer, ed->tag_start);
     ed->tag_start = NULL;
+    on_db_tag_list_free(ed->tag_choices);
+    ed->tag_choices = NULL;
     tag_popup_hide(ed);
 }
 
@@ -2087,11 +2092,12 @@ tag_popup_update(OnEditor *ed)
         gtk_widget_destroy(GTK_WIDGET(l->data));
     g_list_free(children);
 
-    /* Fill with case-insensitive prefix matches from the tag table.        */
-    GList *tags = on_db_tag_list(ed->app->db);
+    /* Fill with case-insensitive prefix matches from the capture-start
+     * snapshot (see ed->tag_choices).                                      */
     gint shown = 0;                  /* number of rows added                */
     gchar *prefix_ci = g_utf8_casefold(prefix, -1);
-    for (GList *l = tags; l != NULL && shown < TAG_POPUP_MAX; l = l->next) {
+    for (GList *l = ed->tag_choices;
+         l != NULL && shown < TAG_POPUP_MAX; l = l->next) {
         OnTag *t = l->data;
         gchar *name_ci = g_utf8_casefold(t->name, -1);
         gboolean match = g_str_has_prefix(name_ci, prefix_ci);
@@ -2118,7 +2124,6 @@ tag_popup_update(OnEditor *ed)
     }
     g_free(prefix_ci);
     g_free(typed);
-    on_db_tag_list_free(tags);
 
     if (shown == 0) {
         tag_popup_hide(ed);
@@ -2256,6 +2261,10 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
             if (at_boundary) {
                 ed->tag_start = gtk_text_buffer_create_mark(
                     buffer, NULL, &hash, TRUE /* left gravity */);
+                /* One query per capture; every keystroke inside the
+                 * capture filters this snapshot in memory instead of
+                 * re-querying SQLite (a round trip on network DBs).       */
+                ed->tag_choices = on_db_tag_list(ed->app->db);
                 tag_popup_update(ed);
             }
         }
@@ -2772,6 +2781,8 @@ on_editor_destroy(GtkWidget *widget, gpointer user_data)
 
     if (ed->tag_popup != NULL)
         gtk_widget_destroy(ed->tag_popup);
+    on_db_tag_list_free(ed->tag_choices);   /* window closed mid-capture   */
+    ed->tag_choices = NULL;
 
     g_hash_table_remove(ed->app->editors, &ed->note_id);
     g_object_unref(ed->buffer);

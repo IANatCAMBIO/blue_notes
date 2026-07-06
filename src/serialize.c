@@ -251,20 +251,37 @@ on_note_serialize(GtkTextBuffer *buffer, gsize *out_len)
             /* An embedded image interrupts any text run.                   */
             flush_text_run(out, run, run_flags);
 
-            gchar *png   = NULL;     /* PNG bytes for the original          */
-            gsize  n_png = 0;        /* PNG byte count                      */
-            GError *err  = NULL;
-            if (gdk_pixbuf_save_to_buffer(original, &png, &n_png,
-                                          "png", &err, NULL)) {
+            /* The pixbuf never changes once attached, so its PNG encoding
+             * is cached on it as "on-png" (attached at load time, or here
+             * on the first save of a freshly pasted image).  Without the
+             * cache every autosave re-compressed every image — the
+             * editor's biggest main-loop stall on image-heavy notes.       */
+            GBytes *png_bytes =
+                g_object_get_data(G_OBJECT(original), "on-png");
+            if (png_bytes == NULL) {
+                gchar *png   = NULL; /* PNG bytes for the original          */
+                gsize  n_png = 0;    /* PNG byte count                      */
+                GError *err  = NULL;
+                if (gdk_pixbuf_save_to_buffer(original, &png, &n_png,
+                                              "png", &err, NULL)) {
+                    png_bytes = g_bytes_new_take(png, n_png);
+                    g_object_set_data_full(G_OBJECT(original), "on-png",
+                                           png_bytes,
+                                           (GDestroyNotify)g_bytes_unref);
+                } else {
+                    g_warning("serialize: image save failed: %s",
+                              err->message);
+                    g_clear_error(&err);
+                }
+            }
+            if (png_bytes != NULL) {
+                gsize n_png = 0;     /* PNG byte count                      */
+                gconstpointer png = g_bytes_get_data(png_bytes, &n_png);
                 guint8 rec = REC_IMAGE;
                 g_byte_array_append(out, &rec, 1);
                 put_u32(out, (guint32)display_width);
                 put_u32(out, (guint32)n_png);
                 g_byte_array_append(out, (const guint8 *)png, n_png);
-                g_free(png);
-            } else {
-                g_warning("serialize: image save failed: %s", err->message);
-                g_clear_error(&err);
             }
             gtk_text_iter_forward_char(&iter);
             continue;
@@ -491,6 +508,16 @@ on_note_deserialize_scaled(GtkTextBuffer *buffer, const guint8 *data,
                         gtk_text_buffer_create_child_anchor(buffer, &end);
                     on_anchor_set_image(anchor, pixbuf,
                                         (gint)display_width);
+                    /* Full-resolution load: keep the source PNG bytes on
+                     * the pixbuf so saves emit them verbatim instead of
+                     * re-encoding (see the "on-png" cache in
+                     * on_note_serialize).  Scaled loads (thumbnails)
+                     * never save, and their pixbuf no longer matches the
+                     * bytes — skip those.                                  */
+                    if (max_img_px == 0)
+                        g_object_set_data_full(G_OBJECT(pixbuf), "on-png",
+                            g_bytes_new(data + pos, n),
+                            (GDestroyNotify)g_bytes_unref);
                 }
             } else {
                 g_warning("deserialize: bad image data: %s",

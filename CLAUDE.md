@@ -204,18 +204,26 @@ sees the new flags.
   notify.
 - `ed->dirty` (set by editor_queue_autosave, cleared by editor_save)
   gates the close-time flush: closing a window whose last autosave
-  already ran skips serialization entirely — for image-heavy notes the
-  final save otherwise re-encodes every PNG, which is the "slow close".
+  already ran skips serialization entirely.
+- **Images are never re-encoded on save**: the PNG bytes are cached on
+  the pixbuf as `"on-png"` GBytes (attached from the blob at full-res
+  deserialize, or on the first encode of a pasted/inserted image);
+  `on_note_serialize` emits them verbatim. Scaled loads
+  (`on_note_deserialize_scaled`, thumbnails) skip the cache — their
+  pixbuf no longer matches the bytes. Before this, every autosave of an
+  image-heavy note re-compressed every PNG on the main loop.
 - code_buttons_rebuild has a fast path: when block-start offsets match
   the existing buttons' marks, it only repositions (no widget churn per
   keystroke).
 - Cross-note search reads the `notes.body_text` cache column (filled by
   every save via `on_note_extract_text`, a record-walk over the BNBF
-  blob that skips image payloads entirely). NULL rows (pre-column saves)
-  fall back to the extractor and write back unless read-only. Measured:
-  full cold extraction of 1260 notes / 616 MB of blobs = 183 ms; the
-  warm path reads ~1 MB of text. The old path deserialized every note
-  into a GtkTextBuffer, decoding every PNG, per search.
+  blob that skips image payloads entirely) — fetched as ONE query for
+  the whole table (`on_db_note_body_map`), not per note: per-query
+  latency is what hurts on shared/network DBs. NULL rows (pre-column
+  saves) fall back to the extractor and write back. Measured: full cold
+  extraction of 1260 notes / 616 MB of blobs = 183 ms; the warm path
+  reads ~1 MB of text. The old path deserialized every note into a
+  GtkTextBuffer, decoding every PNG, per search.
 - Search runs on a worker thread (GtkSpinner in the window), never the
   GTK main loop. The worker opens its OWN SQLite connection (one
   connection must not cross threads); scope is resolved on the main
@@ -225,6 +233,21 @@ sees the new flags.
   window closes or a newer search starts, so it never touches a dead
   window. GRegex is immutable ⇒ compile on main (instant bad-pattern
   errors), match on worker.
+- refresh_sidebar keeps its `populating` guard up through the
+  selection restore, so the restore's select_iter can't fire the
+  changed handler and rebuild the notes pane a second time — every
+  caller pairs it with an explicit refresh_notes. If the old selection
+  no longer exists it falls back to the root and refreshes the notes
+  pane itself.
+- Multi-note deletes go through `on_db_notes_delete` (one transaction +
+  one orphan-tag prune), not per-note `on_db_note_delete` (which
+  fsyncs and prunes per call). The `#tag` autocomplete queries the tag
+  list ONCE per capture (`ed->tag_choices`) and filters in memory per
+  keystroke. `on_app_config_set` skips the ini rewrite when the value
+  is unchanged. The startup/exit DB hash streams through `GChecksum`
+  (never loads the file whole). Exports uniquify names within the run
+  only, so re-exporting to the same directory overwrites (a mirror),
+  not duplicates.
 - Deliberately NOT done: WAL journal or synchronous=NORMAL pragmas —
   unsafe/risky on network filesystems, which the shared-DB feature
   targets.
