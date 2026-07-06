@@ -391,13 +391,13 @@ on_settings_window_open(OnApp *app)
     gtk_box_pack_start(GTK_BOX(vbox), mac_check, FALSE, FALSE, 0);
 #endif /* __APPLE__ */
 
-    /* A few icons are still SVG (dialog warning, the bundled symbolic
-     * arrows): mention the loader when it is missing.  Everything still
-     * works without it — those icons just fall back to text glyphs.        */
+    /* The bundled symbolic tree arrows are still SVG: mention the loader
+     * when it is missing.  Everything still works without it — those
+     * icons just fall back to the theme defaults.                          */
     if (!svg_loader_available()) {
         GtkWidget *warn = gtk_label_new(NULL);
         gtk_label_set_markup(GTK_LABEL(warn),
-            "<small><i>Some icons (dialogs, tree arrows) render best "
+            "<small><i>Some icons (tree arrows) render best "
             "with the librsvg loader:\nsudo port install librsvg "
             "(then restart Blue Notes)</i></small>");
         gtk_label_set_xalign(GTK_LABEL(warn), 0.0);

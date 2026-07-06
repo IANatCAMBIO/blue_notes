@@ -29,8 +29,9 @@ Dependencies (MacPorts): `gtk3 +quartz`, `sqlite3`, `pkgconf`, and
 optionally `gtk-osx-application-gtk3` (native macOS menubar — pkg-config
 module is **`gtk-mac-integration-gtk3`**, NOT "gtkmacintegration"; the
 Makefile auto-detects it and defines `HAVE_GTKOSX`). librsvg is
-OPTIONAL now that toolbar icons are PNGs — it only renders
-`dialog-warning.svg` and the bundled `icons/theme/` symbolic arrows.
+OPTIONAL now that all app icons are PNGs (incl. `warning.png` in the
+confirm dialogs) — it only renders the bundled `icons/theme/` symbolic
+arrows.
 After toggling a dependency, run `make clean && make` so every object
 sees the new flags.
 

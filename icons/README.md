@@ -1,13 +1,10 @@
 # Blue Notes — toolbar icons
 
-Custom PNG icons for the toolbars, plus one SVG kept from the
-**elementary** icon theme (GPL-3.0,
-<https://github.com/elementary/icons>): `dialog-warning.svg` for
-confirmation dialogs.
-
-SVG rendering requires the librsvg gdk-pixbuf loader:
-`sudo port install librsvg` (then restart Blue Notes). Without it,
-SVG-based icons show small text glyphs instead.
+Custom PNG icons for the toolbars and dialogs.  The only SVGs left are
+the bundled `theme/` symbolic arrows (see below); rendering those
+requires the librsvg gdk-pixbuf loader: `sudo port install librsvg`
+(then restart Blue Notes). Without it, GTK falls back to its stock
+arrows.
 
 ## Replacing icons
 
@@ -26,7 +23,11 @@ is missing or cannot be decoded, the button falls back to a text glyph.
 | `search.png`             | Search                         |
 | `copy.png`               | Code-block copy button         |
 | `vinyl.png`            | App logo: window icon, About button + dialog |
-| `dialog-warning.svg`     | Delete-confirmation dialogs    |
+| `warning.png`            | Delete-confirmation dialogs    |
+| `folder.png`             | Drag icon: dragging a folder   |
+| `documents.png`          | (reserved: multi-item drags)   |
+
+`file.png` doubles as the drag-under-cursor icon when dragging notes.
 
 These names are looked up but have no bundled file — the editor's
 formatting buttons deliberately use crisp Pango text glyphs (B/I/U/S,

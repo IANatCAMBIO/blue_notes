@@ -1461,9 +1461,8 @@ confirm(OnLibrary *lw, const gchar *primary, const gchar *secondary)
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_container_set_border_width(GTK_CONTAINER(box), 16);
 
-    /* Warning icon on top (elementary status icon; ⚠ as fallback).         */
-    GtkWidget *icon = on_app_icon_image_sized(lw->app, "dialog-warning",
-                                              32);
+    /* Warning icon on top (custom PNG; ⚠ as fallback).                     */
+    GtkWidget *icon = on_app_icon_image_sized(lw->app, "warning", 32);
     if (icon == NULL)
         icon = gtk_label_new("\xe2\x9a\xa0");
     gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
