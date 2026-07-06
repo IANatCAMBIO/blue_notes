@@ -34,6 +34,10 @@
  *                    note's tag set changed — editing a note can never
  *                    change folder counts, so the sidebar is left
  *                    untouched (and its scrollbar unmoved).  May be NULL.
+ *   notify_status  — hook installed by the library window: shows an event
+ *                    message ("DB saved", …) on the right side of its
+ *                    status bar.  Post through on_app_status(), which
+ *                    handles the hook being NULL.
  *   toolbar_style  — how toolbar buttons render (text only, icons only,
  *                    or icons above text), kept separately for library
  *                    toolbars and editor toolbars.  Indexed by
@@ -53,6 +57,11 @@
  *   first_line_h1  — whether the first line typed into a brand-new note
  *                    is automatically formatted as Heading 1; persisted
  *                    as the "first_line_h1" setting (default off).
+ *   compact_editor_toolbar — whether the editor toolbar collapses the
+ *                    paragraph-style buttons (H1/H2/¶) into a "Styles"
+ *                    menu button and the list buttons into a "Lists"
+ *                    one; persisted as the "compact_editor_toolbar"
+ *                    setting (default off).
  *   db_dir         — custom directory holding notes.db (owned string), or
  *                    NULL for the default location.  Persisted in the
  *                    config FILE (blue_notes.ini next to the binary), not
@@ -77,6 +86,7 @@ typedef struct OnApp {
     GtkWidget       *library_window;
     void           (*notify_notes_changed)(struct OnApp *app);
     void           (*notify_note_saved)(struct OnApp *app);
+    void           (*notify_status)(struct OnApp *app, const gchar *message);
     GtkToolbarStyle  toolbar_style[ON_TOOLBAR_N_KINDS];
     GPtrArray       *toolbars[ON_TOOLBAR_N_KINDS];
     gchar           *icons_dir;
@@ -84,11 +94,21 @@ typedef struct OnApp {
     gboolean         code_line_numbers;
     gboolean         sidebar_counts;
     gboolean         first_line_h1;
+    gboolean         compact_editor_toolbar;
     gchar           *db_dir;
     gboolean         db_integrity_check;
     gboolean         db_transient;     /* TRUE when the current DB was opened
                                         * for this session only (not default) */
 } OnApp;
+
+/* ---------------------------------------------------------------------------
+ * on_app_status() — post a one-line event message to the library window's
+ * status bar (printf-style).  Safe to call from anywhere: a no-op until
+ * the library window has installed app->notify_status.
+ *   app — the application context.
+ *   fmt — printf-style format for the message.
+ * ------------------------------------------------------------------------- */
+void on_app_status(OnApp *app, const gchar *fmt, ...) G_GNUC_PRINTF(2, 3);
 
 /* ---------------------------------------------------------------------------
  * on_app_init_icons_dir() — locate the icons/ folder next to the

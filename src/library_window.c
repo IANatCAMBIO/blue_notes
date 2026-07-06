@@ -106,6 +106,12 @@ static const GtkTargetEntry ROW_TARGET =
  *                   jumping back to the top.
  *   sidebar_box   — the whole folder/tag pane, so the toolbar's
  *                   show/hide toggle can flip its visibility.
+ *   status_path   — status-bar label (bottom left): the path of the
+ *                   current sidebar selection.
+ *   status_event  — status-bar label (bottom right): the latest event
+ *                   message ("DB saved", …); see on_app_status().  Lives
+ *                   inside status_revealer (crossfade) and fades out
+ *                   after STATUS_FADE_SECONDS via status_timeout.
  * ------------------------------------------------------------------------- */
 typedef struct {
     OnApp        *app;
@@ -125,7 +131,14 @@ typedef struct {
     gint64        shown_id;
     GtkWidget    *sidebar_box;
     GtkWidget    *sidebar_paned;         /* horizontal paned holding the sidebar */
+    GtkWidget    *status_path;
+    GtkWidget    *status_event;
+    GtkWidget    *status_revealer;
+    guint         status_timeout;
 } OnLibrary;
+
+/* How long a status-bar event message stays before fading out.              */
+#define STATUS_FADE_SECONDS 4
 
 /* ---------------------------------------------------------------------------
  * ThumbEntry — one cached grid thumbnail.
@@ -153,6 +166,7 @@ thumb_entry_free(gpointer data)
 /* Forward declarations.                                                     */
 static void    refresh_sidebar(OnLibrary *lw);
 static void    refresh_notes(OnLibrary *lw);
+static void    status_path_update(OnLibrary *lw);
 static GArray *selected_note_ids(OnLibrary *lw);
 static void    add_menu_item(GtkWidget *menu, const gchar *label,
                              GCallback callback, gpointer data);
@@ -612,6 +626,8 @@ refresh_notes(OnLibrary *lw)
     lw->shown_id   = lw->sel_id;
     if (keep_scroll && scroll_pos > 0)
         scroll_keep_queue(vadj, scroll_pos);
+
+    status_path_update(lw);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1136,6 +1152,8 @@ on_backup_db(GtkWidget *widget, gpointer user_data)
         gtk_widget_destroy(chooser);
 
         gboolean ok = on_db_backup_to(lw->app->db, path);
+        if (ok)
+            on_app_status(lw->app, "Database backed up");
         GtkWidget *msg = gtk_message_dialog_new(
             GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
             ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
@@ -1247,6 +1265,7 @@ on_open_db(GtkWidget *widget, gpointer user_data)
 
     if (app->notify_notes_changed != NULL)
         app->notify_notes_changed(app);
+    on_app_status(app, "DB at %s loaded", app->db->path);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1814,6 +1833,69 @@ on_notes_grid_button_press(GtkWidget *widget, GdkEventButton *event,
 }
 
 /* ===========================================================================
+ * status bar
+ * =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * status_path_update() — put the current selection's location in the
+ * status bar's left label: "/" for the root, "/Folder/Sub" for folders,
+ * and the raw sidebar name ("#tag", "Pinned Notes") for the non-path
+ * views.  Runs from refresh_notes(), so it tracks every navigation.
+ * ------------------------------------------------------------------------- */
+static void
+status_path_update(OnLibrary *lw)
+{
+    if (lw->status_path == NULL)
+        return;
+
+    gchar *text;                     /* what the label should show          */
+    if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED) {
+        text = g_strdup(lw->sel_name != NULL ? lw->sel_name : "");
+    } else {
+        gchar *path = on_db_folder_path(lw->app->db, lw->sel_id);
+        text = g_strdup_printf("/%s", path);
+        g_free(path);
+    }
+    gtk_label_set_text(GTK_LABEL(lw->status_path), text);
+    g_free(text);
+}
+
+/* status_fade_timeout() — the display period ended: fade the event
+ * message out (the revealer crossfades to nothing).                         */
+static gboolean
+status_fade_timeout(gpointer user_data)
+{
+    OnLibrary *lw = user_data;       /* owning library window               */
+    lw->status_timeout = 0;
+    gtk_revealer_set_reveal_child(GTK_REVEALER(lw->status_revealer),
+                                  FALSE);
+    return G_SOURCE_REMOVE;
+}
+
+/* ---------------------------------------------------------------------------
+ * library_notify_status() — installed as app->notify_status; shows an
+ * event message in the status bar's right label, fading it out after
+ * STATUS_FADE_SECONDS (each new message restarts the clock).  Post
+ * through on_app_status(), never directly.
+ * ------------------------------------------------------------------------- */
+static void
+library_notify_status(OnApp *app, const gchar *message)
+{
+    OnLibrary *lw =                  /* library state stashed on the window */
+        g_object_get_data(G_OBJECT(app->library_window), "on-library");
+    if (lw == NULL || lw->status_event == NULL)
+        return;
+
+    gtk_label_set_text(GTK_LABEL(lw->status_event), message);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(lw->status_revealer), TRUE);
+
+    if (lw->status_timeout != 0)
+        g_source_remove(lw->status_timeout);
+    lw->status_timeout = g_timeout_add_seconds(STATUS_FADE_SECONDS,
+                                               status_fade_timeout, lw);
+}
+
+/* ===========================================================================
  * refresh hook + construction
  * =========================================================================== */
 
@@ -2243,6 +2325,8 @@ static void
 library_free(gpointer data)
 {
     OnLibrary *lw = data;
+    if (lw->status_timeout != 0)
+        g_source_remove(lw->status_timeout);
     g_hash_table_destroy(lw->thumb_cache);
     g_free(lw->sel_name);
     g_free(lw);
@@ -2334,6 +2418,7 @@ on_library_window_create(OnApp *app)
     app->library_window       = lw->window;
     app->notify_notes_changed = library_notify_notes_changed;
     app->notify_note_saved    = library_notify_note_saved;
+    app->notify_status        = library_notify_status;
 
     g_signal_connect(lw->window, "key-press-event",
                      G_CALLBACK(on_library_key_press), lw);
@@ -2540,6 +2625,54 @@ on_library_window_create(OnApp *app)
     gtk_stack_add_named(GTK_STACK(lw->stack), grid_scroll, "grid");
     gtk_stack_set_visible_child_name(GTK_STACK(lw->stack), "list");
 
+    /* --- status bar: selection path (left) + latest event (right) ----------*/
+    lw->status_path = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(lw->status_path), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(lw->status_path),
+                            PANGO_ELLIPSIZE_MIDDLE);
+
+    lw->status_event = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(lw->status_event), 1.0);
+    gtk_label_set_ellipsize(GTK_LABEL(lw->status_event),
+                            PANGO_ELLIPSIZE_MIDDLE);
+    gtk_style_context_add_class(
+        gtk_widget_get_style_context(lw->status_event), "dim-label");
+
+    /* Event messages fade: the label sits in a crossfading revealer that
+     * library_notify_status() opens and a timer closes.                     */
+    lw->status_revealer = gtk_revealer_new();
+    gtk_revealer_set_transition_type(GTK_REVEALER(lw->status_revealer),
+                                     GTK_REVEALER_TRANSITION_TYPE_CROSSFADE);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(lw->status_revealer),
+                                         600);
+    gtk_container_add(GTK_CONTAINER(lw->status_revealer), lw->status_event);
+
+    GtkWidget *status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_set_margin_start(status_bar, 8);
+    gtk_widget_set_margin_end(status_bar, 8);
+    gtk_widget_set_margin_top(status_bar, 3);
+    gtk_widget_set_margin_bottom(status_bar, 3);
+    gtk_box_pack_start(GTK_BOX(status_bar), lw->status_path,
+                       TRUE, TRUE, 0);
+    gtk_box_pack_end(GTK_BOX(status_bar), lw->status_revealer,
+                     FALSE, FALSE, 0);
+
+    /* Both labels a step smaller than the UI font.                          */
+    {
+        GtkCssProvider *css = gtk_css_provider_new();
+        gtk_css_provider_load_from_data(css, "label { font-size: 85%; }",
+                                        -1, NULL);
+        gtk_style_context_add_provider(
+            gtk_widget_get_style_context(lw->status_path),
+            GTK_STYLE_PROVIDER(css),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        gtk_style_context_add_provider(
+            gtk_widget_get_style_context(lw->status_event),
+            GTK_STYLE_PROVIDER(css),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(css);
+    }
+
     /* --- assemble -----------------------------------------------------------*/
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     lw->sidebar_paned = paned;
@@ -2558,11 +2691,16 @@ on_library_window_create(OnApp *app)
                        gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
                        FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox),
+                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
+                       FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), status_bar, FALSE, FALSE, 0);
     gtk_container_add(GTK_CONTAINER(lw->window), vbox);
 
     /* --- initial population -------------------------------------------------*/
     refresh_sidebar(lw);
     refresh_notes(lw);
+    on_app_status(app, "DB at %s loaded", app->db->path);
 
     gtk_widget_show_all(lw->window);
 

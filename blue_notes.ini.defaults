@@ -11,3 +11,4 @@ native_menubar=1
 search_win_w=538
 search_win_h=299
 first_line_h1=1
+compact_editor_toolbar=0

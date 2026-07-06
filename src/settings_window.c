@@ -285,6 +285,18 @@ on_first_line_h1_toggled(GtkToggleButton *check, gpointer user_data)
                       app->first_line_h1 ? "1" : "0");
 }
 
+/* on_compact_toolbar_toggled() — collapse/expand the editor toolbar's
+ * paragraph-style and list buttons into "Styles"/"Lists" menus, live.       */
+static void
+on_compact_toolbar_toggled(GtkToggleButton *check, gpointer user_data)
+{
+    OnApp *app = user_data;          /* application context                 */
+    app->compact_editor_toolbar = gtk_toggle_button_get_active(check);
+    on_app_config_set("compact_editor_toolbar",
+                      app->compact_editor_toolbar ? "1" : "0");
+    on_editor_rebuild_toolbars_all(app);
+}
+
 /* on_db_integrity_check_toggled() — enable/disable the startup hash check.  */
 static void
 on_db_integrity_check_toggled(GtkToggleButton *check, gpointer user_data)
@@ -427,6 +439,15 @@ on_settings_window_open(OnApp *app)
     g_signal_connect(h1_check, "toggled",
                      G_CALLBACK(on_first_line_h1_toggled), app);
     gtk_box_pack_start(GTK_BOX(vbox), h1_check, FALSE, FALSE, 0);
+
+    GtkWidget *compact_check = gtk_check_button_new_with_label(
+        "Compact toolbar (group paragraph styles and lists into menus)");
+    gtk_widget_set_margin_start(compact_check, 12);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(compact_check),
+                                 app->compact_editor_toolbar);
+    g_signal_connect(compact_check, "toggled",
+                     G_CALLBACK(on_compact_toolbar_toggled), app);
+    gtk_box_pack_start(GTK_BOX(vbox), compact_check, FALSE, FALSE, 0);
 
     /* Program used by an image's "Open" action; empty = system default.   */
     GtkWidget *viewer_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);

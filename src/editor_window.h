@@ -60,4 +60,11 @@ void on_editor_rebuild_code_buttons_all(OnApp *app);
  * ------------------------------------------------------------------------- */
 void on_editor_apply_line_numbers_all(OnApp *app);
 
+/* ---------------------------------------------------------------------------
+ * on_editor_rebuild_toolbars_all() — rebuild the formatting toolbar of
+ * every open editor per app->compact_editor_toolbar.  Called by the
+ * settings window when the compact-toolbar preference changes.
+ * ------------------------------------------------------------------------- */
+void on_editor_rebuild_toolbars_all(OnApp *app);
+
 #endif /* BLUE_EDITOR_WINDOW_H */

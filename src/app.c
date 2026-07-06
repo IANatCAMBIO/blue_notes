@@ -18,6 +18,19 @@ static const gchar *STYLE_SETTING_KEYS[ON_TOOLBAR_N_KINDS] = {
     "toolbar_style_editor",
 };
 
+void
+on_app_status(OnApp *app, const gchar *fmt, ...)
+{
+    if (app->notify_status == NULL)
+        return;
+    va_list args;                    /* printf-style arguments              */
+    va_start(args, fmt);
+    gchar *message = g_strdup_vprintf(fmt, args);
+    va_end(args);
+    app->notify_status(app, message);
+    g_free(message);
+}
+
 /* ---------------------------------------------------------------------------
  * exe_dir_from_argv0() — the directory containing the executable; when
  * launched via a bare name from PATH there is no directory part, so fall
@@ -458,6 +471,8 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
     g_free(old_path);
     if (app->notify_notes_changed != NULL)
         app->notify_notes_changed(app);
+    if (ok)
+        on_app_status(app, "DB at %s loaded", app->db->path);
     return ok;
 }
 
@@ -489,7 +504,10 @@ on_app_restore_database(OnApp *app, const gchar *backup_path)
     g_free(db_path);
     if (app->notify_notes_changed != NULL)
         app->notify_notes_changed(app);
-    return ok && app->db != NULL;
+    gboolean restored = ok && app->db != NULL;
+    if (restored)
+        on_app_status(app, "Database restored");
+    return restored;
 }
 
 gchar *

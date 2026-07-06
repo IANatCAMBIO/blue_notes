@@ -119,6 +119,8 @@ typedef struct {
     guint           autosave_source;
 
     GtkWidget      *toggle_buttons[4];
+    GtkWidget      *toolbar;          /* the formatting toolbar              */
+    GtkWidget      *toolbar_box;      /* vbox it sits in (for live rebuild)  */
 
     GtkTextMark    *tag_start;
     GtkWidget      *tag_popup;
@@ -2803,10 +2805,49 @@ add_para_button(OnEditor *ed, GtkWidget *toolbar, const gchar *icon,
 }
 
 /* ---------------------------------------------------------------------------
+ * add_para_menu_item() — helper: the compact-toolbar counterpart of
+ * add_para_button — one paragraph style as a menu item.  on_para_button
+ * only reads the "on-flag" object data from whatever widget fired it, so
+ * it serves menu items and tool buttons alike.
+ * ------------------------------------------------------------------------- */
+static void
+add_para_menu_item(OnEditor *ed, GtkWidget *menu, const gchar *label,
+                   guint32 flag)
+{
+    GtkWidget *mi = gtk_menu_item_new_with_mnemonic(label);
+    g_object_set_data(G_OBJECT(mi), "on-flag", GUINT_TO_POINTER(flag));
+    g_signal_connect(mi, "activate", G_CALLBACK(on_para_button), ed);
+    gtk_widget_show(mi);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
+}
+
+/* ---------------------------------------------------------------------------
+ * menu_tool_button_new() — helper: a labelled GtkMenuButton wrapped in a
+ * GtkToolItem.  A GtkMenuButton + GtkMenu is used instead of a
+ * GtkComboBox: the combo's popup grab is unreliable inside a toolbar (it
+ * could close the moment the pointer moved); a real menu holds its grab.
+ * ------------------------------------------------------------------------- */
+static GtkToolItem *
+menu_tool_button_new(const gchar *label, const gchar *tooltip,
+                     GtkWidget *menu)
+{
+    GtkWidget *btn = gtk_menu_button_new();
+    gtk_button_set_label(GTK_BUTTON(btn), label);
+    gtk_menu_button_set_popup(GTK_MENU_BUTTON(btn), menu);
+    gtk_widget_set_tooltip_text(btn, tooltip);
+
+    GtkToolItem *item = gtk_tool_item_new();
+    gtk_container_add(GTK_CONTAINER(item), btn);
+    return item;
+}
+
+/* ---------------------------------------------------------------------------
  * build_toolbar() — construct the formatting toolbar: inline-style
  * toggles, paragraph-style buttons, code-block and image insertion.  The
  * toolbar is registered with the app so it follows the global
- * text/icons/both style preference.
+ * text/icons/both style preference.  In compact mode (File → Settings…)
+ * the three paragraph-style buttons collapse into a "Styles" menu button
+ * and the three list buttons into a "Lists" one.
  * Returns the toolbar widget.
  * ------------------------------------------------------------------------- */
 static GtkWidget *
@@ -2839,26 +2880,51 @@ build_toolbar(OnEditor *ed)
     /* Paragraph styles.  These have no standard icons, so their "icons"
      * are text glyphs (still swappable by dropping a matching PNG — e.g.
      * heading-1.png — into the icons/ folder).                             */
-    add_para_button(ed, toolbar, "heading-1", "<b>H1</b>", "Heading 1",
-                    "Heading 1", ON_FMT_H1);
-    add_para_button(ed, toolbar, "heading-2", "<b>H2</b>", "Heading 2",
-                    "Heading 2", ON_FMT_H2);
-    add_para_button(ed, toolbar, "body-text", "\xc2\xb6", "Body",
-                    "Plain body text", 0);
+    if (ed->app->compact_editor_toolbar) {
+        GtkWidget *styles_menu = gtk_menu_new();
+        add_para_menu_item(ed, styles_menu, "Heading _1", ON_FMT_H1);
+        add_para_menu_item(ed, styles_menu, "Heading _2", ON_FMT_H2);
+        add_para_menu_item(ed, styles_menu, "_Body",      0);
+        gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
+                           menu_tool_button_new("Styles",
+                               "Paragraph style: heading or body text",
+                               styles_menu), -1);
+    } else {
+        add_para_button(ed, toolbar, "heading-1", "<b>H1</b>", "Heading 1",
+                        "Heading 1", ON_FMT_H1);
+        add_para_button(ed, toolbar, "heading-2", "<b>H2</b>", "Heading 2",
+                        "Heading 2", ON_FMT_H2);
+        add_para_button(ed, toolbar, "body-text", "\xc2\xb6", "Body",
+                        "Plain body text", 0);
+    }
 
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
                        gtk_separator_tool_item_new(), -1);
 
-    add_para_button(ed, toolbar, "list-bullet", "\xe2\x80\xa2", "Bullets",
-                    "Bulleted list", ON_FMT_LIST_BULLET);
-    add_para_button(ed, toolbar, "list-number", "1.", "Numbered",
-                    "Numbered list", ON_FMT_LIST_NUMBER);
-    /* Fallback glyph is a plain text square (U+25A1 □), not the ⬜ color
-     * emoji: it renders in the text font like the •/1. glyphs and avoids
-     * the emoji's oversized advance in the toolbar.                        */
-    add_para_button(ed, toolbar, "list-check", "\xe2\x96\xa1", "Tasks",
-                    "Task list with checkboxes (click a box to toggle)",
-                    ON_FMT_LIST_CHECK);
+    if (ed->app->compact_editor_toolbar) {
+        GtkWidget *lists_menu = gtk_menu_new();
+        add_para_menu_item(ed, lists_menu, "_Bulleted List",
+                           ON_FMT_LIST_BULLET);
+        add_para_menu_item(ed, lists_menu, "_Numbered List",
+                           ON_FMT_LIST_NUMBER);
+        add_para_menu_item(ed, lists_menu, "_Task List",
+                           ON_FMT_LIST_CHECK);
+        gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
+                           menu_tool_button_new("Lists",
+                               "List style: bullets, numbers, or task "
+                               "checkboxes", lists_menu), -1);
+    } else {
+        add_para_button(ed, toolbar, "list-bullet", "\xe2\x80\xa2",
+                        "Bullets", "Bulleted list", ON_FMT_LIST_BULLET);
+        add_para_button(ed, toolbar, "list-number", "1.", "Numbered",
+                        "Numbered list", ON_FMT_LIST_NUMBER);
+        /* Fallback glyph is a plain text square (U+25A1 □), not the ⬜
+         * color emoji: it renders in the text font like the •/1. glyphs
+         * and avoids the emoji's oversized advance in the toolbar.        */
+        add_para_button(ed, toolbar, "list-check", "\xe2\x96\xa1", "Tasks",
+                        "Task list with checkboxes (click a box to toggle)",
+                        ON_FMT_LIST_CHECK);
+    }
 
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
                        gtk_separator_tool_item_new(), -1);
@@ -2869,10 +2935,7 @@ build_toolbar(OnEditor *ed)
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
                        gtk_separator_tool_item_new(), -1);
 
-    /* One "Insert ▾" dropdown replaces the Image/Table/Emoji buttons.  A
-     * GtkMenuButton + GtkMenu is used instead of a GtkComboBox: the
-     * combo's popup grab is unreliable inside a toolbar (it could close
-     * the moment the pointer moved); a real menu holds its grab.           */
+    /* One "Insert ▾" dropdown replaces the Image/Table/Emoji buttons.      */
     GtkWidget *insert_menu = gtk_menu_new();
     static const struct {
         const gchar *label;          /* menu-item text                      */
@@ -2889,15 +2952,10 @@ build_toolbar(OnEditor *ed)
         gtk_menu_shell_append(GTK_MENU_SHELL(insert_menu), mi);
     }
 
-    GtkWidget *insert_btn = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(insert_btn), "Insert");
-    gtk_menu_button_set_popup(GTK_MENU_BUTTON(insert_btn), insert_menu);
-    gtk_widget_set_tooltip_text(insert_btn,
-        "Insert an image, a table, or an emoji at the cursor");
-
-    GtkToolItem *insert_item = gtk_tool_item_new();
-    gtk_container_add(GTK_CONTAINER(insert_item), insert_btn);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), insert_item, -1);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
+                       menu_tool_button_new("Insert",
+                           "Insert an image, a table, or an emoji at the "
+                           "cursor", insert_menu), -1);
 
     /* In-note search, pinned to the toolbar's right edge (Ctrl+F) by an
      * expanding blank spacer.                                              */
@@ -2945,6 +3003,36 @@ build_toolbar(OnEditor *ed)
 
     on_app_register_toolbar(ed->app, ON_TOOLBAR_EDITOR, toolbar);
     return toolbar;
+}
+
+void
+on_editor_rebuild_toolbars_all(OnApp *app)
+{
+    GHashTableIter iter;             /* walk of the open-editors table      */
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, app->editors);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        OnEditor *ed =               /* editor state stashed on its window  */
+            g_object_get_data(G_OBJECT(value), "on-editor");
+        if (ed == NULL || ed->toolbar_box == NULL)
+            continue;
+
+        /* Destroying the old toolbar unregisters it from the style
+         * registry; the rebuild registers the new one and refreshes the
+         * ed-> widget pointers (toggle_buttons, search_entry).             */
+        gchar *query =               /* in-note search survives the rebuild */
+            g_strdup(gtk_entry_get_text(GTK_ENTRY(ed->search_entry)));
+        gtk_widget_destroy(ed->toolbar);
+        ed->toolbar = build_toolbar(ed);
+        gtk_box_pack_start(GTK_BOX(ed->toolbar_box), ed->toolbar,
+                           FALSE, FALSE, 0);
+        gtk_box_reorder_child(GTK_BOX(ed->toolbar_box), ed->toolbar, 0);
+        gtk_widget_show_all(ed->toolbar);
+        update_toggle_buttons(ed);   /* fresh toggles: mirror inline_flags  */
+        if (*query != '\0')          /* re-runs the search + highlights     */
+            gtk_entry_set_text(GTK_ENTRY(ed->search_entry), query);
+        g_free(query);
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -3037,7 +3125,9 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
 
     /* --- layout ----------------------------------------------------------*/
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_pack_start(GTK_BOX(vbox), build_toolbar(ed), FALSE, FALSE, 0);
+    ed->toolbar_box = vbox;
+    ed->toolbar     = build_toolbar(ed);
+    gtk_box_pack_start(GTK_BOX(vbox), ed->toolbar, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox),
                        gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
                        FALSE, FALSE, 0);

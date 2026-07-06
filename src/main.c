@@ -157,10 +157,14 @@ startup_choose_db(OnApp *app)
 
 /* startup_check_db_hash() — compare the stored MD5 hash against the current
  * DB file.  If they differ, show a warning dialog offering three choices.
- * Returns TRUE when the app should proceed, FALSE to quit.                  */
+ * Returns TRUE when the app should proceed, FALSE to quit.
+ *   verified — receives TRUE only when the database actually checked out
+ *              (hash matched, or PRAGMA integrity_check passed) — not
+ *              when the user proceeded past the warning unchecked.         */
 static gboolean
-startup_check_db_hash(OnApp *app)
+startup_check_db_hash(OnApp *app, gboolean *verified)
 {
+    *verified = FALSE;
     gchar *stored = on_app_config_get("db_hash");
     if (stored == NULL)
         return TRUE;    /* no prior hash — first run or feature just enabled  */
@@ -171,8 +175,10 @@ startup_check_db_hash(OnApp *app)
     g_free(current);
     g_free(stored);
 
-    if (!changed)
+    if (!changed) {
+        *verified = TRUE;
         return TRUE;    /* hash matches — proceed normally                    */
+    }
 
     /* Loop so a failed integrity check can re-present the warning dialog.   */
     for (;;) {
@@ -194,8 +200,10 @@ startup_check_db_hash(OnApp *app)
         if (resp == 1) {
             return TRUE;                        /* open as-is                */
         } else if (resp == 2) {
-            if (startup_integrity_check(app))
+            if (startup_integrity_check(app)) {
+                *verified = TRUE;
                 return TRUE;                    /* passed — proceed          */
+            }
             /* failed — loop back to the warning dialog                      */
         } else if (resp == 3) {
             return startup_choose_db(app);      /* TRUE=ok, FALSE=quit       */
@@ -237,12 +245,20 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     g_free(theme_dir);
 
     /* DB integrity check: warn if the file changed since last exit.        */
-    if (app->db_integrity_check && !startup_check_db_hash(app)) {
+    gboolean db_verified = FALSE;    /* did the startup check actually pass?*/
+    if (app->db_integrity_check &&
+        !startup_check_db_hash(app, &db_verified)) {
         g_application_quit(G_APPLICATION(app->gtk_app));
         return;
     }
 
     on_library_window_create(app);
+
+    /* The window opened with "DB at … loaded"; append the check's verdict
+     * when the startup verification actually ran and passed.               */
+    if (db_verified)
+        on_app_status(app, "DB at %s loaded, integrity check passed",
+                      app->db->path);
 
     /* Listen for "quicknote"/"note open" from later CLI invocations, then
      * run any action a CLI already queued because no instance was running.  */
@@ -395,6 +411,11 @@ main(int argc, char *argv[])
     gchar *flh = on_app_config_get("first_line_h1");
     app.first_line_h1 = g_strcmp0(flh, "1") == 0;
     g_free(flh);
+
+    /* Compact editor toolbar (off unless explicitly enabled).              */
+    gchar *cet = on_app_config_get("compact_editor_toolbar");
+    app.compact_editor_toolbar = g_strcmp0(cet, "1") == 0;
+    g_free(cet);
 
     /* DB integrity check is enabled unless explicitly disabled.            */
     gchar *dic = on_app_config_get("db_integrity_check");

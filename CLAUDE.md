@@ -31,7 +31,7 @@ sees the new flags.
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
 | `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
-| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid, DnD, sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook |
+| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid, DnD, sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
@@ -75,8 +75,11 @@ sees the new flags.
   `code_line_numbers` (`1|0`), `native_menubar` (`1|0`),
   `sidebar_counts` (`1|0`, default 0 — folder/tag counts in the
   sidebar), `first_line_h1` (`1|0`, default 0 — auto-style the first
-  line of a new note as H1), `image_viewer` (program path; unset =
-  system default),
+  line of a new note as H1), `compact_editor_toolbar` (`1|0`, default 0
+  — collapse the editor's H1/H2/¶ buttons into a "Styles" menu button
+  and the list buttons into a "Lists" one; applies live via
+  `on_editor_rebuild_toolbars_all`), `image_viewer` (program path;
+  unset = system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
   for the next one). The DB settings table holds ONLY the `in_use`
   instance lock (it must be in the DB — it coordinates instances across
