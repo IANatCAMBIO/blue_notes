@@ -43,7 +43,7 @@ sees the new flags.
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
 | `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
-| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid, DnD, sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
+| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid (list: Title/Path/Modified, all resizable + sortable; Path fed by `on_db_folder_path_map`), DnD (notes→folder incl. multi-select; single folder rows re-nest INTO / reorder BEFORE-AFTER / trash / drag-restore via `on_db_folder_move`+`on_db_folder_reorder`; folder.png/file.png drag icons), sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
@@ -97,7 +97,19 @@ sees the new flags.
   `on_editor_rebuild_toolbars_all`), `image_viewer` (program path;
   unset = system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
-  for the next one). The DB settings table is legacy-only: main.c
+  for the next one), `list_columns` (list-view column layout,
+  `key:vis` pairs in display order, default `path:1,title:1,modified:1`
+  — written on every header drag/toggle, applied at window
+  construction; right-click a column header for the show/hide menu),
+  `list_autofit` (`1|0`, default 1 — same header menu: Path/Modified always show
+  their FULL content, Title takes the ellipsis + expand and is the one
+  column that truncates.  Implemented by MEASURING content with a
+  PangoLayout after every refresh (`list_autofit_now`) and setting
+  FIXED widths — NOT with GTK_TREE_VIEW_COLUMN_AUTOSIZE, which is
+  unusable: columns cache resized/requested widths that override it
+  (never shrinking back), and ellipsizing renderers report a ~3-char
+  minimum so ellipsized columns collapse instead of fitting.  Manual
+  resize grips come back when it's off). The DB settings table is legacy-only: main.c
   migrates any old UI keys out of it and deletes the retired `in_use`
   lock key at startup; nothing writes to it anymore.
 - **Custom DB location** (shared-folder support) lives in the CONFIG
@@ -213,6 +225,30 @@ sees the new flags.
     edges). Linux emoji fonts fit their advance — the pass compiles to a
     no-op there. The only other platform-specific code is the
     HAVE_GTKOSX menubar integration; everything else is portable GTK3.
+13. **A custom GTK_TREE_MODEL_ROW drop handler must own the WHOLE dest
+    protocol.**  GtkTreeView's default `drag-motion` handler validates
+    row drops by requesting the drag DATA on every motion
+    (`set_status_pending` + `gtk_drag_get_data`), so
+    `"drag-data-received"` fires repeatedly MID-DRAG.  On quartz the
+    reply arrives before the release, so a received-handler that treats
+    every delivery as a drop runs with stale coordinates (0,0 → the top
+    sidebar row) and `gtk_drag_finish()`es the drag while the button is
+    still down — drops only land when an X11-style late reply slips
+    past the release.  Fix (see the sidebar in library_window.c):
+    connect `drag-motion` (compute + validate the target yourself,
+    `gtk_tree_view_set_drag_dest_row` + `gdk_drag_status`, return TRUE
+    to block the class closure), `drag-leave` (clear the indicator),
+    and `drag-drop` (request the data, return TRUE); then
+    `drag-data-received` fires exactly once, at drop time, with real
+    coordinates.  Costs the built-in drag auto-scroll/auto-expand.
+14. **`gtk_tree_view_expand_all` after every model rebuild re-expands
+    folders the user collapsed.**  refresh_sidebar snapshots the
+    expanded rows before the clear (keyed kind+id — paths shift when
+    folders move) and restores that state in its selection-restore walk;
+    only the first population expands everything.  Custom drag icons go
+    on with `g_signal_connect_after("drag-begin")` — the class handler
+    sets its own row-snapshot icon in the class closure, so a normal
+    connection gets overridden.
 
 ## Performance decisions
 
@@ -222,7 +258,9 @@ sees the new flags.
   autosave.
 - Sidebar counts come from two GROUP BY maps (`on_db_note_count_map` /
   `on_db_tag_count_map`), not per-row COUNTs — per-query latency hurts
-  on shared/network DBs.
+  on shared/network DBs.  The list view's Path column likewise reads
+  `on_db_folder_path_map` (all folders in one query, paths built in
+  memory), never per-note `on_db_folder_path`.
 - Editor saves use the LIGHT notify (`app->notify_note_saved` →
   refresh_notes only): editing a note can't change folder counts, so
   the sidebar isn't rebuilt per autosave/close. The full

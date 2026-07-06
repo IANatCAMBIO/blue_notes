@@ -270,6 +270,86 @@ on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name)
     return ok;
 }
 
+/* folder_parent_of() — COALESCE(parent_id,0) of folder `id`, or 0 when
+ * the row doesn't exist (the walk in on_db_folder_move just stops).         */
+static gint64
+folder_parent_of(OnDatabase *db, gint64 id)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT COALESCE(parent_id,0) FROM folders WHERE id=?");
+    if (stmt == NULL)
+        return 0;
+    sqlite3_bind_int64(stmt, 1, id);
+    gint64 parent = 0;                   /* parent id (0 = top level)       */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        parent = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return parent;
+}
+
+gboolean
+on_db_folder_move(OnDatabase *db, gint64 id, gint64 parent_id)
+{
+    if (id == 0 || parent_id == id)
+        return FALSE;
+
+    /* Cycle guard: walk up from the target parent — if the chain passes
+     * through the folder being moved, the move would detach a subtree
+     * into itself.  The depth cap only matters if the table already
+     * holds a corrupt cycle; it turns a hang into a refusal.                */
+    gint64 p = parent_id;                /* ancestor cursor                 */
+    for (gint depth = 0; p != 0; depth++) {
+        if (p == id || depth > 1000)
+            return FALSE;
+        p = folder_parent_of(db, p);
+    }
+
+    /* Re-parent, appending after the new parent's existing children
+     * (the moved folder is excluded from the MAX in case it is already
+     * there).  trashed=0 makes drag-out-of-Trash a restore-to-location,
+     * mirroring on_db_note_move.                                            */
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE folders SET parent_id=?, trashed=0, sort_order="
+        "  COALESCE((SELECT MAX(sort_order)+1 FROM folders "
+        "            WHERE parent_id IS ? AND id<>?), 0) "
+        "WHERE id=?");
+    if (stmt == NULL)
+        return FALSE;
+    bind_id_or_null(stmt, 1, parent_id);
+    bind_id_or_null(stmt, 2, parent_id);
+    sqlite3_bind_int64(stmt, 3, id);
+    sqlite3_bind_int64(stmt, 4, id);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+        g_warning("db: folder_move: %s", sqlite3_errmsg(db->handle));
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+gboolean
+on_db_folder_reorder(OnDatabase *db, const gint64 *folder_ids, gsize n)
+{
+    if (!exec_simple(db, "BEGIN"))
+        return FALSE;
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE folders SET sort_order=? WHERE id=?");
+    if (stmt == NULL) {
+        exec_simple(db, "ROLLBACK");
+        return FALSE;
+    }
+
+    gboolean ok = TRUE;                  /* set FALSE on first failure      */
+    for (gsize i = 0; i < n && ok; i++) {
+        sqlite3_bind_int(stmt, 1, (int)i);
+        sqlite3_bind_int64(stmt, 2, folder_ids[i]);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+    exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
+    return ok;
+}
+
 gboolean
 on_db_folder_delete(OnDatabase *db, gint64 id)
 {
@@ -1186,6 +1266,72 @@ on_db_setting_delete(OnDatabase *db, const gchar *key)
 /* =========================================================================
  * utilities
  * ========================================================================= */
+
+/* FolderRow — one folders row held in memory while building the path
+ * map: parent id + name.                                                    */
+typedef struct {
+    gint64  parent;
+    gchar  *name;
+} FolderRow;
+
+/* folder_row_free() — GDestroyNotify for FolderRow values.                  */
+static void
+folder_row_free(gpointer data)
+{
+    FolderRow *r = data;
+    g_free(r->name);
+    g_free(r);
+}
+
+GHashTable *
+on_db_folder_path_map(OnDatabase *db)
+{
+    GHashTable *map = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                            g_free, g_free);
+
+    /* Load every folder row once (trashed included), then build each
+     * path by walking parents in memory — no per-folder queries.            */
+    GHashTable *rows = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                             g_free, folder_row_free);
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT id, COALESCE(parent_id,0), name FROM folders");
+    if (stmt == NULL) {
+        g_hash_table_destroy(rows);
+        return map;
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        gint64 *key = g_new(gint64, 1);
+        *key = sqlite3_column_int64(stmt, 0);
+        FolderRow *r = g_new0(FolderRow, 1);
+        r->parent = sqlite3_column_int64(stmt, 1);
+        r->name   = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
+        g_hash_table_insert(rows, key, r);
+    }
+    sqlite3_finalize(stmt);
+
+    GHashTableIter it;               /* over the loaded rows                */
+    gpointer k, v;
+    g_hash_table_iter_init(&it, rows);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        FolderRow *r = v;            /* the folder itself                   */
+        GString *path = g_string_new(r->name);
+        gint64 cur   = r->parent;    /* ancestor cursor                     */
+        gint   depth = 0;            /* cap guards a corrupt cycle          */
+        while (cur != 0 && depth++ < 128) {
+            FolderRow *p = g_hash_table_lookup(rows, &cur);
+            if (p == NULL)
+                break;
+            g_string_prepend(path, "/");
+            g_string_prepend(path, p->name);
+            cur = p->parent;
+        }
+        gint64 *key = g_new(gint64, 1);
+        *key = *(gint64 *)k;
+        g_hash_table_insert(map, key, g_string_free(path, FALSE));
+    }
+    g_hash_table_destroy(rows);
+    return map;
+}
 
 gchar *
 on_db_folder_path(OnDatabase *db, gint64 folder_id)

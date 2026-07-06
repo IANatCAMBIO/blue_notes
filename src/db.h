@@ -118,6 +118,20 @@ gint64 on_db_folder_create(OnDatabase *db, gint64 parent_id, const gchar *name);
 /* Rename folder `id` to `name`. Returns TRUE on success.                    */
 gboolean on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name);
 
+/* Move folder `id` (with its whole subtree, implicitly) under
+ * `parent_id` (0 = top level), appending it after that parent's existing
+ * children.  Also clears the trashed flag, so dragging a folder out of
+ * the Trash restores it to the drop location.  Refuses cycles: moving a
+ * folder into itself or any of its descendants returns FALSE.               */
+gboolean on_db_folder_move(OnDatabase *db, gint64 id, gint64 parent_id);
+
+/* Persist an explicit ordering of folders within one parent.
+ *   folder_ids — ids in the desired order (sort_order = array index).
+ *   n          — number of ids.
+ * All updates run in one transaction. Returns TRUE on success.               */
+gboolean on_db_folder_reorder(OnDatabase *db, const gint64 *folder_ids,
+                              gsize n);
+
 /* PERMANENTLY delete folder `id`; all descendant folders and contained
  * notes are removed by ON DELETE CASCADE and orphaned tags are pruned.
  * The GUI trashes folders instead (on_db_folder_trash); this is the
@@ -344,5 +358,14 @@ gboolean on_db_setting_delete(OnDatabase *db, const gchar *key);
  * for 0). Used by the exporter to mirror the hierarchy on disk.
  * Returns a newly allocated string; g_free() it.                            */
 gchar *on_db_folder_path(OnDatabase *db, gint64 folder_id);
+
+/* All folder paths in ONE query: folder id (gint64*) → "Folder/Sub"
+ * string (same format as on_db_folder_path, no leading slash).  Trashed
+ * folders are included so Trash listings resolve too; the top level (0)
+ * has no entry — callers treat a miss as "".  Per-note path lookups in
+ * the library go through this map, never per-row on_db_folder_path —
+ * per-query latency hurts on shared/network DBs.
+ * Free with g_hash_table_destroy().                                         */
+GHashTable *on_db_folder_path_map(OnDatabase *db);
 
 #endif /* BLUE_DB_H */

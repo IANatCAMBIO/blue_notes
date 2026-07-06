@@ -19,7 +19,11 @@
  *                resulting order is persisted from the "row-deleted"
  *                signal.  Both views are also GTK_TREE_MODEL_ROW drag
  *                sources, and the sidebar accepts those drops to move a
- *                note into a folder.
+ *                note into a folder.  The sidebar is a drag source too:
+ *                a folder row drops INTO a folder (re-nest), BETWEEN
+ *                folders (reorder/re-nest beside the sibling), onto
+ *                Trash (delete gesture), or out of Trash (restore).
+ *                The sidebar's dest protocol is fully custom (quirk #13).
  * =========================================================================== */
 
 #include "library_window.h"
@@ -71,6 +75,7 @@ enum {
     NL_MODIFIED,                     /* gchar*: formatted updated_at        */
     NL_THUMB,                        /* cairo_surface_t*: grid thumbnail    */
     NL_UPDATED,                      /* gint64: raw updated_at (sort key)   */
+    NL_PATH,                         /* gchar*: "/Folder/Sub" location      */
     NL_N_COLS
 };
 
@@ -130,6 +135,9 @@ typedef struct {
     gint          sel_kind;
     gint64        sel_id;
     gchar        *sel_name;
+    gboolean      list_autofit;          /* list columns auto-size to their
+                                            contents on every refresh (ini
+                                            key "list_autofit")            */
     gint          populating;
     GHashTable   *thumb_cache;
     gint          shown_kind;
@@ -173,6 +181,7 @@ static void    refresh_sidebar(OnLibrary *lw);
 static void    refresh_notes(OnLibrary *lw);
 static void    status_path_update(OnLibrary *lw);
 static GArray *selected_note_ids(OnLibrary *lw);
+static void    list_autofit_now(OnLibrary *lw);
 static void    close_editors_for_ids(OnLibrary *lw, const gint64 *ids,
                                      gsize n);
 static void    add_menu_item(GtkWidget *menu, const gchar *label,
@@ -283,16 +292,74 @@ add_folder_rows(OnLibrary *lw, gint64 parent_id, GtkTreeIter *parent_iter,
     on_db_folder_list_free(folders);
 }
 
+/* sb_row_key() — hashable identity of a sidebar row for state that must
+ * survive a model rebuild (paths shift when folders move; kind+id don't). */
+static gint64
+sb_row_key(gint kind, gint64 id)
+{
+    return id * 16 + kind;
+}
+
+/* SbExpandCtx — working state for the expansion-capture walk below.        */
+typedef struct {
+    OnLibrary  *lw;
+    GHashTable *expanded;                /* set of sb_row_key()s            */
+} SbExpandCtx;
+
+/* sb_expand_capture() — gtk_tree_model_foreach() callback: record the
+ * key of every currently-expanded row.                                     */
+static gboolean
+sb_expand_capture(GtkTreeModel *model, GtkTreePath *path,
+                  GtkTreeIter *iter, gpointer data)
+{
+    SbExpandCtx *ctx = data;
+    if (gtk_tree_view_row_expanded(ctx->lw->sidebar, path)) {
+        gint   kind;                 /* row kind                            */
+        gint64 id;                   /* row id                              */
+        gtk_tree_model_get(model, iter, SB_KIND, &kind, SB_ID, &id, -1);
+        gint64 *key = g_new(gint64, 1);
+        *key = sb_row_key(kind, id);
+        g_hash_table_add(ctx->expanded, key);
+    }
+    return FALSE;
+}
+
+/* sb_reveal_path() — expand the ANCESTORS of `path` so the row itself is
+ * visible (never the row itself: a collapsed selected folder stays
+ * collapsed).                                                               */
+static void
+sb_reveal_path(GtkTreeView *view, GtkTreePath *path)
+{
+    GtkTreePath *parent = gtk_tree_path_copy(path);
+    if (gtk_tree_path_up(parent) && gtk_tree_path_get_depth(parent) > 0)
+        gtk_tree_view_expand_to_path(view, parent);
+    gtk_tree_path_free(parent);
+}
+
 /* ---------------------------------------------------------------------------
  * refresh_sidebar() — rebuild the whole sidebar model: the folder tree
  * under the fixed "Notes" root, then the "Tags" section.  Attempts to
- * restore the previous selection by (kind, id).
+ * restore the previous selection by (kind, id), and puts back which rows
+ * were expanded (only the very first population expands everything) —
+ * a drop used to re-expand every folder because every successful drag
+ * refreshes the sidebar.
  * ------------------------------------------------------------------------- */
 static void
 refresh_sidebar(OnLibrary *lw)
 {
     gint   want_kind = lw->sel_kind; /* selection to restore                */
     gint64 want_id   = lw->sel_id;
+
+    /* Capture the expansion state (keyed by kind+id, which survive the
+     * rebuild) before the clear wipes it.                                  */
+    SbExpandCtx ectx = {
+        lw, g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                  g_free, NULL) };
+    GtkTreeIter first;               /* is the model populated at all?      */
+    gboolean first_build = !gtk_tree_model_get_iter_first(
+        GTK_TREE_MODEL(lw->sidebar_store), &first);
+    gtk_tree_model_foreach(GTK_TREE_MODEL(lw->sidebar_store),
+                           sb_expand_capture, &ectx);
 
     /* Clearing the store zeroes the sidebar scrollbar; a sidebar rebuild
      * is never a navigation (counts changed, a folder was added, …), so
@@ -430,7 +497,10 @@ refresh_sidebar(OnLibrary *lw)
     g_hash_table_destroy(note_counts);
     g_hash_table_destroy(tag_counts);
 
-    gtk_tree_view_expand_all(lw->sidebar);
+    /* Only the very first population expands everything; every later
+     * rebuild restores the captured expansion state in the walk below.     */
+    if (first_build)
+        gtk_tree_view_expand_all(lw->sidebar);
 
     /* Restore the previous selection, falling back to "All Notes".  The
      * populating guard stays up through the restore: the select_iter
@@ -456,7 +526,15 @@ refresh_sidebar(OnLibrary *lw)
         gint64 id;                   /* row id                              */
         gtk_tree_model_get(GTK_TREE_MODEL(lw->sidebar_store), &iter,
                            SB_KIND, &kind, SB_ID, &id, -1);
-        if (kind == want_kind && id == want_id) {
+        GtkTreePath *row_path = gtk_tree_model_get_path(
+            GTK_TREE_MODEL(lw->sidebar_store), &iter);
+
+        /* Re-expand rows that were expanded before the rebuild.            */
+        gint64 ekey = sb_row_key(kind, id);
+        if (g_hash_table_contains(ectx.expanded, &ekey))
+            gtk_tree_view_expand_row(lw->sidebar, row_path, FALSE);
+
+        if (kind == want_kind && id == want_id && !restored) {
             /* The suppressed handler would have refreshed sel_name; do it
              * here so a renamed folder/tag keeps it current.               */
             gchar *raw = NULL;
@@ -464,10 +542,12 @@ refresh_sidebar(OnLibrary *lw)
                                SB_RAW, &raw, -1);
             g_free(lw->sel_name);
             lw->sel_name = raw;      /* ownership transferred               */
+            sb_reveal_path(lw->sidebar, row_path);
             gtk_tree_selection_select_iter(sel, &iter);
-            restored = TRUE;
-            break;
+            restored = TRUE;         /* no break: the walk must finish
+                                        restoring the expansion state       */
         }
+        gtk_tree_path_free(row_path);
         GtkTreeIter child;           /* first child, if any                 */
         if (gtk_tree_model_iter_children(GTK_TREE_MODEL(lw->sidebar_store),
                                          &child, &iter)) {
@@ -479,6 +559,7 @@ refresh_sidebar(OnLibrary *lw)
                                          &iter);
     }
     g_queue_clear_full(&queue, g_free);
+    g_hash_table_destroy(ectx.expanded);
 
     if (!restored) {
         /* The first row is the "All Notes" section — the state must match
@@ -695,6 +776,10 @@ refresh_notes(OnLibrary *lw)
     else                             /* root, folder, or trashed folder     */
         notes = on_db_note_list(lw->app->db, lw->sel_id);
 
+    /* Folder paths for the list view's Path column — ONE query for all
+     * folders, never per note (shared/network DBs).                        */
+    GHashTable *paths = on_db_folder_path_map(lw->app->db);
+
     for (GList *l = notes; l != NULL; l = l->next) {
         OnNoteMeta *m = l->data;     /* one note                            */
 
@@ -702,6 +787,12 @@ refresh_notes(OnLibrary *lw)
         GDateTime *dt = g_date_time_new_from_unix_local(m->updated_at);
         gchar *when = g_date_time_format(dt, "%b %e, %Y %H:%M");
         g_date_time_unref(dt);
+
+        /* "/Folder/Sub" location, "/" for the top level — the same
+         * format as the status bar's path label.                           */
+        const gchar *fpath = m->folder_id != 0
+            ? g_hash_table_lookup(paths, &m->folder_id) : NULL;
+        gchar *where = g_strdup_printf("/%s", fpath != NULL ? fpath : "");
 
         GtkTreeIter iter;
         gtk_list_store_append(lw->notes_store, &iter);
@@ -712,9 +803,12 @@ refresh_notes(OnLibrary *lw)
                            NL_THUMB,    want_thumbs ? get_note_thumb(lw, m)
                                                     : NULL,
                            NL_UPDATED,  m->updated_at,
+                           NL_PATH,     where,
                            -1);
+        g_free(where);
         g_free(when);
     }
+    g_hash_table_destroy(paths);
     on_db_note_list_free(notes);
     lw->populating--;
 
@@ -723,6 +817,7 @@ refresh_notes(OnLibrary *lw)
     if (keep_scroll && scroll_pos > 0)
         scroll_keep_queue(vadj, scroll_pos);
 
+    list_autofit_now(lw);            /* re-fit columns to the new content   */
     status_path_update(lw);
 }
 
@@ -862,15 +957,249 @@ on_note_grid_activated(GtkIconView *view, GtkTreePath *path,
 }
 
 /* ===========================================================================
- * drag & drop: note → folder
+ * drag & drop: note → folder, folder → folder
  * =========================================================================== */
 
 /* ---------------------------------------------------------------------------
- * on_sidebar_drag_received() — a notes row was dropped on the sidebar.
- * Resolve the drop position to a folder (or the "Notes" root) and move
- * the note there in the database.  The default GtkTreeView handler is
- * suppressed because it would try to splice the dragged row into the
- * *sidebar* model.
+ * folder_move_beside() — re-parent folder `folder_id` under `new_parent`
+ * and slot it directly before/after sibling `anchor_id` (the row the drop
+ * indicator pointed at).  The move appends at the end of the new parent;
+ * the reorder then writes the full sibling sequence with the moved folder
+ * re-inserted at the anchor.
+ * ------------------------------------------------------------------------- */
+static gboolean
+folder_move_beside(OnLibrary *lw, gint64 folder_id, gint64 new_parent,
+                   gint64 anchor_id, gboolean after)
+{
+    if (!on_db_folder_move(lw->app->db, folder_id, new_parent))
+        return FALSE;
+
+    GArray *ids = g_array_new(FALSE, FALSE, sizeof(gint64));
+    GList *sibs = on_db_folder_list(lw->app->db, new_parent);
+    for (GList *l = sibs; l != NULL; l = l->next) {
+        OnFolder *f = l->data;       /* one sibling                         */
+        if (f->id == folder_id)
+            continue;                /* re-inserted at the anchor below     */
+        if (f->id == anchor_id && !after)
+            g_array_append_val(ids, folder_id);
+        g_array_append_val(ids, f->id);
+        if (f->id == anchor_id && after)
+            g_array_append_val(ids, folder_id);
+    }
+    on_db_folder_list_free(sibs);
+
+    gboolean ok = on_db_folder_reorder(lw->app->db,
+                                       (const gint64 *)ids->data, ids->len);
+    g_array_free(ids, TRUE);
+    return ok;
+}
+
+/* ---------------------------------------------------------------------------
+ * sidebar_drop_target() — resolve and validate the drop target under the
+ * pointer for the drag in `context`.  Which rows are legal depends on the
+ * drag's SOURCE widget: from the sidebar itself only folder rows move
+ * (onto folders, the root, or the Trash, never onto themselves or into
+ * their own subtree — the dragged row is the sidebar's selected row,
+ * since a button press always moves the single-mode selection before the
+ * drag threshold is crossed); from the notes views any folder-ish row
+ * accepts, and the position is coerced to INTO (a note drops *into* a
+ * folder, never beside it).
+ * Returns TRUE and fills `path_out` (caller frees) + `pos_out` when the
+ * drop is legal.
+ * ------------------------------------------------------------------------- */
+static gboolean
+sidebar_drop_target(OnLibrary *lw, GdkDragContext *context, gint x, gint y,
+                    GtkTreePath **path_out, GtkTreeViewDropPosition *pos_out)
+{
+    *path_out = NULL;
+    *pos_out  = GTK_TREE_VIEW_DROP_BEFORE;
+
+    if (gtk_drag_dest_find_target(GTK_WIDGET(lw->sidebar), context,
+                                  NULL) == GDK_NONE)
+        return FALSE;                /* not a GTK_TREE_MODEL_ROW drag       */
+
+    GtkTreePath *path = NULL;        /* row under the pointer               */
+    GtkTreeViewDropPosition pos;     /* before/into/after                   */
+    if (!gtk_tree_view_get_dest_row_at_pos(lw->sidebar, x, y, &path, &pos))
+        return FALSE;
+
+    GtkTreeModel *model = GTK_TREE_MODEL(lw->sidebar_store);
+    GtkTreeIter iter;                /* target row                          */
+    gint kind = -1;                  /* its kind                            */
+    if (gtk_tree_model_get_iter(model, &iter, path))
+        gtk_tree_model_get(model, &iter, SB_KIND, &kind, -1);
+
+    gboolean ok = FALSE;             /* is this drop legal?                 */
+    if (gtk_drag_get_source_widget(context) == GTK_WIDGET(lw->sidebar)) {
+        /* --- folder drag ---------------------------------------------------*/
+        GtkTreeIter  src_iter;       /* dragged (= selected) row            */
+        GtkTreeModel *m;
+        gint  src_kind = -1;         /* its kind                            */
+        GtkTreePath *src_path = NULL;
+        if (gtk_tree_selection_get_selected(
+                gtk_tree_view_get_selection(lw->sidebar), &m, &src_iter)) {
+            gtk_tree_model_get(m, &src_iter, SB_KIND, &src_kind, -1);
+            src_path = gtk_tree_model_get_path(m, &src_iter);
+        }
+        if ((src_kind == SB_KIND_FOLDER ||
+             src_kind == SB_KIND_TRASH_FOLDER) &&
+            src_path != NULL &&
+            gtk_tree_path_compare(src_path, path) != 0 &&
+            !gtk_tree_path_is_descendant(path, src_path)) {
+            if (kind == SB_KIND_FOLDER) {
+                ok = TRUE;           /* nest INTO or reorder beside it      */
+            } else if (kind == SB_KIND_ROOT ||
+                       (kind == SB_KIND_TRASH &&
+                        src_kind == SB_KIND_FOLDER)) {
+                ok  = TRUE;
+                pos = GTK_TREE_VIEW_DROP_INTO_OR_BEFORE;
+            }
+        }
+        if (src_path != NULL)
+            gtk_tree_path_free(src_path);
+    } else {
+        /* --- note drag -----------------------------------------------------*/
+        if (kind == SB_KIND_FOLDER || kind == SB_KIND_ROOT ||
+            kind == SB_KIND_TRASH) {
+            ok  = TRUE;
+            pos = GTK_TREE_VIEW_DROP_INTO_OR_BEFORE;
+        }
+    }
+
+    if (ok) {
+        *path_out = path;
+        *pos_out  = pos;
+    } else {
+        gtk_tree_path_free(path);
+    }
+    return ok;
+}
+
+/* ---------------------------------------------------------------------------
+ * on_sidebar_drag_motion() — answer every motion with gdk_drag_status()
+ * and draw the drop indicator ourselves.  This REPLACES GtkTreeView's
+ * default handler (returning TRUE stops the class closure), which for
+ * GTK_TREE_MODEL_ROW targets requests the drag DATA on every motion to
+ * validate the drop — those requests fire "drag-data-received" mid-drag,
+ * and on quartz the reply arrives before the drop, so a received handler
+ * that treats every delivery as a drop runs with stale coordinates and
+ * gtk_drag_finish()es the drag while the button is still down (drops
+ * landing only when the X11-style late reply happens to slip past the
+ * release).  See quirk #13.
+ * ------------------------------------------------------------------------- */
+static gboolean
+on_sidebar_drag_motion(GtkWidget *widget, GdkDragContext *context,
+                       gint x, gint y, guint time, gpointer user_data)
+{
+    OnLibrary *lw = user_data;       /* owning library window               */
+    GtkTreePath *path = NULL;        /* legal target row (or NULL)          */
+    GtkTreeViewDropPosition pos;     /* indicator position                  */
+    gboolean ok = sidebar_drop_target(lw, context, x, y, &path, &pos);
+
+    gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(widget),
+                                    ok ? path : NULL, pos);
+    gdk_drag_status(context, ok ? GDK_ACTION_MOVE : 0, time);
+    if (path != NULL)
+        gtk_tree_path_free(path);
+    return TRUE;
+}
+
+/* on_sidebar_drag_leave() — clear the drop indicator (also fires right
+ * before every drop; the class handler additionally kills its timers).     */
+static void
+on_sidebar_drag_leave(GtkWidget *widget, GdkDragContext *context,
+                      guint time, gpointer user_data)
+{
+    (void)context; (void)time; (void)user_data;
+    gtk_tree_view_set_drag_dest_row(GTK_TREE_VIEW(widget), NULL,
+                                    GTK_TREE_VIEW_DROP_BEFORE);
+}
+
+/* ---------------------------------------------------------------------------
+ * on_sidebar_drag_drop() — the button was released on a legal target:
+ * request the row data (the actual move runs in drag-data-received, the
+ * only place the dragged row can be decoded).  Returning TRUE keeps the
+ * default handler out; FALSE (no legal target) cancels the drop cleanly.
+ * ------------------------------------------------------------------------- */
+static gboolean
+on_sidebar_drag_drop(GtkWidget *widget, GdkDragContext *context,
+                     gint x, gint y, guint time, gpointer user_data)
+{
+    OnLibrary *lw = user_data;       /* owning library window               */
+    GtkTreePath *path = NULL;        /* legal target row (or NULL)          */
+    GtkTreeViewDropPosition pos;     /* unused here                         */
+    gboolean ok = sidebar_drop_target(lw, context, x, y, &path, &pos);
+    if (path != NULL)
+        gtk_tree_path_free(path);
+    if (!ok)
+        return FALSE;
+    gtk_drag_get_data(widget, context,
+                      gdk_atom_intern_static_string("GTK_TREE_MODEL_ROW"),
+                      time);
+    return TRUE;
+}
+
+/* Logical pixel size of the custom drag-under-cursor icons.                 */
+#define DRAG_ICON_SIZE 32
+
+/* ---------------------------------------------------------------------------
+ * on_sidebar_drag_begin() — replace the drag-under-cursor icon of a
+ * folder drag with the folder glyph (non-folder rows keep the default
+ * row snapshot).  Connected AFTER the class handler, which would
+ * otherwise override our icon with its own.
+ * ------------------------------------------------------------------------- */
+static void
+on_sidebar_drag_begin(GtkWidget *widget, GdkDragContext *context,
+                      gpointer user_data)
+{
+    OnLibrary *lw = user_data;       /* owning library window               */
+
+    GtkTreeModel *m;                 /* the sidebar model                   */
+    GtkTreeIter iter;                /* dragged (= selected) row            */
+    gint kind = -1;                  /* its kind                            */
+    if (gtk_tree_selection_get_selected(
+            gtk_tree_view_get_selection(GTK_TREE_VIEW(widget)), &m, &iter))
+        gtk_tree_model_get(m, &iter, SB_KIND, &kind, -1);
+    if (kind != SB_KIND_FOLDER && kind != SB_KIND_TRASH_FOLDER)
+        return;
+
+    cairo_surface_t *icon =
+        on_app_icon_surface(lw->app, "folder", DRAG_ICON_SIZE);
+    if (icon != NULL) {
+        gtk_drag_set_icon_surface(context, icon);
+        cairo_surface_destroy(icon);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * on_notes_drag_begin() — drag-under-cursor icon for note drags (both
+ * views): the file glyph.  Connected AFTER the class handler, as above.
+ * ------------------------------------------------------------------------- */
+static void
+on_notes_drag_begin(GtkWidget *widget, GdkDragContext *context,
+                    gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    cairo_surface_t *icon =
+        on_app_icon_surface(lw->app, "file", DRAG_ICON_SIZE);
+    if (icon != NULL) {
+        gtk_drag_set_icon_surface(context, icon);
+        cairo_surface_destroy(icon);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * on_sidebar_drag_received() — a row was dropped on the sidebar: either a
+ * notes row (move the note — or the whole multi-selection — into the
+ * target folder, or trash it) or one of the sidebar's own folder rows
+ * (re-nest INTO a folder, reorder BEFORE/AFTER a sibling, trash, or
+ * restore-by-drag out of the Trash).  Fires exactly once per drop — only
+ * on_sidebar_drag_drop() requests the data (the default motion-time
+ * requests never happen, see on_sidebar_drag_motion), so x/y are the real
+ * drop coordinates.  The default GtkTreeView handler is suppressed
+ * because it would try to splice the dragged row into the *sidebar*
+ * model.
  * ------------------------------------------------------------------------- */
 static void
 on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
@@ -881,72 +1210,176 @@ on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
     OnLibrary *lw = user_data;       /* owning library window               */
     g_signal_stop_emission_by_name(widget, "drag-data-received");
 
-    gboolean success = FALSE;        /* whether a note was moved            */
+    gboolean success = FALSE;        /* whether anything moved              */
 
-    /* Decode the dragged row: it must come from the notes model.           */
+    /* Decode the dragged row.                                              */
     GtkTreeModel *src_model = NULL;  /* model the drag started in           */
     GtkTreePath  *src_path  = NULL;  /* dragged row's path                  */
-    if (gtk_tree_get_row_drag_data(seldata, &src_model, &src_path) &&
-        src_model == GTK_TREE_MODEL(lw->notes_store)) {
+    if (!gtk_tree_get_row_drag_data(seldata, &src_model, &src_path)) {
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
 
+    /* Resolve the drop target row (shared by both branches below).         */
+    GtkTreeModel *sb_model  = GTK_TREE_MODEL(lw->sidebar_store);
+    GtkTreePath  *dest_path = NULL;  /* row under the pointer               */
+    GtkTreeViewDropPosition pos = GTK_TREE_VIEW_DROP_BEFORE;
+    GtkTreeIter dest_iter;           /* target sidebar row                  */
+    gint   dest_kind = -1;           /* its kind (-1 = no target row)       */
+    gint64 dest_id   = 0;            /* its folder/tag id                   */
+    gchar *dest_raw  = NULL;         /* its bare name                       */
+    if (gtk_tree_view_get_dest_row_at_pos(GTK_TREE_VIEW(widget),
+                                          x, y, &dest_path, &pos) &&
+        gtk_tree_model_get_iter(sb_model, &dest_iter, dest_path))
+        gtk_tree_model_get(sb_model, &dest_iter,
+                           SB_KIND, &dest_kind, SB_ID, &dest_id,
+                           SB_RAW,  &dest_raw, -1);
+
+    if (src_model == GTK_TREE_MODEL(lw->notes_store) && dest_kind != -1) {
+        /* --- a note row from the notes pane -------------------------------*/
         GtkTreeIter src_iter;        /* dragged note row                    */
         gint64 note_id = 0;          /* dragged note id                     */
         if (gtk_tree_model_get_iter(src_model, &src_iter, src_path))
             gtk_tree_model_get(src_model, &src_iter, NL_ID, &note_id, -1);
 
-        /* Resolve the drop target row in the sidebar.                      */
-        GtkTreePath *dest_path = NULL;          /* row under the pointer    */
-        GtkTreeViewDropPosition pos;            /* before/into/after        */
         if (note_id != 0 &&
-            gtk_tree_view_get_dest_row_at_pos(GTK_TREE_VIEW(widget),
-                                              x, y, &dest_path, &pos)) {
-            GtkTreeIter dest_iter;   /* target sidebar row                  */
-            gint   kind;             /* its kind                            */
-            gint64 folder_id;        /* its folder id                       */
-            gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->sidebar_store),
-                                    &dest_iter, dest_path);
-            gtk_tree_model_get(GTK_TREE_MODEL(lw->sidebar_store),
-                               &dest_iter,
-                               SB_KIND, &kind, SB_ID, &folder_id, -1);
-            if (kind == SB_KIND_FOLDER || kind == SB_KIND_ROOT ||
-                kind == SB_KIND_TRASH) {
-                /* Multi-select support: when the dragged note is part of
-                 * the current selection, the whole selection moves.        */
-                GArray *ids = selected_note_ids(lw);
-                gboolean drag_in_selection = FALSE;
+            (dest_kind == SB_KIND_FOLDER || dest_kind == SB_KIND_ROOT ||
+             dest_kind == SB_KIND_TRASH)) {
+            /* Multi-select support: when the dragged note is part of
+             * the current selection, the whole selection moves.            */
+            GArray *ids = selected_note_ids(lw);
+            gboolean drag_in_selection = FALSE;
+            for (guint i = 0; i < ids->len; i++)
+                if (g_array_index(ids, gint64, i) == note_id)
+                    drag_in_selection = TRUE;
+            if (!drag_in_selection) {
+                g_array_set_size(ids, 0);
+                g_array_append_val(ids, note_id);
+            }
+            if (dest_kind == SB_KIND_TRASH) {
+                /* Dropping on Trash IS the delete gesture.                 */
+                close_editors_for_ids(lw, (const gint64 *)ids->data,
+                                      ids->len);
+                success = on_db_notes_trash(
+                    lw->app->db, (const gint64 *)ids->data, ids->len);
+                if (success)
+                    on_app_status(lw->app, "Moved %u note%s to Trash",
+                                  ids->len, ids->len == 1 ? "" : "s");
+            } else {
                 for (guint i = 0; i < ids->len; i++)
-                    if (g_array_index(ids, gint64, i) == note_id)
-                        drag_in_selection = TRUE;
-                if (!drag_in_selection) {
-                    g_array_set_size(ids, 0);
-                    g_array_append_val(ids, note_id);
-                }
-                if (kind == SB_KIND_TRASH) {
-                    /* Dropping on Trash IS the delete gesture.             */
-                    close_editors_for_ids(lw, (const gint64 *)ids->data,
-                                          ids->len);
-                    success = on_db_notes_trash(
-                        lw->app->db, (const gint64 *)ids->data, ids->len);
-                    if (success)
-                        on_app_status(lw->app, "Moved %u note%s to Trash",
-                                      ids->len, ids->len == 1 ? "" : "s");
-                } else {
-                    for (guint i = 0; i < ids->len; i++)
-                        success |= on_db_note_move(
-                            lw->app->db, g_array_index(ids, gint64, i),
-                            folder_id);
-                }
-                g_array_free(ids, TRUE);
-                if (success) {
-                    refresh_notes(lw);
-                    refresh_sidebar(lw);    /* folder counts changed        */
+                    success |= on_db_note_move(
+                        lw->app->db, g_array_index(ids, gint64, i),
+                        dest_id);
+                if (success)
+                    on_app_status(lw->app,
+                                  "Moved %u note%s to "
+                                  "\xe2\x80\x9c%s\xe2\x80\x9d",
+                                  ids->len, ids->len == 1 ? "" : "s",
+                                  dest_raw);
+            }
+            g_array_free(ids, TRUE);
+        }
+    } else if (src_model == sb_model && dest_kind != -1) {
+        /* --- one of the sidebar's own folder rows --------------------------*/
+        GtkTreeIter src_iter;        /* dragged sidebar row                 */
+        gint   src_kind  = -1;       /* its kind                            */
+        gint64 folder_id = 0;        /* its folder id                       */
+        gchar *fname     = NULL;     /* its bare name                       */
+        if (gtk_tree_model_get_iter(src_model, &src_iter, src_path))
+            gtk_tree_model_get(src_model, &src_iter,
+                               SB_KIND, &src_kind, SB_ID, &folder_id,
+                               SB_RAW,  &fname, -1);
+
+        /* Only real folders move (trashed ones too — that's drag-restore);
+         * a drop onto the row itself or into its own subtree is refused
+         * (on_db_folder_move re-checks against the database).              */
+        gboolean movable =
+            (src_kind == SB_KIND_FOLDER ||
+             src_kind == SB_KIND_TRASH_FOLDER) &&
+            folder_id != 0 &&
+            gtk_tree_path_compare(src_path, dest_path) != 0 &&
+            !gtk_tree_path_is_descendant(dest_path, src_path);
+
+        if (movable && dest_kind == SB_KIND_TRASH &&
+            src_kind == SB_KIND_FOLDER) {
+            /* Dropping on Trash IS the delete gesture.                     */
+            GArray *nids = on_db_folder_note_ids(lw->app->db, folder_id);
+            close_editors_for_ids(lw, (const gint64 *)nids->data,
+                                  nids->len);
+            g_array_free(nids, TRUE);
+            success = on_db_folder_trash(lw->app->db, folder_id);
+            if (success) {
+                on_app_status(lw->app,
+                              "Folder \xe2\x80\x9c%s\xe2\x80\x9d moved "
+                              "to Trash", fname);
+                if (lw->sel_kind == SB_KIND_FOLDER &&
+                    lw->sel_id == folder_id) {
+                    lw->sel_kind = SB_KIND_ROOT;
+                    lw->sel_id   = 0;
                 }
             }
-            gtk_tree_path_free(dest_path);
+        } else if (movable && (dest_kind == SB_KIND_FOLDER ||
+                               dest_kind == SB_KIND_ROOT)) {
+            /* INTO a folder (or anywhere on the root) re-nests, appended
+             * at the end; BEFORE/AFTER a folder row slots the dragged
+             * folder beside that sibling (re-nesting when the sibling
+             * lives under a different parent).                             */
+            gchar *where = NULL;     /* name for the status message         */
+            if (dest_kind == SB_KIND_ROOT ||
+                pos == GTK_TREE_VIEW_DROP_INTO_OR_BEFORE ||
+                pos == GTK_TREE_VIEW_DROP_INTO_OR_AFTER) {
+                gint64 new_parent =  /* root drops land at top level        */
+                    (dest_kind == SB_KIND_FOLDER) ? dest_id : 0;
+                success = on_db_folder_move(lw->app->db, folder_id,
+                                            new_parent);
+                where = g_strdup(dest_raw);
+            } else {
+                /* The dest folder's parent row is the new parent: the
+                 * "Notes" root maps to top level (0).                      */
+                GtkTreeIter par_iter;        /* dest's parent row           */
+                gint   par_kind = SB_KIND_ROOT;
+                gint64 par_id   = 0;
+                gchar *par_raw  = NULL;
+                if (gtk_tree_model_iter_parent(sb_model, &par_iter,
+                                               &dest_iter))
+                    gtk_tree_model_get(sb_model, &par_iter,
+                                       SB_KIND, &par_kind,
+                                       SB_ID,   &par_id,
+                                       SB_RAW,  &par_raw, -1);
+                gint64 new_parent =
+                    (par_kind == SB_KIND_FOLDER) ? par_id : 0;
+                success = folder_move_beside(
+                    lw, folder_id, new_parent, dest_id,
+                    pos == GTK_TREE_VIEW_DROP_AFTER);
+                where = par_raw ? par_raw : g_strdup("Notes");
+            }
+            if (success) {
+                on_app_status(lw->app,
+                              src_kind == SB_KIND_TRASH_FOLDER
+                                  ? "Folder \xe2\x80\x9c%s\xe2\x80\x9d "
+                                    "restored to \xe2\x80\x9c%s\xe2\x80\x9d"
+                                  : "Moved folder \xe2\x80\x9c%s\xe2\x80\x9d "
+                                    "to \xe2\x80\x9c%s\xe2\x80\x9d",
+                              fname, where);
+                /* A trashed folder dragged out re-enters the tree as a
+                 * normal folder; keep the selection on it.                 */
+                if (lw->sel_kind == SB_KIND_TRASH_FOLDER &&
+                    lw->sel_id == folder_id)
+                    lw->sel_kind = SB_KIND_FOLDER;
+            }
+            g_free(where);
         }
+        g_free(fname);
     }
-    if (src_path != NULL)
-        gtk_tree_path_free(src_path);
+
+    if (success) {
+        refresh_sidebar(lw);         /* tree shape and counts changed       */
+        refresh_notes(lw);
+    }
+    g_free(dest_raw);
+    if (dest_path != NULL)
+        gtk_tree_path_free(dest_path);
+    gtk_tree_path_free(src_path);
     gtk_drag_finish(context, success, FALSE, time);
 }
 
@@ -2275,6 +2708,326 @@ sort_by_title(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
     return result;
 }
 
+/* ===========================================================================
+ * list-view column layout (order + visibility)
+ *
+ * Headers drag to reorder (GtkTreeViewColumn reorderable) and right-click
+ * for a show/hide menu.  The layout persists in the ini as
+ * "list_columns=key:vis,key:vis,..." in display order; each column
+ * carries its stable key as object data ("on-colkey").
+ * =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * list_columns_persist() — write the list view's current column order and
+ * visibility to the ini.  A partial column list (the view tearing down
+ * removes columns one by one) is never persisted.
+ * ------------------------------------------------------------------------- */
+static void
+list_columns_persist(OnLibrary *lw)
+{
+    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
+    if (g_list_length(cols) != 3) {
+        g_list_free(cols);
+        return;
+    }
+    GString *s = g_string_new(NULL);
+    for (GList *l = cols; l != NULL; l = l->next) {
+        const gchar *key =           /* stable column identity              */
+            g_object_get_data(G_OBJECT(l->data), "on-colkey");
+        if (key == NULL)
+            continue;
+        if (s->len > 0)
+            g_string_append_c(s, ',');
+        g_string_append_printf(s, "%s:%d", key,
+            gtk_tree_view_column_get_visible(l->data) ? 1 : 0);
+    }
+    g_list_free(cols);
+    on_app_config_set("list_columns", s->str);
+    g_string_free(s, TRUE);
+}
+
+/* list_column_by_key() — the list-view column carrying `key`, or NULL.      */
+static GtkTreeViewColumn *
+list_column_by_key(OnLibrary *lw, const gchar *key)
+{
+    GtkTreeViewColumn *found = NULL;
+    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
+    for (GList *l = cols; l != NULL && found == NULL; l = l->next)
+        if (g_strcmp0(g_object_get_data(G_OBJECT(l->data), "on-colkey"),
+                      key) == 0)
+            found = l->data;
+    g_list_free(cols);
+    return found;
+}
+
+/* ---------------------------------------------------------------------------
+ * list_columns_apply() — put the saved column order and visibility back
+ * (default: Path, Title, Modified, all visible).  Unknown keys are
+ * skipped, missing ones keep their built order, and at least one column
+ * is forced visible (a hand-edited ini can't blank the view).
+ * ------------------------------------------------------------------------- */
+static void
+list_columns_apply(OnLibrary *lw)
+{
+    gchar *cfg = on_app_config_get("list_columns");
+    if (cfg == NULL || *cfg == '\0') {
+        g_free(cfg);
+        cfg = g_strdup("path:1,title:1,modified:1");
+    }
+
+    GtkTreeViewColumn *prev = NULL;  /* each entry moves after the last     */
+    gchar **entries = g_strsplit(cfg, ",", -1);
+    for (gsize i = 0; entries[i] != NULL; i++) {
+        gchar **kv = g_strsplit(entries[i], ":", 2);
+        GtkTreeViewColumn *c =
+            kv[0] != NULL ? list_column_by_key(lw, kv[0]) : NULL;
+        if (c != NULL) {
+            gtk_tree_view_move_column_after(lw->notes_list, c, prev);
+            gtk_tree_view_column_set_visible(
+                c, kv[1] == NULL || g_strcmp0(kv[1], "0") != 0);
+            prev = c;
+        }
+        g_strfreev(kv);
+    }
+    g_strfreev(entries);
+    g_free(cfg);
+
+    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
+    gboolean any_visible = FALSE;    /* is at least one column shown?       */
+    for (GList *l = cols; l != NULL; l = l->next)
+        any_visible |= gtk_tree_view_column_get_visible(l->data);
+    if (!any_visible && cols != NULL)
+        gtk_tree_view_column_set_visible(cols->data, TRUE);
+    g_list_free(cols);
+}
+
+/* on_notes_columns_changed() — a header drag reordered the columns:
+ * persist the new layout.  Fires per-column during teardown too, when
+ * the library state may already be gone — bail out then.                    */
+static void
+on_notes_columns_changed(GtkTreeView *view, gpointer user_data)
+{
+    if (gtk_widget_in_destruction(GTK_WIDGET(view)))
+        return;
+    list_columns_persist(user_data);
+}
+
+/* ---------------------------------------------------------------------------
+ * list_autofit_apply() — put every column into (or out of) autofit mode.
+ *
+ * Autofit does NOT use GTK_TREE_VIEW_COLUMN_AUTOSIZE: tree-view columns
+ * cache resized/requested widths that override it (they neither grow to
+ * long content nor shrink back for short content).  Instead every column
+ * goes FIXED, and list_autofit_now() MEASURES the content with a
+ * PangoLayout after each refresh and sets the exact widths — same
+ * technique as the sidebar width fit.
+ *
+ *   ON  — Path and Modified: no ellipsize, FIXED at their measured
+ *         content width (grips off — the next refresh would reclaim
+ *         them anyway).  Title takes the ellipsis + expand: it fills
+ *         the remaining space and is the one column that truncates.
+ *   OFF — back to the built modes: Title GROW_ONLY + expand, no
+ *         ellipsize; Path FIXED at its current width, ellipsized;
+ *         Modified GROW_ONLY; all user-resizable.
+ * ------------------------------------------------------------------------- */
+static void
+list_autofit_apply(OnLibrary *lw)
+{
+    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
+    for (GList *l = cols; l != NULL; l = l->next) {
+        GtkTreeViewColumn *c = l->data;  /* one column                      */
+        const gchar *key =               /* stable column identity          */
+            g_object_get_data(G_OBJECT(c), "on-colkey");
+        GtkCellRenderer *cell =          /* its text renderer               */
+            g_object_get_data(G_OBJECT(c), "on-cell");
+        gboolean title = g_strcmp0(key, "title") == 0;
+        gboolean path  = g_strcmp0(key, "path")  == 0;
+
+        if (lw->list_autofit) {
+            g_object_set(cell, "ellipsize",
+                         title ? PANGO_ELLIPSIZE_END : PANGO_ELLIPSIZE_NONE,
+                         NULL);
+            gtk_tree_view_column_set_resizable(c, FALSE);
+            gtk_tree_view_column_set_sizing(
+                c, GTK_TREE_VIEW_COLUMN_FIXED);
+            if (title)                   /* floor; expand fills the rest    */
+                gtk_tree_view_column_set_fixed_width(c, 100);
+            gtk_tree_view_column_set_expand(c, title);
+        } else {
+            g_object_set(cell, "ellipsize",
+                         path ? PANGO_ELLIPSIZE_END : PANGO_ELLIPSIZE_NONE,
+                         NULL);
+            if (path) {
+                gint w = gtk_tree_view_column_get_width(c);
+                gtk_tree_view_column_set_sizing(
+                    c, GTK_TREE_VIEW_COLUMN_FIXED);
+                gtk_tree_view_column_set_fixed_width(c, w > 0 ? w : 180);
+            } else {
+                gtk_tree_view_column_set_sizing(
+                    c, GTK_TREE_VIEW_COLUMN_GROW_ONLY);
+            }
+            gtk_tree_view_column_set_expand(c, title);
+            gtk_tree_view_column_set_resizable(c, TRUE);
+        }
+        gtk_tree_view_column_queue_resize(c);
+    }
+    g_list_free(cols);
+    list_autofit_now(lw);            /* size Path/Modified right away       */
+}
+
+/* ---------------------------------------------------------------------------
+ * list_autofit_now() — fit the Path and Modified columns to their widest
+ * content RIGHT NOW by measuring every row's string with a PangoLayout
+ * (the view's own font) and setting the fixed width to the maximum.
+ * Runs after every refresh_notes() while autofit is on, so the columns
+ * both grow for long paths and shrink back for short ones.  No-op when
+ * autofit is off.
+ * ------------------------------------------------------------------------- */
+static void
+list_autofit_now(OnLibrary *lw)
+{
+    if (!lw->list_autofit)
+        return;
+
+    /* Extra pixels beyond the raw text: the renderer's xpad (10 a side)
+     * plus tree-view cell chrome; headers get room for the sort arrow.    */
+    static const gint CELL_EXTRA   = 30;
+    static const gint HEADER_EXTRA = 40;
+
+    static const struct { const gchar *key; gint mcol; } FIT[] = {
+        { "path",     NL_PATH     },
+        { "modified", NL_MODIFIED },
+    };
+
+    PangoLayout *lay = gtk_widget_create_pango_layout(
+        GTK_WIDGET(lw->notes_list), NULL);
+    GtkTreeModel *model = GTK_TREE_MODEL(lw->notes_store);
+
+    for (gsize i = 0; i < G_N_ELEMENTS(FIT); i++) {
+        GtkTreeViewColumn *c = list_column_by_key(lw, FIT[i].key);
+        if (c == NULL || !gtk_tree_view_column_get_visible(c))
+            continue;
+
+        gint w = 0;                  /* width of the current string         */
+        pango_layout_set_text(lay, gtk_tree_view_column_get_title(c), -1);
+        pango_layout_get_pixel_size(lay, &w, NULL);
+        gint max_w = w + HEADER_EXTRA;   /* running maximum                 */
+
+        GtkTreeIter iter;            /* row cursor                          */
+        gboolean valid = gtk_tree_model_get_iter_first(model, &iter);
+        while (valid) {
+            gchar *s = NULL;         /* this row's cell text                */
+            gtk_tree_model_get(model, &iter, FIT[i].mcol, &s, -1);
+            pango_layout_set_text(lay, s != NULL ? s : "", -1);
+            pango_layout_get_pixel_size(lay, &w, NULL);
+            g_free(s);
+            max_w = MAX(max_w, w + CELL_EXTRA);
+            valid = gtk_tree_model_iter_next(model, &iter);
+        }
+        gtk_tree_view_column_set_fixed_width(c, max_w);
+    }
+    g_object_unref(lay);
+}
+
+/* on_autofit_toggled() — the "Autofit Column Widths" check item flipped:
+ * remember, persist and apply.                                              */
+static void
+on_autofit_toggled(GtkCheckMenuItem *item, gpointer user_data)
+{
+    OnLibrary *lw = user_data;       /* owning library window               */
+    lw->list_autofit = gtk_check_menu_item_get_active(item);
+    on_app_config_set("list_autofit", lw->list_autofit ? "1" : "0");
+    list_autofit_apply(lw);
+}
+
+/* on_column_toggled() — a check item in the header menu flipped:
+ * show/hide that column and persist.                                        */
+static void
+on_column_toggled(GtkCheckMenuItem *item, gpointer user_data)
+{
+    OnLibrary *lw = user_data;       /* owning library window               */
+    GtkTreeViewColumn *c = g_object_get_data(G_OBJECT(item), "on-column");
+    gtk_tree_view_column_set_visible(
+        c, gtk_check_menu_item_get_active(item));
+    list_columns_persist(lw);
+    list_autofit_now(lw);            /* a re-shown column needs its width   */
+}
+
+/* ---------------------------------------------------------------------------
+ * on_column_header_press() — right click on a list-view column header:
+ * a menu of check items showing/hiding each column.  The only remaining
+ * visible column's item is disabled so the view can't go empty.
+ * ------------------------------------------------------------------------- */
+static gboolean
+on_column_header_press(GtkWidget *button, GdkEventButton *event,
+                       gpointer user_data)
+{
+    (void)button;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    if (event->button != GDK_BUTTON_SECONDARY)
+        return FALSE;
+
+    GtkWidget *menu = gtk_menu_new();
+    gtk_menu_attach_to_widget(GTK_MENU(menu), lw->window, NULL);
+    g_signal_connect(menu, "selection-done",
+                     G_CALLBACK(gtk_widget_destroy), NULL);
+
+    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
+    gint n_visible = 0;              /* how many columns are shown          */
+    for (GList *l = cols; l != NULL; l = l->next)
+        if (gtk_tree_view_column_get_visible(l->data))
+            n_visible++;
+
+    for (GList *l = cols; l != NULL; l = l->next) {
+        GtkTreeViewColumn *c = l->data;  /* one column                      */
+        gboolean visible = gtk_tree_view_column_get_visible(c);
+        GtkWidget *item = gtk_check_menu_item_new_with_label(
+            gtk_tree_view_column_get_title(c));
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), visible);
+        if (visible && n_visible == 1)
+            gtk_widget_set_sensitive(item, FALSE);
+        g_object_set_data(G_OBJECT(item), "on-column", c);
+        g_signal_connect(item, "toggled",
+                         G_CALLBACK(on_column_toggled), lw);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    }
+    g_list_free(cols);
+
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu),
+                          gtk_separator_menu_item_new());
+    GtkWidget *fit = gtk_check_menu_item_new_with_label(
+        "Autofit Column Widths");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(fit),
+                                   lw->list_autofit);
+    g_signal_connect(fit, "toggled",
+                     G_CALLBACK(on_autofit_toggled), lw);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), fit);
+
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+    return TRUE;
+}
+
+/* ---------------------------------------------------------------------------
+ * sort_by_path() — case-insensitive alphabetical sort for the Path
+ * header; equal paths fall back to the title so folders group cleanly.
+ * ------------------------------------------------------------------------- */
+static gint
+sort_by_path(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
+             gpointer user_data)
+{
+    (void)user_data;
+    gchar *pa, *pb;                  /* the two paths                       */
+    gtk_tree_model_get(model, a, NL_PATH, &pa, -1);
+    gtk_tree_model_get(model, b, NL_PATH, &pb, -1);
+    gchar *ca = g_utf8_casefold(pa != NULL ? pa : "", -1);
+    gchar *cb = g_utf8_casefold(pb != NULL ? pb : "", -1);
+    gint result = g_strcmp0(ca, cb);
+    g_free(ca); g_free(cb);
+    g_free(pa); g_free(pb);
+    return result != 0 ? result : sort_by_title(model, a, b, NULL);
+}
+
 /* ---------------------------------------------------------------------------
  * sort_by_updated() — sort for the Modified header.  Deliberately
  * inverted so the FIRST click on the header shows the most recently
@@ -2714,7 +3467,8 @@ on_library_window_create(OnApp *app)
         G_TYPE_STRING,                   /* NL_TITLE                       */
         G_TYPE_STRING,                   /* NL_MODIFIED                    */
         CAIRO_GOBJECT_TYPE_SURFACE,      /* NL_THUMB                       */
-        G_TYPE_INT64);                   /* NL_UPDATED                     */
+        G_TYPE_INT64,                    /* NL_UPDATED                     */
+        G_TYPE_STRING);                  /* NL_PATH                        */
     g_signal_connect(lw->notes_store, "row-deleted",
                      G_CALLBACK(on_notes_row_deleted), lw);
 
@@ -2768,11 +3522,26 @@ on_library_window_create(OnApp *app)
     g_signal_connect(sb_sel, "changed",
                      G_CALLBACK(on_sidebar_selection_changed), lw);
 
-    /* Accept dragged note rows to move notes between folders.              */
+    /* Accept dragged note rows to move notes between folders, and let
+     * folder rows be dragged to re-nest/reorder them.  The dest protocol
+     * is fully custom (motion answers the status itself; only the drop
+     * requests the row data) — see quirk #13.                              */
     gtk_tree_view_enable_model_drag_dest(lw->sidebar, &ROW_TARGET, 1,
                                          GDK_ACTION_MOVE);
+    gtk_tree_view_enable_model_drag_source(lw->sidebar, GDK_BUTTON1_MASK,
+                                           &ROW_TARGET, 1,
+                                           GDK_ACTION_MOVE);
+    g_signal_connect(lw->sidebar, "drag-motion",
+                     G_CALLBACK(on_sidebar_drag_motion), lw);
+    g_signal_connect(lw->sidebar, "drag-leave",
+                     G_CALLBACK(on_sidebar_drag_leave), NULL);
+    g_signal_connect(lw->sidebar, "drag-drop",
+                     G_CALLBACK(on_sidebar_drag_drop), lw);
     g_signal_connect(lw->sidebar, "drag-data-received",
                      G_CALLBACK(on_sidebar_drag_received), lw);
+    /* AFTER: the class handler sets a row-snapshot icon; ours overrides.   */
+    g_signal_connect_after(lw->sidebar, "drag-begin",
+                           G_CALLBACK(on_sidebar_drag_begin), lw);
     g_signal_connect(lw->sidebar, "button-press-event",
                      G_CALLBACK(on_sidebar_button_press), lw);
 
@@ -2805,7 +3574,27 @@ on_library_window_create(OnApp *app)
                                                      NULL);
         gtk_tree_view_column_set_cell_data_func(c1, r1, notes_row_bg_func,
                                                 NULL, NULL);
+        gtk_tree_view_column_set_resizable(c1, TRUE);
         gtk_tree_view_append_column(lw->notes_list, c1);
+
+        /* Path column: the note's folder location ("/Work/Projects").
+         * Fixed width + ellipsize so deep trees can't blow the layout
+         * out; the divider is user-draggable like the others.             */
+        GtkCellRenderer *rp = gtk_cell_renderer_text_new();
+        g_object_set(rp,
+                     "ellipsize", PANGO_ELLIPSIZE_END,
+                     "xpad",      10,
+                     NULL);
+        GtkTreeViewColumn *cp =
+            gtk_tree_view_column_new_with_attributes("Path", rp,
+                                                     "text", NL_PATH,
+                                                     NULL);
+        gtk_tree_view_column_set_cell_data_func(cp, rp, notes_row_bg_func,
+                                                NULL, NULL);
+        gtk_tree_view_column_set_sizing(cp, GTK_TREE_VIEW_COLUMN_FIXED);
+        gtk_tree_view_column_set_fixed_width(cp, 180);
+        gtk_tree_view_column_set_resizable(cp, TRUE);
+        gtk_tree_view_append_column(lw->notes_list, cp);
 
         GtkCellRenderer *r2 = gtk_cell_renderer_text_new();
         /* Horizontal padding so the timestamps don't hug the column
@@ -2817,6 +3606,7 @@ on_library_window_create(OnApp *app)
                                                      NULL);
         gtk_tree_view_column_set_cell_data_func(c2, r2, notes_row_bg_func,
                                                 NULL, NULL);
+        gtk_tree_view_column_set_resizable(c2, TRUE);
         gtk_tree_view_append_column(lw->notes_list, c2);
         gtk_tree_view_column_set_expand(c1, TRUE);
 
@@ -2828,9 +3618,45 @@ on_library_window_create(OnApp *app)
         gtk_tree_sortable_set_sort_func(
             GTK_TREE_SORTABLE(lw->notes_store), NL_UPDATED,
             sort_by_updated, NULL, NULL);
+        gtk_tree_sortable_set_sort_func(
+            GTK_TREE_SORTABLE(lw->notes_store), NL_PATH,
+            sort_by_path, NULL, NULL);
         gtk_tree_view_column_set_sort_column_id(c1, NL_TITLE);
+        gtk_tree_view_column_set_sort_column_id(cp, NL_PATH);
         gtk_tree_view_column_set_sort_column_id(c2, NL_UPDATED);
+
+        /* Column layout management: drag a header to reorder, right-click
+         * one for the show/hide menu; the layout persists in the ini
+         * (applied below once all columns exist).  Each column carries
+         * its renderer so autofit can move the ellipsis around.           */
+        struct { GtkTreeViewColumn *col; GtkCellRenderer *cell;
+                 const gchar *key; } COLS[] = {
+            { c1, r1, "title" }, { cp, rp, "path" }, { c2, r2, "modified" },
+        };
+        for (gsize i = 0; i < G_N_ELEMENTS(COLS); i++) {
+            g_object_set_data(G_OBJECT(COLS[i].col), "on-colkey",
+                              (gpointer)COLS[i].key);
+            g_object_set_data(G_OBJECT(COLS[i].col), "on-cell",
+                              COLS[i].cell);
+            gtk_tree_view_column_set_reorderable(COLS[i].col, TRUE);
+            g_signal_connect(gtk_tree_view_column_get_button(COLS[i].col),
+                             "button-press-event",
+                             G_CALLBACK(on_column_header_press), lw);
+        }
     }
+    list_columns_apply(lw);          /* saved order + visibility            */
+    {
+        /* Autofit is the default; only an explicit "0" turns it off.       */
+        gchar *v = on_app_config_get("list_autofit");
+        lw->list_autofit = g_strcmp0(v, "0") != 0;
+        g_free(v);
+        if (lw->list_autofit)
+            list_autofit_apply(lw);
+    }
+    /* Connected only now, so applying the saved layout doesn't re-persist
+     * it; from here on every header drag writes the ini.                   */
+    g_signal_connect(lw->notes_list, "columns-changed",
+                     G_CALLBACK(on_notes_columns_changed), lw);
     gtk_tree_selection_set_mode(
         gtk_tree_view_get_selection(lw->notes_list),
         GTK_SELECTION_MULTIPLE);
@@ -2838,6 +3664,9 @@ on_library_window_create(OnApp *app)
     /* Built-in drag reordering; the new order is persisted from the
      * model's row-deleted signal.                                          */
     gtk_tree_view_set_reorderable(lw->notes_list, TRUE);
+    /* AFTER: the class handler sets a row-snapshot icon; ours overrides.   */
+    g_signal_connect_after(lw->notes_list, "drag-begin",
+                           G_CALLBACK(on_notes_drag_begin), lw);
     g_signal_connect(lw->notes_list, "row-activated",
                      G_CALLBACK(on_note_list_activated), lw);
     g_signal_connect(lw->notes_list, "button-press-event",
@@ -2884,6 +3713,8 @@ on_library_window_create(OnApp *app)
                                            GDK_BUTTON1_MASK,
                                            &ROW_TARGET, 1,
                                            GDK_ACTION_MOVE);
+    g_signal_connect_after(lw->notes_grid, "drag-begin",
+                           G_CALLBACK(on_notes_drag_begin), lw);
     g_signal_connect(lw->notes_grid, "item-activated",
                      G_CALLBACK(on_note_grid_activated), lw);
     g_signal_connect(lw->notes_grid, "button-press-event",

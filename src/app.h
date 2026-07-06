@@ -140,6 +140,19 @@ GtkWidget *on_app_icon_image_sized(OnApp *app, const gchar *name,
                                    gint size);
 
 /* ---------------------------------------------------------------------------
+ * on_app_icon_surface() — the raw HiDPI-scaled cairo surface behind
+ * on_app_icon_image_sized(), for uses that need a surface rather than a
+ * widget (e.g. gtk_drag_set_icon_surface).  Same lookup and scaling.
+ *   app  — the application context.
+ *   name — icon file basename without extension (e.g. "folder").
+ *   size — logical pixel size to render at.
+ * Returns a new surface (caller cairo_surface_destroy's it), or NULL if
+ * no loadable file exists.
+ * ------------------------------------------------------------------------- */
+cairo_surface_t *on_app_icon_surface(OnApp *app, const gchar *name,
+                                     gint size);
+
+/* ---------------------------------------------------------------------------
  * on_app_tool_item_new() — create a toolbar button that honors the
  * app-wide toolbar style.
  *   app             — the application context.

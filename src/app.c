@@ -59,8 +59,8 @@ on_app_init_icons_dir(OnApp *app, const gchar *argv0)
     g_free(exe_dir);
 }
 
-GtkWidget *
-on_app_icon_image_sized(OnApp *app, const gchar *name, gint size)
+cairo_surface_t *
+on_app_icon_surface(OnApp *app, const gchar *name, gint size)
 {
     static const gchar *EXTS[] = { "svg", "png" };
 
@@ -91,16 +91,25 @@ on_app_icon_image_sized(OnApp *app, const gchar *name, gint size)
             if (pix != NULL) {
                 cairo_surface_t *surface =
                     gdk_cairo_surface_create_from_pixbuf(pix, sf, NULL);
-                GtkWidget *image = gtk_image_new_from_surface(surface);
-                cairo_surface_destroy(surface);
                 g_object_unref(pix);
                 g_free(path);
-                return image;
+                return surface;
             }
         }
         g_free(path);
     }
     return NULL;
+}
+
+GtkWidget *
+on_app_icon_image_sized(OnApp *app, const gchar *name, gint size)
+{
+    cairo_surface_t *surface = on_app_icon_surface(app, name, size);
+    if (surface == NULL)
+        return NULL;
+    GtkWidget *image = gtk_image_new_from_surface(surface);
+    cairo_surface_destroy(surface);
+    return image;
 }
 
 /* on_app_icon_image() — toolbar-default (24 px) icon variant.               */
