@@ -2148,6 +2148,54 @@ on_sidebar_search_here(GtkWidget *widget, gpointer user_data)
     on_search_window_open(lw->app, TRUE);
 }
 
+/* folder_name_cmp() — GCompareFunc: case-insensitive alphabetical order
+ * of two OnFolder*s.                                                        */
+static gint
+folder_name_cmp(gconstpointer a, gconstpointer b)
+{
+    const OnFolder *fa = a, *fb = b;
+    gchar *ca = g_utf8_casefold(fa->name != NULL ? fa->name : "", -1);
+    gchar *cb = g_utf8_casefold(fb->name != NULL ? fb->name : "", -1);
+    gint result = g_strcmp0(ca, cb);
+    g_free(ca);
+    g_free(cb);
+    return result;
+}
+
+/* ---------------------------------------------------------------------------
+ * on_sort_subfolders() — folder context menu: order the selected
+ * folder's (or the root's) DIRECT children alphabetically and persist
+ * that as their sort_order.  One level only — each folder's own order
+ * stays whatever the user made it.
+ * ------------------------------------------------------------------------- */
+static void
+on_sort_subfolders(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    if (lw->sel_kind != SB_KIND_FOLDER && lw->sel_kind != SB_KIND_ROOT)
+        return;
+    gint64 parent =                  /* whose children get sorted           */
+        (lw->sel_kind == SB_KIND_FOLDER) ? lw->sel_id : 0;
+
+    GList *kids = on_db_folder_list(lw->app->db, parent);
+    kids = g_list_sort(kids, folder_name_cmp);
+    GArray *ids = g_array_new(FALSE, FALSE, sizeof(gint64));
+    for (GList *l = kids; l != NULL; l = l->next)
+        g_array_append_val(ids, ((OnFolder *)l->data)->id);
+    on_db_folder_list_free(kids);
+
+    if (ids->len > 1 &&
+        on_db_folder_reorder(lw->app->db, (const gint64 *)ids->data,
+                             ids->len)) {
+        on_app_status(lw->app, "Sorted %u subfolders alphabetically",
+                      ids->len);
+        refresh_sidebar(lw);
+        refresh_notes(lw);
+    }
+    g_array_free(ids, TRUE);
+}
+
 /* ---------------------------------------------------------------------------
  * on_sidebar_button_press() — right click in the folder/tag tree: select
  * the row under the pointer and show a context menu mirroring the sidebar
@@ -2213,6 +2261,8 @@ on_sidebar_button_press(GtkWidget *widget, GdkEventButton *event,
             add_menu_item(menu, "Move to _Trash",
                           G_CALLBACK(on_delete_folder), lw);
         }
+        add_menu_item(menu, "Sort Subfolders _Alphabetically",
+                      G_CALLBACK(on_sort_subfolders), lw);
         gtk_menu_shell_append(GTK_MENU_SHELL(menu),
                               gtk_separator_menu_item_new());
     }
@@ -3797,6 +3847,15 @@ on_library_window_create(OnApp *app)
         gtk_tree_view_column_set_sort_column_id(c1, NL_TITLE);
         gtk_tree_view_column_set_sort_column_id(cp, NL_PATH);
         gtk_tree_view_column_set_sort_column_id(c2, NL_UPDATED);
+
+        /* Default sort: Modified with the most recent on top
+         * (sort_by_updated is deliberately inverted, so ASCENDING =
+         * newest first).  While any sort is active the list store
+         * refuses in-list row drops, so manual drag-reordering of notes
+         * is off in this mode — moves to folders are unaffected.          */
+        gtk_tree_sortable_set_sort_column_id(
+            GTK_TREE_SORTABLE(lw->notes_store), NL_UPDATED,
+            GTK_SORT_ASCENDING);
 
         /* Column layout management: drag a header to reorder, right-click
          * one for the show/hide menu; the layout persists in the ini
