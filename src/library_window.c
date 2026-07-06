@@ -3659,6 +3659,10 @@ on_library_window_create(OnApp *app)
     lw->sidebar = GTK_TREE_VIEW(
         gtk_tree_view_new_with_model(GTK_TREE_MODEL(lw->sidebar_store)));
     gtk_tree_view_set_headers_visible(lw->sidebar, FALSE);
+    /* No GTK type-ahead popup: set_model auto-picks the first column
+     * transformable to string as the search column — here the int id,
+     * so typing raised a search box that matched nothing.               */
+    gtk_tree_view_set_enable_search(lw->sidebar, FALSE);
     {
         /* Ellipsizing names keeps the pane's MINIMUM width small: without
          * it the widest row dictates the minimum and the divider can't be
@@ -3763,6 +3767,8 @@ on_library_window_create(OnApp *app)
     /* --- notes list view ---------------------------------------------------*/
     lw->notes_list = GTK_TREE_VIEW(
         gtk_tree_view_new_with_model(GTK_TREE_MODEL(lw->notes_store)));
+    /* No GTK type-ahead popup (auto-picked search column, see quirk 16).  */
+    gtk_tree_view_set_enable_search(lw->notes_list, FALSE);
 
     /* Same drop-indicator styling as the sidebar: a 2px line in the
      * selection blue for the in-list reorder drag.  Notes are a flat

@@ -105,58 +105,76 @@ startup_integrity_check(OnApp *app)
     return ok;
 }
 
-/* startup_choose_db() — let the user pick a different database file at
- * launch time and switch app->db onto it.  Returns TRUE on success.         */
+/* startup_first_run() — no notes.db exists at the expected location: ask
+ * whether to open an existing file or create a new one there, instead of
+ * silently creating an empty database (a user pointing at a shared folder
+ * usually means to OPEN a file that is already there).
+ *   expected — the path where the database was looked for (dialog text).
+ *   db_dir   — in/out: the configured db directory; replaced (and
+ *              persisted to the ini) when an existing file is opened.
+ *   db_path  — in/out: the path handed to on_db_open(); replaced when an
+ *              existing file is opened.
+ * Returns TRUE to proceed with on_db_open(*db_path), FALSE to quit.        */
 static gboolean
-startup_choose_db(OnApp *app)
+startup_first_run(const gchar *expected, gchar **db_dir, gchar **db_path)
 {
-    GtkWidget *chooser = gtk_file_chooser_dialog_new(
-        "Choose Database File", NULL,
-        GTK_FILE_CHOOSER_ACTION_OPEN,
-        "_Cancel", GTK_RESPONSE_CANCEL,
-        "_Open",   GTK_RESPONSE_ACCEPT,
-        NULL);
-    gtk_window_set_title(GTK_WINDOW(chooser),
-                         "Blue Notes - Choose Database");
-    GtkFileFilter *ff = gtk_file_filter_new();
-    gtk_file_filter_add_pattern(ff, "*.db");
-    gtk_file_filter_set_name(ff, "SQLite Database (*.db)");
-    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), ff);
+    /* Loop so cancelling the file chooser returns to the choice dialog.    */
+    for (;;) {
+        GtkWidget *dlg = gtk_message_dialog_new(
+            NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+            "No notes database was found at\n%s",
+            expected);
+        gtk_window_set_title(GTK_WINDOW(dlg), "Blue Notes - Welcome");
+        gtk_dialog_add_buttons(GTK_DIALOG(dlg),
+            "_Open a notes.db File",  1,
+            "Create a _New notes.db", 2,
+            NULL);
+        gint resp = gtk_dialog_run(GTK_DIALOG(dlg));
+        gtk_widget_destroy(dlg);
 
-    gchar *file_path = NULL;
-    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT)
-        file_path = gtk_file_chooser_get_filename(
-            GTK_FILE_CHOOSER(chooser));
-    gtk_widget_destroy(chooser);
+        if (resp == 2) {
+            /* A stale hash (ini kept, DB file gone) would flag the fresh
+             * database as "changed" in on_activate — clear it.             */
+            on_app_config_set("db_hash", NULL);
+            return TRUE;             /* on_db_open() creates it             */
+        }
+        if (resp != 1)
+            return FALSE;            /* dialog closed — quit                */
 
-    if (file_path == NULL)
-        return FALSE;               /* user cancelled                        */
+        GtkWidget *chooser = gtk_file_chooser_dialog_new(
+            "Open Notes Database", NULL,
+            GTK_FILE_CHOOSER_ACTION_OPEN,
+            "_Cancel", GTK_RESPONSE_CANCEL,
+            "_Open",   GTK_RESPONSE_ACCEPT,
+            NULL);
+        gtk_window_set_title(GTK_WINDOW(chooser),
+                             "Blue Notes - Open Database");
+        /* The app's model is a directory + the fixed name notes.db (the
+         * ini stores db_dir only), so only notes.db files are openable.    */
+        GtkFileFilter *ff = gtk_file_filter_new();
+        gtk_file_filter_add_pattern(ff, "notes.db");
+        gtk_file_filter_set_name(ff, "Notes Database (notes.db)");
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), ff);
 
-    on_db_close(app->db);
-    app->db = on_db_open(file_path);
-    if (app->db == NULL) {
-        GtkWidget *err = gtk_message_dialog_new(
-            NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            "Could not open the selected database:\n%s", file_path);
-        gtk_window_set_title(GTK_WINDOW(err), "Blue Notes - Database Error");
-        gtk_dialog_run(GTK_DIALOG(err));
-        gtk_widget_destroy(err);
-        g_free(file_path);
-        return FALSE;
+        gchar *file_path = NULL;     /* the chosen database file            */
+        if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT)
+            file_path = gtk_file_chooser_get_filename(
+                GTK_FILE_CHOOSER(chooser));
+        gtk_widget_destroy(chooser);
+        if (file_path == NULL)
+            continue;                /* cancelled — back to the choice      */
+
+        gchar *dir = g_path_get_dirname(file_path);
+        on_app_config_set("db_dir",  dir);
+        on_app_config_set("db_hash", NULL);   /* stale for this file        */
+        g_free(*db_dir);   *db_dir  = dir;
+        g_free(*db_path);  *db_path = file_path;
+        return TRUE;
     }
-
-    gchar *new_dir = g_path_get_dirname(file_path);
-    g_free(app->db_dir);
-    app->db_dir = g_strdup(new_dir);
-    on_app_config_set("db_dir",  new_dir);
-    on_app_config_set("db_hash", NULL);   /* clear stale hash               */
-    g_free(new_dir);
-    g_free(file_path);
-    return TRUE;
 }
 
 /* startup_check_db_hash() — compare the stored MD5 hash against the current
- * DB file.  If they differ, show a warning dialog offering three choices.
+ * DB file.  If they differ, show a warning dialog offering two choices.
  * Returns TRUE when the app should proceed, FALSE to quit.
  *   verified — receives TRUE only when the database actually checked out
  *              (hash matched, or PRAGMA integrity_check passed) — not
@@ -190,9 +208,8 @@ startup_check_db_hash(OnApp *app, gboolean *verified)
         gtk_window_set_title(GTK_WINDOW(dlg),
                              "Blue Notes - Database Changed");
         gtk_dialog_add_buttons(GTK_DIALOG(dlg),
-            "_Open Normally",        1,
+            "_Open Anyway",          1,
             "Run _Integrity Check",  2,
-            "Choose _Different DB",  3,
             NULL);
         gint resp = gtk_dialog_run(GTK_DIALOG(dlg));
         gtk_widget_destroy(dlg);
@@ -205,8 +222,6 @@ startup_check_db_hash(OnApp *app, gboolean *verified)
                 return TRUE;                    /* passed — proceed          */
             }
             /* failed — loop back to the warning dialog                      */
-        } else if (resp == 3) {
-            return startup_choose_db(app);      /* TRUE=ok, FALSE=quit       */
         } else {
             return FALSE;                       /* dialog closed — quit      */
         }
@@ -335,6 +350,26 @@ main(int argc, char *argv[])
     gchar *db_path = (db_dir != NULL)
                      ? g_build_filename(db_dir, "notes.db", NULL)
                      : NULL;
+
+    /* First launch (or an emptied configured directory): no notes.db at
+     * the expected location.  Ask before creating one — the user may mean
+     * to open an existing file elsewhere.  Needs GTK up early for the
+     * dialog; skipped without a display (old create-silently behavior).    */
+    {
+        gchar *expected = (db_path != NULL)  /* where the db was looked for */
+                          ? g_strdup(db_path)
+                          : on_db_default_path();
+        if (!g_file_test(expected, G_FILE_TEST_EXISTS) &&
+            gtk_init_check(&argc, &argv) &&
+            !startup_first_run(expected, &db_dir, &db_path)) {
+            g_free(expected);
+            g_free(db_path);
+            g_free(db_dir);
+            return 0;                /* user closed the dialog — quit       */
+        }
+        g_free(expected);
+    }
+
     OnDatabase *db = on_db_open(db_path);
     if (db == NULL) {
         g_printerr("blue_notes: could not open the notes database at "

@@ -582,6 +582,8 @@ on_search_window_open(OnApp *app, gboolean scope_to_sel)
     GtkWidget *results = gtk_tree_view_new_with_model(
         GTK_TREE_MODEL(sw->store));
     g_object_unref(sw->store);       /* the view holds the ref now          */
+    /* No GTK type-ahead popup (auto-picked search column, see quirk 16).  */
+    gtk_tree_view_set_enable_search(GTK_TREE_VIEW(results), FALSE);
     gtk_tree_view_append_column(
         GTK_TREE_VIEW(results),
         gtk_tree_view_column_new_with_attributes(

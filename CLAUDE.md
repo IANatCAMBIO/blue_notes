@@ -125,7 +125,11 @@ sees the new flags.
   location: a silent fallback once made a user's notes "disappear" and
   strands writes in the wrong file (the trigger was a relaunch racing
   the dying instance's final flush past the 5 s busy timeout). One
-  configured database, or a clear error.
+  configured database, or a clear error. When no notes.db EXISTS at the
+  expected location (first launch / emptied dir), `startup_first_run()`
+  asks — "Open a notes.db File" (chooser filtered to notes.db; persists
+  the new db_dir) or "Create a New notes.db" — instead of silently
+  creating an empty DB; both paths clear any stale db_hash.
 - **Trash is a soft-delete flag, not a folder**: `notes.trashed` /
   `folders.trashed` columns + the `trash_folder_ids` view (recursive
   closure — only the TOP deleted folder is flagged; its subtree stays
@@ -262,6 +266,15 @@ sees the new flags.
     selected, install a veto select-function; a drag-begin lifts the
     veto keeping the selection, a plain button-release lifts it and
     applies the collapse via gtk_tree_view_set_cursor.
+
+16. **GtkTreeView type-ahead search auto-picks a useless column**:
+    `gtk_tree_view_set_model` sets the search column to the first model
+    column transformable to string — our stores lead with the int64 id,
+    so typing in a focused view popped a search box that matched
+    nothing.  Every tree view disables it
+    (`gtk_tree_view_set_enable_search(view, FALSE)`); to bring it back
+    usefully, point `gtk_tree_view_set_search_column` at a text column
+    (e.g. NL_TITLE) instead.
 
 ## Performance decisions
 
