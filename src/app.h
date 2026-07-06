@@ -13,6 +13,13 @@
 #include <gtk/gtk.h>
 #include "db.h"
 
+/* Semantic version, baked in by the Makefile (-DON_VERSION="x.y.z") so
+ * the About dialog and the package filenames come from ONE definition
+ * (the VERSION variable at the top of the Makefile).                        */
+#ifndef ON_VERSION
+#define ON_VERSION "dev"
+#endif
+
 /* ---------------------------------------------------------------------------
  * OnApp — global application state.
  *

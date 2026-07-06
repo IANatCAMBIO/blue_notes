@@ -1377,6 +1377,7 @@ on_about(GtkWidget *widget, gpointer user_data)
                                  GTK_WINDOW(lw->window));
     gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dialog),
                                       "Blue Notes");
+    gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), ON_VERSION);
     if (logo != NULL) {
         /* set_logo() first (it makes the internal image visible and
          * sized), then swap that image's content for a cairo surface

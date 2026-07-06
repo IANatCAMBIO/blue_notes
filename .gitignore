@@ -7,3 +7,6 @@ blue_notes.ini
 
 # macOS noise
 .DS_Store
+
+# Packaging artifacts
+dist/

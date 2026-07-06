@@ -9,8 +9,10 @@
 
 #include "app.h"
 
+#include <glib/gstdio.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Settings-table keys under which the toolbar styles are persisted,
  * indexed by OnToolbarKind.                                                 */
@@ -265,13 +267,29 @@ on_app_config_init(const gchar *argv0)
         return;                      /* already resolved and loaded         */
     gchar *exe_dir = exe_dir_from_argv0(argv0);
     config_ini_path = g_build_filename(exe_dir, "blue_notes.ini", NULL);
-    g_free(exe_dir);
 
-    /* First launch (no ini yet): seed it from the shipped defaults file
-     * sitting next to it, so a fresh install starts with sane settings.    */
+    /* Portable mode (the usual case: binary run from its build/unpack
+     * directory) keeps the ini next to the binary.  System installs
+     * (.deb/.rpm/.app in /Applications: read-only binary dir) would fail
+     * every write-through, so when no binary-adjacent ini exists AND the
+     * directory is unwritable, the ini lives in the user config dir
+     * instead (~/.config/blue_notes/blue_notes.ini).                       */
+    if (!g_file_test(config_ini_path, G_FILE_TEST_EXISTS) &&
+        g_access(exe_dir, W_OK) != 0) {
+        g_free(config_ini_path);
+        gchar *cfg_dir = g_build_filename(g_get_user_config_dir(),
+                                          "blue_notes", NULL);
+        g_mkdir_with_parents(cfg_dir, 0755);
+        config_ini_path = g_build_filename(cfg_dir, "blue_notes.ini",
+                                           NULL);
+        g_free(cfg_dir);
+    }
+
+    /* First launch (no ini yet): seed it from the defaults file shipped
+     * next to the binary, so a fresh install starts with sane settings.    */
     if (!g_file_test(config_ini_path, G_FILE_TEST_EXISTS)) {
-        gchar *defaults_path = g_strdup_printf("%s.defaults",
-                                               config_ini_path);
+        gchar *defaults_path = g_build_filename(
+            exe_dir, "blue_notes.ini.defaults", NULL);
         gchar *contents = NULL;      /* defaults file body                  */
         gsize  len = 0;
         if (g_file_get_contents(defaults_path, &contents, &len, NULL)) {
@@ -286,6 +304,7 @@ on_app_config_init(const gchar *argv0)
         }
         g_free(defaults_path);
     }
+    g_free(exe_dir);
 
     config_kf = g_key_file_new();
     g_key_file_load_from_file(config_kf, config_ini_path,

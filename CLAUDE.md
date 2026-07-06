@@ -11,7 +11,19 @@ plain `GtkWindow` titlebars, formatted `"Blue Notes - <thing>"`.
 export PATH=/opt/local/bin:$PATH   # MacPorts pkg-config
 make          # builds ./blue_notes
 make run
+make app      # dist/BlueNotes-<version>.app (macOS; sips/iconutil;
+              # trumpet.png → .icns; NOT self-contained — needs MacPorts GTK)
+make deb      # dist/blue-notes_<version>_<arch>.deb (needs dpkg-deb,
+make rpm      # dist/blue-notes-<version>-1.<arch>.rpm  needs rpmbuild —
+              # build these ON the target Linux distro; they install to
+              # /opt/blue-notes + a /usr/bin wrapper script that execs by
+              # absolute path so argv[0]-relative icons/defaults resolve)
 ```
+
+The semantic version is the `VERSION` variable at the top of the
+Makefile — single source: baked into the binary as `ON_VERSION` (About
+dialog) and into every package filename. Objects depend on the Makefile
+so a version bump recompiles.
 
 Dependencies (MacPorts): `gtk3 +quartz`, `sqlite3`, `pkgconf`, and
 optionally `gtk-osx-application-gtk3` (native macOS menubar — pkg-config
@@ -66,6 +78,10 @@ sees the new flags.
 - ALL UI settings live in the ini (`[blue-notes]` group), loaded into
   memory ONCE by `on_app_config_init()` and written through on change
   (`on_app_config_get/set`); the file is never re-read while running.
+  The ini normally sits NEXT TO THE BINARY (portable mode); when no
+  binary-adjacent ini exists AND that directory is unwritable (system
+  installs: .deb/.rpm in /opt, .app in /Applications) it falls back to
+  `~/.config/blue_notes/blue_notes.ini` instead.
   On first launch (no ini) it is seeded from `blue_notes.ini.defaults`
   next to the binary (committed; empty `db_dir` = default DB location).
   The live ini is gitignored — its rewrites drop comments and carry
