@@ -138,6 +138,14 @@ typedef struct {
     gboolean      list_autofit;          /* list columns auto-size to their
                                             contents on every refresh (ini
                                             key "list_autofit")            */
+    gboolean      notes_sel_blocked;     /* selection changes vetoed for
+                                            the span of a press on an
+                                            already-selected list row, so
+                                            a drag keeps the whole
+                                            multi-selection (quirk #15)    */
+    GtkTreePath  *notes_press_path;      /* the row that press landed on
+                                            (owned): a plain click
+                                            collapses to it on release     */
     gint          populating;
     GHashTable   *thumb_cache;
     gint          shown_kind;
@@ -182,6 +190,7 @@ static void    refresh_notes(OnLibrary *lw);
 static void    status_path_update(OnLibrary *lw);
 static GArray *selected_note_ids(OnLibrary *lw);
 static void    list_autofit_now(OnLibrary *lw);
+static GtkTreePath *notes_sel_unblock(OnLibrary *lw, gboolean want_path);
 static void    close_editors_for_ids(OnLibrary *lw, const gint64 *ids,
                                      gsize n);
 static void    add_menu_item(GtkWidget *menu, const gchar *label,
@@ -1173,7 +1182,10 @@ on_sidebar_drag_begin(GtkWidget *widget, GdkDragContext *context,
 
 /* ---------------------------------------------------------------------------
  * on_notes_drag_begin() — drag-under-cursor icon for note drags (both
- * views): the file glyph.  Connected AFTER the class handler, as above.
+ * views): one file for a single note, a document stack for several.
+ * The press that started the drag has already settled the selection, so
+ * its count IS the drag count.  Connected AFTER the class handler, as
+ * above.
  * ------------------------------------------------------------------------- */
 static void
 on_notes_drag_begin(GtkWidget *widget, GdkDragContext *context,
@@ -1181,8 +1193,16 @@ on_notes_drag_begin(GtkWidget *widget, GdkDragContext *context,
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
-    cairo_surface_t *icon =
-        on_app_icon_surface(lw->app, "file", DRAG_ICON_SIZE);
+
+    /* A drag from a blocked press keeps the whole multi-selection: just
+     * lift the veto — the matching release lands in the DnD machinery,
+     * never as a button-release on the view.                               */
+    notes_sel_unblock(lw, FALSE);
+
+    GArray *ids = selected_note_ids(lw);
+    cairo_surface_t *icon = on_app_icon_surface(
+        lw->app, ids->len > 1 ? "documents" : "file", DRAG_ICON_SIZE);
+    g_array_free(ids, TRUE);
     if (icon != NULL) {
         gtk_drag_set_icon_surface(context, icon);
         cairo_surface_destroy(icon);
@@ -2448,15 +2468,89 @@ show_note_context_menu(OnLibrary *lw, gint64 note_id, GdkEventButton *event)
     gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
 }
 
+/* notes_sel_block_func() / notes_sel_allow_func() — temporary select
+ * functions for the span of a press on an already-selected list row:
+ * block vetoes EVERY selection change, allow puts normality back.          */
+static gboolean
+notes_sel_block_func(GtkTreeSelection *sel, GtkTreeModel *model,
+                     GtkTreePath *path, gboolean selected, gpointer data)
+{
+    (void)sel; (void)model; (void)path; (void)selected; (void)data;
+    return FALSE;
+}
+
+static gboolean
+notes_sel_allow_func(GtkTreeSelection *sel, GtkTreeModel *model,
+                     GtkTreePath *path, gboolean selected, gpointer data)
+{
+    (void)sel; (void)model; (void)path; (void)selected; (void)data;
+    return TRUE;
+}
+
+/* notes_sel_unblock() — end a blocked press: selection changes work
+ * again; the press path is optionally handed to the caller (transfer),
+ * otherwise freed.                                                          */
+static GtkTreePath *
+notes_sel_unblock(OnLibrary *lw, gboolean want_path)
+{
+    if (!lw->notes_sel_blocked)
+        return NULL;
+    gtk_tree_selection_set_select_function(
+        gtk_tree_view_get_selection(lw->notes_list),
+        notes_sel_allow_func, NULL, NULL);
+    lw->notes_sel_blocked = FALSE;
+    GtkTreePath *path = lw->notes_press_path;
+    lw->notes_press_path = NULL;
+    if (!want_path) {
+        gtk_tree_path_free(path);
+        path = NULL;
+    }
+    return path;
+}
+
 /* ---------------------------------------------------------------------------
- * on_notes_list_button_press() — right click in list mode: select the row
- * under the pointer and show the note menu.
+ * on_notes_list_button_press() — two jobs:
+ *
+ * 1. Left press on an already-selected row of a multi-selection: GTK
+ *    3.24's tree view CLEAR_AND_SELECTs on PRESS with no deferral for a
+ *    possible drag (quirk #15), which collapsed the selection before a
+ *    multi-note drag could start.  Install a selection veto for the span
+ *    of the press; on_notes_drag_begin keeps the selection, a plain
+ *    release applies the collapse GTK wanted.  The event itself is NOT
+ *    consumed — the view's drag gesture must still see it.
+ *
+ * 2. Right click: select the row under the pointer and show the note
+ *    menu (an existing multi-selection is kept when clicked inside).
  * ------------------------------------------------------------------------- */
 static gboolean
 on_notes_list_button_press(GtkWidget *widget, GdkEventButton *event,
                            gpointer user_data)
 {
     OnLibrary *lw = user_data;       /* owning library window               */
+
+    if (event->button == GDK_BUTTON_PRIMARY &&
+        event->type == GDK_BUTTON_PRESS &&
+        !(event->state & gtk_accelerator_get_default_mod_mask())) {
+        GtkTreeSelection *sel =
+            gtk_tree_view_get_selection(GTK_TREE_VIEW(widget));
+        GtkTreePath *path = NULL;    /* row under the pointer               */
+        if (gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(widget),
+                                          (gint)event->x, (gint)event->y,
+                                          &path, NULL, NULL, NULL)) {
+            if (gtk_tree_selection_path_is_selected(sel, path) &&
+                gtk_tree_selection_count_selected_rows(sel) > 1) {
+                gtk_tree_selection_set_select_function(
+                    sel, notes_sel_block_func, NULL, NULL);
+                lw->notes_sel_blocked = TRUE;
+                gtk_tree_path_free(lw->notes_press_path);
+                lw->notes_press_path = path;     /* ownership taken         */
+                return FALSE;
+            }
+            gtk_tree_path_free(path);
+        }
+        return FALSE;
+    }
+
     if (event->button != GDK_BUTTON_SECONDARY)
         return FALSE;
 
@@ -2486,6 +2580,23 @@ on_notes_list_button_press(GtkWidget *widget, GdkEventButton *event,
     if (id != 0)
         show_note_context_menu(lw, id, event);
     return TRUE;
+}
+
+/* on_notes_list_button_release() — a blocked press ended WITHOUT a drag:
+ * lift the veto and apply the collapse GTK wanted on press (a plain
+ * click on a selected row means "select just this one").                    */
+static gboolean
+on_notes_list_button_release(GtkWidget *widget, GdkEventButton *event,
+                             gpointer user_data)
+{
+    (void)event;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    GtkTreePath *path = notes_sel_unblock(lw, TRUE);
+    if (path != NULL) {
+        gtk_tree_view_set_cursor(GTK_TREE_VIEW(widget), path, NULL, FALSE);
+        gtk_tree_path_free(path);
+    }
+    return FALSE;
 }
 
 /* ---------------------------------------------------------------------------
@@ -3357,6 +3468,8 @@ library_free(gpointer data)
     if (lw->status_timeout != 0)
         g_source_remove(lw->status_timeout);
     g_hash_table_destroy(lw->thumb_cache);
+    if (lw->notes_press_path != NULL)
+        gtk_tree_path_free(lw->notes_press_path);
     g_free(lw->sel_name);
     g_free(lw);
 }
@@ -3670,6 +3783,8 @@ on_library_window_create(OnApp *app)
                      G_CALLBACK(on_note_list_activated), lw);
     g_signal_connect(lw->notes_list, "button-press-event",
                      G_CALLBACK(on_notes_list_button_press), lw);
+    g_signal_connect(lw->notes_list, "button-release-event",
+                     G_CALLBACK(on_notes_list_button_release), lw);
 
     GtkWidget *list_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(list_scroll),

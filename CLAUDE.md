@@ -44,7 +44,7 @@ sees the new flags.
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
 | `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
-| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid (list: Title/Path/Modified, all resizable + sortable; Path fed by `on_db_folder_path_map`), DnD (notes→folder incl. multi-select; single folder rows re-nest INTO / reorder BEFORE-AFTER / trash / drag-restore via `on_db_folder_move`+`on_db_folder_reorder`; folder.png/file.png drag icons), sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
+| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid (list: Title/Path/Modified, all resizable + sortable; Path fed by `on_db_folder_path_map`), DnD (notes→folder incl. multi-select; single folder rows re-nest INTO / reorder BEFORE-AFTER / trash / drag-restore via `on_db_folder_move`+`on_db_folder_reorder`; drag icons: folder.png, file.png for one note, documents.png for 2+), sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
@@ -250,6 +250,18 @@ sees the new flags.
     on with `g_signal_connect_after("drag-begin")` — the class handler
     sets its own row-snapshot icon in the class closure, so a normal
     connection gets overridden.
+
+15. **GTK 3.24's GtkTreeView collapses a multi-selection on PRESS.**
+    Its multipress gesture does CLEAR_AND_SELECT on any unmodified
+    primary press — no drag deferral — so dragging a multi-selection is
+    impossible out of the box (GtkIconView is fine: it defers via
+    `last_single_clicked`).  You can't just consume the press: the
+    multipress AND row-drag gestures both run in the BUBBLE phase, so a
+    TRUE from a button-press handler kills drag initiation too.  Fix
+    (notes list): on press over an already-selected row with ≥2
+    selected, install a veto select-function; a drag-begin lifts the
+    veto keeping the selection, a plain button-release lifts it and
+    applies the collapse via gtk_tree_view_set_cursor.
 
 ## Performance decisions
 

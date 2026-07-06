@@ -25,9 +25,10 @@ is missing or cannot be decoded, the button falls back to a text glyph.
 | `vinyl.png`            | App logo: window icon, About button + dialog |
 | `warning.png`            | Delete-confirmation dialogs    |
 | `folder.png`             | Drag icon: dragging a folder   |
-| `documents.png`          | (reserved: multi-item drags)   |
+| `documents.png`          | Drag icon: dragging 2+ notes   |
 
-`file.png` doubles as the drag-under-cursor icon when dragging notes.
+`file.png` doubles as the drag-under-cursor icon when dragging a
+single note.
 
 These names are looked up but have no bundled file — the editor's
 formatting buttons deliberately use crisp Pango text glyphs (B/I/U/S,
