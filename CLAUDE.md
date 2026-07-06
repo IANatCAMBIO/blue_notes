@@ -81,9 +81,9 @@ sees the new flags.
   `on_editor_rebuild_toolbars_all`), `image_viewer` (program path;
   unset = system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
-  for the next one). The DB settings table holds ONLY the `in_use`
-  instance lock (it must be in the DB — it coordinates instances across
-  machines); main.c migrates any legacy UI keys out of it at startup.
+  for the next one). The DB settings table is legacy-only: main.c
+  migrates any old UI keys out of it and deletes the retired `in_use`
+  lock key at startup; nothing writes to it anymore.
 - **Custom DB location** (shared-folder support) lives in the CONFIG
   FILE `blue_notes.ini` NEXT TO THE BINARY (`[blue-notes] db_dir=`;
   resolved from argv[0] by `on_app_config_init()`, which must run before
@@ -101,14 +101,14 @@ sees the new flags.
   online backup API on the live DB; `on_app_restore_database()` closes
   editors, keeps the old file as `notes.db.pre-restore`, copies the
   backup in, reopens (rolls back if the file isn't a usable DB).
-- **Instance lock**: settings key `in_use` = `user@host (pid N, since
-  ...)`. `on_app_db_acquire()` claims it or shows the read-only/override
-  dialog; `on_app_db_release()` clears it ONLY if it still holds our
-  token. Read-only = `app->read_only` + `PRAGMA query_only=ON`
-  (engine-enforced) + non-editable editors + title suffix. Acquire runs
-  at activate, after db switch, and reclaim after restore; release at
-  exit, before switch, and via the SIGTERM handler in main.c (so pkill
-  is a clean quit, not a fake crash). Restore is blocked in read-only.
+- **CLI ↔ GUI coexistence is socket-based, not lock-based**: a running
+  GUI serves later CLI invocations over a unix socket (`src/ipc.c`), so
+  the two never write the DB concurrently. The old in-DB `in_use`
+  instance lock and the read-only mode (`app->read_only`, `PRAGMA
+  query_only`, `on_app_db_acquire/release`) were REMOVED with that
+  change; main.c deletes any leftover `in_use` key at startup. SIGTERM
+  (pkill) destroys all windows so editor autosaves flush and the loop
+  ends cleanly.
 
 ## Hard-won GTK3 quirks (do not re-learn these)
 

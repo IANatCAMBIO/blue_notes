@@ -4,7 +4,7 @@
  * A single OnApp instance is created in main() and passed to every window.
  * It owns the database handle, tracks open editor windows, carries the
  * user's toolbar-style preference, and loads button icons from the
- * app-local icons/ folder (see on_app_icon_image).
+ * app-local icons/ folder (see on_app_icon_image_sized).
  * =========================================================================== */
 
 #ifndef BLUE_APP_H
@@ -119,19 +119,15 @@ void on_app_status(OnApp *app, const gchar *fmt, ...) G_GNUC_PRINTF(2, 3);
 void on_app_init_icons_dir(OnApp *app, const gchar *argv0);
 
 /* ---------------------------------------------------------------------------
- * on_app_icon_image() — build a GtkImage for icon `name` from
- * "<icons_dir>/<name>.svg" (then .png).  The bundled icons are elementary
- * SVGs, which need the librsvg gdk-pixbuf loader to decode.
+ * on_app_icon_image_sized() — build a GtkImage for icon `name` from
+ * "<icons_dir>/<name>.svg" (then .png), rendered at an explicit pixel
+ * size.  The bundled icons are elementary SVGs, which need the librsvg
+ * gdk-pixbuf loader to decode.
  *   app  — the application context.
  *   name — icon file basename without extension (e.g. "edit-copy").
+ *   size — logical pixel size to render at.
  * Returns a new GtkImage, or NULL if no loadable file exists — callers
  * fall back to a text label in that case.
- * ------------------------------------------------------------------------- */
-GtkWidget *on_app_icon_image(OnApp *app, const gchar *name);
-
-/* ---------------------------------------------------------------------------
- * on_app_icon_image_sized() — like on_app_icon_image() but rendered at an
- * explicit pixel size (used for compact inline buttons).
  * ------------------------------------------------------------------------- */
 GtkWidget *on_app_icon_image_sized(OnApp *app, const gchar *name,
                                    gint size);

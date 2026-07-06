@@ -3117,7 +3117,6 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
         ed->internal_change--;
         g_free(blob);
     }
-    gtk_text_buffer_set_modified(ed->buffer, FALSE);
     /* A brand-new (empty) note gets its first line auto-styled as H1
      * when the option is enabled.                                          */
     ed->auto_h1 = app->first_line_h1 &&

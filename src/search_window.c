@@ -172,9 +172,9 @@ search_job_cancel(OnSearch *sw)
  * note_plain_text() — a note's plain text for matching (title is matched
  * separately by the caller).  Reads the body_text cache when filled;
  * otherwise extracts it from the BNBF blob without decoding images and
- * writes it back so the next search skips the blob entirely (unless the
- * session is read-only).  Runs on the worker thread against the worker's
- * private connection.  Returns a newly allocated string.
+ * writes it back so the next search skips the blob entirely.  Runs on
+ * the worker thread against the worker's private connection.  Returns a
+ * newly allocated string.
  * ------------------------------------------------------------------------- */
 static gchar *
 note_plain_text(OnDatabase *db, gint64 note_id)

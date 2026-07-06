@@ -33,13 +33,6 @@ fi
 # Import destination root inside Blue Notes.
 DEST_ROOT="Apple Notes Import"
 
-# One upfront heads-up if the Blue Notes GUI has the database open
-# (individual commands would otherwise repeat this warning per note).
-if "$BIN" folder list 2>&1 >/dev/null | grep -q "in use"; then
-    echo "note: Blue Notes is running — imported notes will appear"
-    echo "      after you restart it (or switch folders to refresh)."
-fi
-
 # Workspace: one .html per note plus a manifest of TAB-separated
 # "file<TAB>folder path<TAB>modified date" lines (the date is
 # "Y-M-D H:M:S" in local time, converted to UNIX seconds at import).

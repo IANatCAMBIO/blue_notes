@@ -2,8 +2,8 @@
  * settings_window.c — the application settings window (implementation)
  *
  * See settings_window.h for the overview.  Every control writes through
- * to the OnApp setters, which persist to SQLite and live-update all open
- * windows, so there is no OK/Apply button.
+ * to the OnApp setters, which persist to the blue_notes.ini config file
+ * and live-update all open windows, so there is no OK/Apply button.
  * =========================================================================== */
 
 #include "settings_window.h"

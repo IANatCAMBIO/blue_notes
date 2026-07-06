@@ -75,9 +75,6 @@ gboolean on_anchor_is_checkbox(GtkTextChildAnchor *anchor,
  * (⬜/✅/☐/☑)?  Used by the load-time migration.                            */
 gboolean on_char_is_checkbox(gunichar c, gboolean *out_checked);
 
-/* Glyph shown as the Tasks toolbar icon fallback.                           */
-#define ON_CHECK_UNCHECKED "\xe2\xac\x9c"   /* ⬜ U+2B1C                     */
-
 /* Names of the GtkTextTags the editor registers on every note buffer.
  * serialize.c maps between these tags and the ON_FMT_* bits.               */
 #define ON_TAGNAME_BOLD        "on-bold"

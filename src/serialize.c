@@ -282,8 +282,9 @@ on_note_serialize(GtkTextBuffer *buffer, gsize *out_len)
             run_flags = flags;
         }
         gunichar ch = gtk_text_iter_get_char(&iter);
-        /* 0xFFFC marks non-pixbuf embedded objects (child anchors); we
-         * skip those since Blue Notes never creates them.                */
+        /* Real anchors/pixbufs were handled above, so a U+FFFC here is a
+         * stray object-replacement char in pasted text — drop it rather
+         * than save a placeholder with nothing behind it.                */
         if (ch != 0xFFFC)
             g_string_append_unichar(run, ch);
         gtk_text_iter_forward_char(&iter);
@@ -709,8 +710,9 @@ on_note_extract_text(const guint8 *data, gsize len)
             if (version >= 4 && !get_u32(data, len, &pos, &tflags))
                 break;
             if (!get_u32(data, len, &pos, &rows) ||
-                !get_u32(data, len, &pos, &cols))
-                break;
+                !get_u32(data, len, &pos, &cols) ||
+                rows == 0 || cols == 0 || rows > 1024 || cols > 1024)
+                break;               /* same clamp as the deserializer      */
             gboolean bad = FALSE;    /* truncated cell encountered          */
             for (guint32 i = 0; i < rows * cols && !bad; i++) {
                 guint32 n;

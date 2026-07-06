@@ -259,10 +259,8 @@ on_db_folder_list(OnDatabase *db, gint64 parent_id)
     GList *out = NULL;                   /* accumulated OnFolder* rows      */
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         OnFolder *f  = g_new0(OnFolder, 1);
-        f->id         = sqlite3_column_int64(stmt, 0);
-        f->parent_id  = sqlite3_column_int64(stmt, 1);
-        f->name       = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
-        f->sort_order = sqlite3_column_int(stmt, 3);
+        f->id   = sqlite3_column_int64(stmt, 0);
+        f->name = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
         out = g_list_prepend(out, f);
     }
     sqlite3_finalize(stmt);
@@ -453,7 +451,6 @@ meta_from_row(sqlite3_stmt *stmt)
     m->id         = sqlite3_column_int64(stmt, 0);
     m->folder_id  = sqlite3_column_int64(stmt, 1);
     m->title      = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
-    m->sort_order = sqlite3_column_int(stmt, 3);
     m->updated_at = sqlite3_column_int64(stmt, 4);
     m->pinned     = sqlite3_column_int(stmt, 5) != 0;
     return m;
@@ -594,7 +591,9 @@ on_db_note_list_free(GList *notes)
  * tags
  * ========================================================================= */
 
-gint64
+/* on_db_tag_get_or_create() — look up tag `name`, creating it if
+ * missing.  Returns the tag id, or 0 on failure.                            */
+static gint64
 on_db_tag_get_or_create(OnDatabase *db, const gchar *name)
 {
     /* Try the fast path first: the tag already exists.                     */
@@ -876,11 +875,14 @@ on_db_setting_delete(OnDatabase *db, const gchar *key)
 gchar *
 on_db_folder_path(OnDatabase *db, gint64 folder_id)
 {
-    /* Walk from the folder up to the root, prepending each name.           */
+    /* Walk from the folder up to the root, prepending each name.  The
+     * depth cap keeps a corrupt parent_id cycle (hand-edited db) from
+     * spinning forever — no real tree is anywhere near that deep.          */
     GString *path = g_string_new("");    /* built back-to-front             */
     gint64   cur  = folder_id;           /* current folder in the walk      */
+    gint     depth = 0;                  /* levels walked so far            */
 
-    while (cur > 0) {
+    while (cur > 0 && depth++ < 128) {
         sqlite3_stmt *stmt = prepare(db,
             "SELECT name, COALESCE(parent_id,0) FROM folders WHERE id=?");
         if (stmt == NULL)

@@ -41,16 +41,12 @@ typedef struct {
  * OnFolder — metadata for one folder row.
  *
  * Fields:
- *   id         — primary key of the folder.
- *   parent_id  — id of the parent folder, or 0 for top level.
- *   name       — display name (owned string).
- *   sort_order — position among its siblings (ascending).
+ *   id   — primary key of the folder.
+ *   name — display name (owned string).
  * ------------------------------------------------------------------------- */
 typedef struct {
     gint64  id;
-    gint64  parent_id;
     gchar  *name;
-    gint    sort_order;
 } OnFolder;
 
 /* ---------------------------------------------------------------------------
@@ -60,7 +56,6 @@ typedef struct {
  *   id         — primary key of the note.
  *   folder_id  — id of the containing folder, or 0 for top level.
  *   title      — display title, derived from the first line (owned string).
- *   sort_order — position among notes in the same folder.
  *   updated_at — UNIX timestamp of the last save.
  *   pinned     — whether the note appears in the Pinned Notes section.
  * ------------------------------------------------------------------------- */
@@ -68,7 +63,6 @@ typedef struct {
     gint64   id;
     gint64   folder_id;
     gchar   *title;
-    gint     sort_order;
     gint64   updated_at;
     gboolean pinned;
 } OnNoteMeta;
@@ -210,10 +204,6 @@ void on_db_note_meta_free(OnNoteMeta *meta);
 void on_db_note_list_free(GList *notes);
 
 /* ------------------------------ tags ------------------------------------ */
-
-/* Look up tag `name`, creating it if missing. Returns the tag id, or 0
- * on failure.                                                               */
-gint64 on_db_tag_get_or_create(OnDatabase *db, const gchar *name);
 
 /* Look up tag `name` WITHOUT creating it. Returns its id, or 0.             */
 gint64 on_db_tag_find(OnDatabase *db, const gchar *name);

@@ -651,7 +651,7 @@ on_ipc_try_remote_run(int argc, char **argv, gboolean *ran)
     gssize rc   = stream_read_uint_line(in);
     gssize olen = stream_read_uint_line(in);
     gchar *otext = (olen >= 0) ? stream_read_blob(in, (gsize)olen) : NULL;
-    gssize elen = (otext != NULL || olen == 0) ? stream_read_uint_line(in) : -1;
+    gssize elen = (otext != NULL) ? stream_read_uint_line(in) : -1;
     gchar *etext = (elen >= 0) ? stream_read_blob(in, (gsize)elen) : NULL;
 
     if (otext != NULL && olen > 0)

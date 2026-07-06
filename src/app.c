@@ -100,7 +100,8 @@ on_app_icon_image_sized(OnApp *app, const gchar *name, gint size)
     return NULL;
 }
 
-GtkWidget *
+/* on_app_icon_image() — toolbar-default (24 px) icon variant.               */
+static GtkWidget *
 on_app_icon_image(OnApp *app, const gchar *name)
 {
     return on_app_icon_image_sized(app, name, 24);
