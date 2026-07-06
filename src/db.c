@@ -49,6 +49,27 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);";
 
 /* ---------------------------------------------------------------------------
+ * TRASH_VIEW_SQL — the recursive closure of the Trash: every folder that
+ * is flagged trashed OR sits anywhere below a flagged folder.  Created
+ * AFTER the column migrations in on_db_open (it references
+ * folders.trashed).  Notes inside these folders are implicitly trashed
+ * without carrying their own flag.
+ * ------------------------------------------------------------------------- */
+static const char *TRASH_VIEW_SQL =
+    "CREATE VIEW IF NOT EXISTS trash_folder_ids AS "
+    "WITH RECURSIVE tf(id) AS ("
+    "  SELECT id FROM folders WHERE trashed=1"
+    "  UNION"
+    "  SELECT f.id FROM folders f JOIN tf ON f.parent_id = tf.id"
+    ") SELECT id FROM tf;";
+
+/* WHERE fragment: a note is visible in normal (non-Trash) views — not
+ * directly trashed and not inside a trashed folder's subtree.               */
+#define NOTE_VISIBLE_SQL \
+    "trashed=0 AND (folder_id IS NULL OR " \
+    "folder_id NOT IN (SELECT id FROM trash_folder_ids))"
+
+/* ---------------------------------------------------------------------------
  * exec_simple() — run a parameterless SQL string, logging any error.
  *   db  — open database.
  *   sql — SQL text to execute.
@@ -153,6 +174,21 @@ on_db_open(const gchar *path_override)
     sqlite3_exec(db->handle,
                  "ALTER TABLE notes ADD COLUMN body_text TEXT",
                  NULL, NULL, NULL);
+    sqlite3_exec(db->handle,
+                 "ALTER TABLE notes ADD COLUMN trashed INTEGER "
+                 "NOT NULL DEFAULT 0",
+                 NULL, NULL, NULL);
+    sqlite3_exec(db->handle,
+                 "ALTER TABLE folders ADD COLUMN trashed INTEGER "
+                 "NOT NULL DEFAULT 0",
+                 NULL, NULL, NULL);
+
+    /* The Trash view references the trashed columns, so it is created
+     * only after the migrations above have run.                             */
+    if (!exec_simple(db, TRASH_VIEW_SQL)) {
+        on_db_close(db);
+        return NULL;
+    }
     return db;
 }
 
@@ -243,19 +279,17 @@ on_db_folder_delete(OnDatabase *db, gint64 id)
     sqlite3_bind_int64(stmt, 1, id);
     gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
+    if (ok)
+        exec_simple(db,
+            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)");
     return ok;
 }
 
-GList *
-on_db_folder_list(OnDatabase *db, gint64 parent_id)
+/* run_folder_query() — collect every row of `stmt` (columns: id, parent,
+ * name, sort_order) into a list of OnFolder* and finalize it.               */
+static GList *
+run_folder_query(sqlite3_stmt *stmt)
 {
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT id, COALESCE(parent_id,0), name, sort_order FROM folders "
-        "WHERE parent_id IS ? ORDER BY sort_order, name COLLATE NOCASE");
-    if (stmt == NULL)
-        return NULL;
-    bind_id_or_null(stmt, 1, parent_id);
-
     GList *out = NULL;                   /* accumulated OnFolder* rows      */
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         OnFolder *f  = g_new0(OnFolder, 1);
@@ -265,6 +299,22 @@ on_db_folder_list(OnDatabase *db, gint64 parent_id)
     }
     sqlite3_finalize(stmt);
     return g_list_reverse(out);
+}
+
+GList *
+on_db_folder_list(OnDatabase *db, gint64 parent_id)
+{
+    /* trashed=0: a directly-trashed folder disappears from the normal
+     * tree (it lives under the Trash section); its untouched descendants
+     * never get listed because nothing recurses into it.                    */
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT id, COALESCE(parent_id,0), name, sort_order FROM folders "
+        "WHERE parent_id IS ? AND trashed=0 "
+        "ORDER BY sort_order, name COLLATE NOCASE");
+    if (stmt == NULL)
+        return NULL;
+    bind_id_or_null(stmt, 1, parent_id);
+    return run_folder_query(stmt);
 }
 
 /* free_folder() — GDestroyNotify for one OnFolder.                          */
@@ -356,8 +406,11 @@ on_db_notes_delete(OnDatabase *db, const gint64 *ids, gsize n)
 gboolean
 on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id)
 {
+    /* trashed=0: dragging a note out of the Trash into a folder is a
+     * restore — a moved note is always meant to be visible where it
+     * lands.                                                                */
     sqlite3_stmt *stmt = prepare(db,
-        "UPDATE notes SET folder_id=?, sort_order="
+        "UPDATE notes SET folder_id=?, trashed=0, sort_order="
         "  COALESCE((SELECT MAX(sort_order)+1 FROM notes "
         "            WHERE folder_id IS ?), 0) "
         "WHERE id=?");
@@ -516,9 +569,12 @@ run_meta_query(sqlite3_stmt *stmt)
 GList *
 on_db_note_list(OnDatabase *db, gint64 folder_id)
 {
+    /* trashed=0 keeps directly-trashed notes out; when the folder itself
+     * sits in the Trash (browsing it from the Trash section) its regular
+     * notes carry no flag and still list here.                              */
     sqlite3_stmt *stmt = prepare(db,
         "SELECT " NOTE_META_COLS " "
-        "FROM notes WHERE folder_id IS ? "
+        "FROM notes WHERE folder_id IS ? AND trashed=0 "
         "ORDER BY sort_order, updated_at DESC");
     if (stmt == NULL)
         return NULL;
@@ -527,11 +583,26 @@ on_db_note_list(OnDatabase *db, gint64 folder_id)
 }
 
 GList *
-on_db_note_list_all(OnDatabase *db)
+on_db_note_list_all(OnDatabase *db, gboolean include_trash)
+{
+    sqlite3_stmt *stmt = prepare(db, include_trash
+        ? "SELECT " NOTE_META_COLS " "
+          "FROM notes ORDER BY folder_id, sort_order"
+        : "SELECT " NOTE_META_COLS " "
+          "FROM notes WHERE " NOTE_VISIBLE_SQL " "
+          "ORDER BY folder_id, sort_order");
+    if (stmt == NULL)
+        return NULL;
+    return run_meta_query(stmt);
+}
+
+GList *
+on_db_note_list_recent(OnDatabase *db)
 {
     sqlite3_stmt *stmt = prepare(db,
         "SELECT " NOTE_META_COLS " "
-        "FROM notes ORDER BY folder_id, sort_order");
+        "FROM notes WHERE " NOTE_VISIBLE_SQL " "
+        "ORDER BY updated_at DESC");
     if (stmt == NULL)
         return NULL;
     return run_meta_query(stmt);
@@ -556,7 +627,8 @@ on_db_note_list_pinned(OnDatabase *db)
 {
     sqlite3_stmt *stmt = prepare(db,
         "SELECT " NOTE_META_COLS " "
-        "FROM notes WHERE pinned=1 ORDER BY updated_at DESC");
+        "FROM notes WHERE pinned=1 AND " NOTE_VISIBLE_SQL " "
+        "ORDER BY updated_at DESC");
     if (stmt == NULL)
         return NULL;
     return run_meta_query(stmt);
@@ -566,7 +638,7 @@ gint
 on_db_note_count_pinned(OnDatabase *db)
 {
     sqlite3_stmt *stmt = prepare(db,
-        "SELECT COUNT(*) FROM notes WHERE pinned=1");
+        "SELECT COUNT(*) FROM notes WHERE pinned=1 AND " NOTE_VISIBLE_SQL);
     if (stmt == NULL)
         return 0;
     gint count = 0;                  /* number of pinned notes              */
@@ -759,7 +831,9 @@ on_db_notes_by_tag(OnDatabase *db, gint64 tag_id)
         "SELECT n.id, COALESCE(n.folder_id,0), n.title, n.sort_order, "
         "       n.updated_at, n.pinned "
         "FROM notes n JOIN note_tags nt ON nt.note_id = n.id "
-        "WHERE nt.tag_id=? ORDER BY n.updated_at DESC");
+        "WHERE nt.tag_id=? AND n.trashed=0 AND (n.folder_id IS NULL OR "
+        "      n.folder_id NOT IN (SELECT id FROM trash_folder_ids)) "
+        "ORDER BY n.updated_at DESC");
     if (stmt == NULL)
         return NULL;
     sqlite3_bind_int64(stmt, 1, tag_id);
@@ -767,14 +841,202 @@ on_db_notes_by_tag(OnDatabase *db, gint64 tag_id)
 }
 
 /* =========================================================================
+ * trash
+ * ========================================================================= */
+
+gboolean
+on_db_notes_trash(OnDatabase *db, const gint64 *ids, gsize n)
+{
+    if (n == 0)
+        return TRUE;
+
+    /* One transaction for the lot, like on_db_notes_delete.                 */
+    if (!exec_simple(db, "BEGIN IMMEDIATE"))
+        return FALSE;
+
+    sqlite3_stmt *stmt = prepare(db, "UPDATE notes SET trashed=1 WHERE id=?");
+    gboolean ok = stmt != NULL;      /* every update succeeded so far?      */
+    for (gsize i = 0; ok && i < n; i++) {
+        sqlite3_bind_int64(stmt, 1, ids[i]);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_reset(stmt);
+    }
+    if (stmt != NULL)
+        sqlite3_finalize(stmt);
+    exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
+    return ok;
+}
+
+gboolean
+on_db_note_restore(OnDatabase *db, gint64 id)
+{
+    /* The stored folder_id IS the "where it was deleted from"; it only
+     * moves to the top level when that folder is itself in the Trash.       */
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE notes SET trashed=0, folder_id="
+        "  CASE WHEN folder_id IN (SELECT id FROM trash_folder_ids) "
+        "       THEN NULL ELSE folder_id END "
+        "WHERE id=?");
+    if (stmt == NULL)
+        return FALSE;
+    sqlite3_bind_int64(stmt, 1, id);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+gboolean
+on_db_folder_trash(OnDatabase *db, gint64 id)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE folders SET trashed=1 WHERE id=?");
+    if (stmt == NULL)
+        return FALSE;
+    sqlite3_bind_int64(stmt, 1, id);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+gboolean
+on_db_folder_restore(OnDatabase *db, gint64 id)
+{
+    /* Re-parent to the top level when the original parent is still in
+     * the Trash (the CASE subquery sees the pre-update flags; the folder
+     * can never be its own parent, so clearing its flag in the same
+     * statement is safe).                                                   */
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE folders SET trashed=0, parent_id="
+        "  CASE WHEN parent_id IN (SELECT id FROM trash_folder_ids "
+        "                          WHERE id<>?) "
+        "       THEN NULL ELSE parent_id END "
+        "WHERE id=?");
+    if (stmt == NULL)
+        return FALSE;
+    sqlite3_bind_int64(stmt, 1, id);
+    sqlite3_bind_int64(stmt, 2, id);
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+GList *
+on_db_folder_list_trashed(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT id, COALESCE(parent_id,0), name, sort_order FROM folders "
+        "WHERE trashed=1 ORDER BY name COLLATE NOCASE");
+    if (stmt == NULL)
+        return NULL;
+    return run_folder_query(stmt);
+}
+
+GList *
+on_db_note_list_trashed(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT " NOTE_META_COLS " "
+        "FROM notes WHERE trashed=1 ORDER BY updated_at DESC");
+    if (stmt == NULL)
+        return NULL;
+    return run_meta_query(stmt);
+}
+
+gint
+on_db_trash_count(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT (SELECT COUNT(*) FROM notes   WHERE trashed=1) + "
+        "       (SELECT COUNT(*) FROM folders WHERE trashed=1)");
+    if (stmt == NULL)
+        return 0;
+    gint count = 0;                  /* notes + folders directly in Trash   */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+/* run_id_query() — collect a one-column id result set into a GArray of
+ * gint64 and finalize the statement.                                        */
+static GArray *
+run_id_query(sqlite3_stmt *stmt)
+{
+    GArray *ids = g_array_new(FALSE, FALSE, sizeof(gint64));
+    if (stmt != NULL) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            gint64 id = sqlite3_column_int64(stmt, 0);
+            g_array_append_val(ids, id);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return ids;
+}
+
+GArray *
+on_db_trash_note_ids(OnDatabase *db)
+{
+    return run_id_query(prepare(db,
+        "SELECT id FROM notes WHERE trashed=1 OR "
+        "folder_id IN (SELECT id FROM trash_folder_ids)"));
+}
+
+GArray *
+on_db_folder_note_ids(OnDatabase *db, gint64 folder_id)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "WITH RECURSIVE sub(id) AS ("
+        "  SELECT ? UNION "
+        "  SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id"
+        ") SELECT id FROM notes WHERE folder_id IN (SELECT id FROM sub)");
+    if (stmt != NULL)
+        sqlite3_bind_int64(stmt, 1, folder_id);
+    return run_id_query(stmt);
+}
+
+gboolean
+on_db_trash_empty(OnDatabase *db)
+{
+    if (!exec_simple(db, "BEGIN IMMEDIATE"))
+        return FALSE;
+
+    /* The explicit notes delete covers directly-trashed notes; deleting
+     * the flagged folders cascades through their subtrees (descendant
+     * folders and every note inside).                                       */
+    gboolean ok =
+        exec_simple(db,
+            "DELETE FROM notes WHERE trashed=1 OR "
+            "folder_id IN (SELECT id FROM trash_folder_ids)") &&
+        exec_simple(db, "DELETE FROM folders WHERE trashed=1") &&
+        exec_simple(db,
+            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)");
+    exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
+    return ok;
+}
+
+/* =========================================================================
  * counts
  * ========================================================================= */
+
+gint
+on_db_note_count_visible(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT COUNT(*) FROM notes WHERE " NOTE_VISIBLE_SQL);
+    if (stmt == NULL)
+        return 0;
+    gint count = 0;                  /* every note outside the Trash        */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
+}
 
 gint
 on_db_note_count_for_folder(OnDatabase *db, gint64 folder_id)
 {
     sqlite3_stmt *stmt = prepare(db,
-        "SELECT COUNT(*) FROM notes WHERE folder_id IS ?");
+        "SELECT COUNT(*) FROM notes WHERE folder_id IS ? AND trashed=0");
     if (stmt == NULL)
         return 0;
     bind_id_or_null(stmt, 1, folder_id);
@@ -853,8 +1115,10 @@ count_map_from_query(OnDatabase *db, const gchar *sql)
 GHashTable *
 on_db_note_count_map(OnDatabase *db)
 {
+    /* trashed=0 only (no subtree filter): folders inside the Trash keep
+     * their counts — the map also labels the Trash section's folder rows.   */
     return count_map_from_query(db,
-        "SELECT COALESCE(folder_id,0), COUNT(*) FROM notes "
+        "SELECT COALESCE(folder_id,0), COUNT(*) FROM notes WHERE trashed=0 "
         "GROUP BY COALESCE(folder_id,0)");
 }
 
@@ -862,7 +1126,11 @@ GHashTable *
 on_db_tag_count_map(OnDatabase *db)
 {
     return count_map_from_query(db,
-        "SELECT tag_id, COUNT(*) FROM note_tags GROUP BY tag_id");
+        "SELECT nt.tag_id, COUNT(*) FROM note_tags nt "
+        "JOIN notes n ON n.id = nt.note_id "
+        "WHERE n.trashed=0 AND (n.folder_id IS NULL OR "
+        "      n.folder_id NOT IN (SELECT id FROM trash_folder_ids)) "
+        "GROUP BY nt.tag_id");
 }
 
 GHashTable *

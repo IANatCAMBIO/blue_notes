@@ -9,14 +9,23 @@
  *
  * Schema
  * ------
- *   folders   (id, parent_id, name, sort_order)          -- nested via parent_id
+ *   folders   (id, parent_id, name, sort_order, trashed) -- nested via parent_id
  *   notes     (id, folder_id, title, content BLOB,
- *              sort_order, created_at, updated_at)
+ *              sort_order, created_at, updated_at,
+ *              pinned, body_text, trashed)
  *   tags      (id, name UNIQUE)
  *   note_tags (note_id, tag_id)                          -- many-to-many
  *
  * A NULL parent_id means "top-level folder"; a NULL folder_id means the
  * note lives at the top level ("Notes" root).
+ *
+ * Trash is a soft-delete FLAG, not a folder: deleting sets trashed=1 and
+ * leaves folder_id/parent_id untouched (that is the "restore to" location).
+ * A trashed folder keeps its whole subtree attached — only the top folder
+ * is flagged; its descendants (and their notes) are implicitly trashed via
+ * the trash_folder_ids view (recursive closure of flagged folders).  All
+ * normal listings/counts filter trash out; on_db_note_list_all() can
+ * include it so search still finds deleted notes.
  * =========================================================================== */
 
 #ifndef BLUE_DB_H
@@ -109,8 +118,10 @@ gint64 on_db_folder_create(OnDatabase *db, gint64 parent_id, const gchar *name);
 /* Rename folder `id` to `name`. Returns TRUE on success.                    */
 gboolean on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name);
 
-/* Delete folder `id`; all descendant folders and contained notes are
- * removed by ON DELETE CASCADE. Returns TRUE on success.                    */
+/* PERMANENTLY delete folder `id`; all descendant folders and contained
+ * notes are removed by ON DELETE CASCADE and orphaned tags are pruned.
+ * The GUI trashes folders instead (on_db_folder_trash); this is the
+ * empty-trash / CLI path. Returns TRUE on success.                          */
 gboolean on_db_folder_delete(OnDatabase *db, gint64 id);
 
 /* List the *direct* children of `parent_id` (0 = top level), ordered by
@@ -181,10 +192,17 @@ OnNoteMeta *on_db_note_get(OnDatabase *db, gint64 id);
  * Returns a GList of OnNoteMeta*; free with on_db_note_list_free().         */
 GList *on_db_note_list(OnDatabase *db, gint64 folder_id);
 
-/* List ALL notes in the database (for export), ordered by folder then
- * sort_order. Returns a GList of OnNoteMeta*; free with
+/* List ALL notes in the database, ordered by folder then sort_order.
+ *   include_trash — TRUE to include trashed notes and notes inside
+ *                   trashed folders (search wants them); FALSE for the
+ *                   normal visible set (export, CLI listing).
+ * Returns a GList of OnNoteMeta*; free with on_db_note_list_free().         */
+GList *on_db_note_list_all(OnDatabase *db, gboolean include_trash);
+
+/* List every visible (non-trashed) note, newest first — the library's
+ * "All Notes" view. Returns a GList of OnNoteMeta*; free with
  * on_db_note_list_free().                                                   */
-GList *on_db_note_list_all(OnDatabase *db);
+GList *on_db_note_list_recent(OnDatabase *db);
 
 /* Set or clear a note's pinned flag. Returns TRUE on success.               */
 gboolean on_db_note_set_pinned(OnDatabase *db, gint64 id, gboolean pinned);
@@ -234,7 +252,56 @@ gboolean on_db_note_set_tags(OnDatabase *db, gint64 note_id, GList *tag_names);
  * Returns a GList of OnNoteMeta*; free with on_db_note_list_free().         */
 GList *on_db_notes_by_tag(OnDatabase *db, gint64 tag_id);
 
+/* ----------------------------- trash ------------------------------------ */
+
+/* Move `n` notes to the Trash in one transaction (trashed=1; folder_id is
+ * kept as the restore location). Returns TRUE on success.                   */
+gboolean on_db_notes_trash(OnDatabase *db, const gint64 *ids, gsize n);
+
+/* Restore note `id` from the Trash.  Its folder_id is kept unless that
+ * folder is itself (implicitly) trashed, in which case the note lands at
+ * the top level. Also un-nests a note out of a trashed folder (moves it
+ * to the top level) even when the note itself carries no trashed flag.
+ * Returns TRUE on success.                                                  */
+gboolean on_db_note_restore(OnDatabase *db, gint64 id);
+
+/* Move folder `id` (with its whole subtree, implicitly) to the Trash.       */
+gboolean on_db_folder_trash(OnDatabase *db, gint64 id);
+
+/* Restore folder `id` to its original parent, or to the top level when
+ * that parent is itself still in the Trash. Returns TRUE on success.        */
+gboolean on_db_folder_restore(OnDatabase *db, gint64 id);
+
+/* List the directly-trashed folders (the Trash section's children),
+ * ordered by name. Returns a GList of OnFolder*; free with
+ * on_db_folder_list_free().                                                 */
+GList *on_db_folder_list_trashed(OnDatabase *db);
+
+/* List the directly-trashed notes (what selecting Trash shows), newest
+ * first. Returns a GList of OnNoteMeta*; free with on_db_note_list_free(). */
+GList *on_db_note_list_trashed(OnDatabase *db);
+
+/* Number of items directly in the Trash: trashed notes + trashed folders. */
+gint on_db_trash_count(OnDatabase *db);
+
+/* Ids of EVERY note that would go with an empty-trash: directly-trashed
+ * notes plus all notes inside trashed folder subtrees.  Used to close
+ * their editors first. Returns a GArray of gint64; g_array_free(_, TRUE).   */
+GArray *on_db_trash_note_ids(OnDatabase *db);
+
+/* Ids of every note in folder `folder_id`'s subtree (the folder itself
+ * included). Returns a GArray of gint64; g_array_free(_, TRUE).             */
+GArray *on_db_folder_note_ids(OnDatabase *db, gint64 folder_id);
+
+/* Permanently delete everything in the Trash (one transaction, orphaned
+ * tags pruned). Returns TRUE on success.                                    */
+gboolean on_db_trash_empty(OnDatabase *db);
+
 /* ----------------------------- counts ----------------------------------- */
+
+/* Number of visible (non-trashed) notes in the whole database — the
+ * count shown on the "All Notes" sidebar row.                               */
+gint on_db_note_count_visible(OnDatabase *db);
 
 /* Number of notes directly inside folder `folder_id` (0 = top level).      */
 gint on_db_note_count_for_folder(OnDatabase *db, gint64 folder_id);

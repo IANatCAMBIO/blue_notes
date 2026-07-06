@@ -3,10 +3,12 @@
  *
  * See library_window.h for the layout overview.  Key mechanics:
  *
- *   sidebar    — a GtkTreeView over a GtkTreeStore holding two sections:
- *                the folder hierarchy (rooted at a fixed "Notes" row) and
- *                a flat "Tags" section.  Row kinds are distinguished by
- *                the SB_KIND column.
+ *   sidebar    — a GtkTreeView over a GtkTreeStore holding the sections
+ *                "All Notes", the folder hierarchy (rooted at a fixed
+ *                "Notes" row), a flat "Tags" section, "Pinned Notes",
+ *                and — while non-empty — "Trash" (trashed folders as its
+ *                children).  Row kinds are distinguished by the SB_KIND
+ *                column.
  *
  *   notes pane — a GtkListStore shown either as a GtkTreeView (list mode,
  *                drag-reorderable) or a GtkIconView (grid mode).  Both
@@ -48,6 +50,9 @@ enum {
     SB_KIND_TAGS_HEADER,             /* the "Tags" section header           */
     SB_KIND_TAG,                     /* one tag                             */
     SB_KIND_PINNED,                  /* the "Pinned Notes" section          */
+    SB_KIND_ALL,                     /* the "All Notes" section             */
+    SB_KIND_TRASH,                   /* the "Trash" section                 */
+    SB_KIND_TRASH_FOLDER,            /* a trashed folder under Trash        */
 };
 
 /* Sidebar GtkTreeStore columns.                                             */
@@ -168,6 +173,8 @@ static void    refresh_sidebar(OnLibrary *lw);
 static void    refresh_notes(OnLibrary *lw);
 static void    status_path_update(OnLibrary *lw);
 static GArray *selected_note_ids(OnLibrary *lw);
+static void    close_editors_for_ids(OnLibrary *lw, const gint64 *ids,
+                                     gsize n);
 static void    add_menu_item(GtkWidget *menu, const gchar *label,
                              GCallback callback, gpointer data);
 static void    about_button_fit_style(GtkToolItem *item,
@@ -241,6 +248,16 @@ count_from_map(GHashTable *map, gint64 id)
     return GPOINTER_TO_INT(g_hash_table_lookup(map, &id));
 }
 
+/* in_trash_view() — is the notes pane showing Trash contents (the Trash
+ * row itself or a trashed folder)?  Deletes there are permanent and the
+ * note context menu switches to Restore/Delete Permanently.                 */
+static gboolean
+in_trash_view(OnLibrary *lw)
+{
+    return lw->sel_kind == SB_KIND_TRASH ||
+           lw->sel_kind == SB_KIND_TRASH_FOLDER;
+}
+
 static void
 add_folder_rows(OnLibrary *lw, gint64 parent_id, GtkTreeIter *parent_iter,
                 GHashTable *note_counts)
@@ -291,6 +308,21 @@ refresh_sidebar(OnLibrary *lw)
      * queries added up (especially against a shared/networked db).         */
     GHashTable *note_counts = on_db_note_count_map(lw->app->db);
     GHashTable *tag_counts  = on_db_tag_count_map(lw->app->db);
+
+    /* "All Notes" — a live view of every note outside the Trash.           */
+    gchar *all_label = lw->app->sidebar_counts
+        ? g_strdup_printf("All Notes (%d)",
+                          on_db_note_count_visible(lw->app->db))
+        : g_strdup("All Notes");
+    GtkTreeIter all_iter;            /* the fixed "All Notes" row           */
+    gtk_tree_store_append(lw->sidebar_store, &all_iter, NULL);
+    gtk_tree_store_set(lw->sidebar_store, &all_iter,
+                       SB_KIND, SB_KIND_ALL,
+                       SB_ID,   (gint64)0,
+                       SB_NAME, all_label,
+                       SB_RAW,  "All Notes",
+                       -1);
+    g_free(all_label);
 
     /* "Notes" root — selecting it shows the top-level notes.               */
     gchar *root_label = lw->app->sidebar_counts
@@ -357,12 +389,50 @@ refresh_sidebar(OnLibrary *lw)
         g_free(label);
     }
 
+    /* "Trash" at the bottom, only while it holds something.  Selecting
+     * it lists the directly-trashed notes; trashed folders hang under it
+     * as browsable children (their subtrees stay hidden until restore).    */
+    gint n_trash = on_db_trash_count(lw->app->db);
+    if (n_trash > 0) {
+        gchar *label = lw->app->sidebar_counts
+            ? g_strdup_printf("Trash (%d)", n_trash)
+            : g_strdup("Trash");
+        GtkTreeIter trash_iter;      /* the "Trash" section row             */
+        gtk_tree_store_append(lw->sidebar_store, &trash_iter, NULL);
+        gtk_tree_store_set(lw->sidebar_store, &trash_iter,
+                           SB_KIND, SB_KIND_TRASH,
+                           SB_ID,   (gint64)0,
+                           SB_NAME, label,
+                           SB_RAW,  "Trash",
+                           -1);
+        g_free(label);
+
+        GList *trashed = on_db_folder_list_trashed(lw->app->db);
+        for (GList *l = trashed; l != NULL; l = l->next) {
+            OnFolder *f = l->data;   /* one trashed folder                  */
+            gchar *display = lw->app->sidebar_counts
+                ? g_strdup_printf("%s (%d)", f->name,
+                                  count_from_map(note_counts, f->id))
+                : g_strdup(f->name);
+            GtkTreeIter iter;
+            gtk_tree_store_append(lw->sidebar_store, &iter, &trash_iter);
+            gtk_tree_store_set(lw->sidebar_store, &iter,
+                               SB_KIND, SB_KIND_TRASH_FOLDER,
+                               SB_ID,   f->id,
+                               SB_NAME, display,
+                               SB_RAW,  f->name,
+                               -1);
+            g_free(display);
+        }
+        on_db_folder_list_free(trashed);
+    }
+
     g_hash_table_destroy(note_counts);
     g_hash_table_destroy(tag_counts);
 
     gtk_tree_view_expand_all(lw->sidebar);
 
-    /* Restore the previous selection, falling back to the root row.  The
+    /* Restore the previous selection, falling back to "All Notes".  The
      * populating guard stays up through the restore: the select_iter
      * below would otherwise fire the changed handler and rebuild the
      * notes pane a second time — every refresh_sidebar caller already
@@ -411,10 +481,12 @@ refresh_sidebar(OnLibrary *lw)
     g_queue_clear_full(&queue, g_free);
 
     if (!restored) {
-        lw->sel_kind = SB_KIND_ROOT;
+        /* The first row is the "All Notes" section — the state must match
+         * the row the fallback highlights.                                 */
+        lw->sel_kind = SB_KIND_ALL;
         lw->sel_id   = 0;
         g_free(lw->sel_name);
-        lw->sel_name = g_strdup("Notes");
+        lw->sel_name = g_strdup("All Notes");
         if (gtk_tree_model_get_iter_first(
                 GTK_TREE_MODEL(lw->sidebar_store), &iter))
             gtk_tree_selection_select_iter(sel, &iter);
@@ -422,9 +494,9 @@ refresh_sidebar(OnLibrary *lw)
     lw->populating--;
 
     /* The old selection no longer exists (deleted folder/pruned tag), so
-     * the notes pane still shows its contents: refresh for the new root
-     * selection.  When the selection was restored, the caller's own
-     * refresh_notes covers it.                                             */
+     * the notes pane still shows its contents: refresh for the new
+     * fallback selection.  When the selection was restored, the caller's
+     * own refresh_notes covers it.                                         */
     if (!restored)
         refresh_notes(lw);
 
@@ -616,7 +688,11 @@ refresh_notes(OnLibrary *lw)
         notes = on_db_notes_by_tag(lw->app->db, lw->sel_id);
     else if (lw->sel_kind == SB_KIND_PINNED)
         notes = on_db_note_list_pinned(lw->app->db);
-    else
+    else if (lw->sel_kind == SB_KIND_ALL)
+        notes = on_db_note_list_recent(lw->app->db);
+    else if (lw->sel_kind == SB_KIND_TRASH)
+        notes = on_db_note_list_trashed(lw->app->db);
+    else                             /* root, folder, or trashed folder     */
         notes = on_db_note_list(lw->app->db, lw->sel_id);
 
     for (GList *l = notes; l != NULL; l = l->next) {
@@ -657,9 +733,11 @@ refresh_notes(OnLibrary *lw)
 static void
 persist_note_order(OnLibrary *lw)
 {
-    /* Only real folder views own an ordering; tag and pinned views are
-     * assembled from elsewhere.                                            */
-    if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED)
+    /* Only real folder views own an ordering; the tag, pinned, all-notes
+     * and trash views are assembled from elsewhere (persisting a drag in
+     * All Notes would scramble every folder's internal order).             */
+    if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED ||
+        lw->sel_kind == SB_KIND_ALL || in_trash_view(lw))
         return;
 
     GArray *ids = g_array_new(FALSE, FALSE, sizeof(gint64));
@@ -830,7 +908,8 @@ on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
             gtk_tree_model_get(GTK_TREE_MODEL(lw->sidebar_store),
                                &dest_iter,
                                SB_KIND, &kind, SB_ID, &folder_id, -1);
-            if (kind == SB_KIND_FOLDER || kind == SB_KIND_ROOT) {
+            if (kind == SB_KIND_FOLDER || kind == SB_KIND_ROOT ||
+                kind == SB_KIND_TRASH) {
                 /* Multi-select support: when the dragged note is part of
                  * the current selection, the whole selection moves.        */
                 GArray *ids = selected_note_ids(lw);
@@ -842,10 +921,21 @@ on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
                     g_array_set_size(ids, 0);
                     g_array_append_val(ids, note_id);
                 }
-                for (guint i = 0; i < ids->len; i++)
-                    success |= on_db_note_move(
-                        lw->app->db, g_array_index(ids, gint64, i),
-                        folder_id);
+                if (kind == SB_KIND_TRASH) {
+                    /* Dropping on Trash IS the delete gesture.             */
+                    close_editors_for_ids(lw, (const gint64 *)ids->data,
+                                          ids->len);
+                    success = on_db_notes_trash(
+                        lw->app->db, (const gint64 *)ids->data, ids->len);
+                    if (success)
+                        on_app_status(lw->app, "Moved %u note%s to Trash",
+                                      ids->len, ids->len == 1 ? "" : "s");
+                } else {
+                    for (guint i = 0; i < ids->len; i++)
+                        success |= on_db_note_move(
+                            lw->app->db, g_array_index(ids, gint64, i),
+                            folder_id);
+                }
                 g_array_free(ids, TRUE);
                 if (success) {
                     refresh_notes(lw);
@@ -1043,61 +1133,155 @@ selected_note_ids(OnLibrary *lw)
 }
 
 /* ---------------------------------------------------------------------------
- * delete_notes_with_confirm() — confirm once, then delete every note in
- * `ids` (closing any open editors first).
+ * close_editors_for_ids() — destroy any open editor window for the notes
+ * in `ids`; their destroy handlers flush pending autosaves first.
  * ------------------------------------------------------------------------- */
 static void
-delete_notes_with_confirm(OnLibrary *lw, GArray *ids)
+close_editors_for_ids(OnLibrary *lw, const gint64 *ids, gsize n)
 {
-    if (ids->len == 0)
-        return;
-    gchar *question = (ids->len == 1)
-        ? g_strdup("Delete this note?")
-        : g_strdup_printf("Delete these %u notes?", ids->len);
-    gboolean ok = confirm(lw, question, "This cannot be undone.");
-    g_free(question);
-    if (!ok)
-        return;
-
-    /* Close open editors first, then delete the lot in one transaction.   */
-    for (guint i = 0; i < ids->len; i++) {
-        gint64 note_id = g_array_index(ids, gint64, i);
+    for (gsize i = 0; i < n; i++) {
+        gint64 note_id = ids[i];
         GtkWidget *editor =
             g_hash_table_lookup(lw->app->editors, &note_id);
         if (editor != NULL)
             gtk_widget_destroy(editor);
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * trash_notes() — move every note in `ids` to the Trash (closing any open
+ * editors first).  No confirmation: the move is reversible, so a status
+ * message is enough.
+ * ------------------------------------------------------------------------- */
+static void
+trash_notes(OnLibrary *lw, GArray *ids)
+{
+    if (ids->len == 0)
+        return;
+    close_editors_for_ids(lw, (const gint64 *)ids->data, ids->len);
+    if (on_db_notes_trash(lw->app->db, (const gint64 *)ids->data,
+                          ids->len)) {
+        on_app_status(lw->app, "Moved %u note%s to Trash",
+                      ids->len, ids->len == 1 ? "" : "s");
+        refresh_notes(lw);
+        refresh_sidebar(lw);         /* counts + the Trash section          */
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * delete_notes_permanently() — confirm once, then permanently delete every
+ * note in `ids` (closing any open editors first).  This is the Trash-view
+ * delete; normal views go through trash_notes().
+ * ------------------------------------------------------------------------- */
+static void
+delete_notes_permanently(OnLibrary *lw, GArray *ids)
+{
+    if (ids->len == 0)
+        return;
+    gchar *question = (ids->len == 1)
+        ? g_strdup("Permanently delete this note?")
+        : g_strdup_printf("Permanently delete these %u notes?", ids->len);
+    gboolean ok = confirm(lw, question, "This cannot be undone.");
+    g_free(question);
+    if (!ok)
+        return;
+
+    close_editors_for_ids(lw, (const gint64 *)ids->data, ids->len);
     on_db_notes_delete(lw->app->db, (const gint64 *)ids->data, ids->len);
     refresh_notes(lw);
     refresh_sidebar(lw);             /* tag list/counts may have changed    */
 }
 
-/* on_delete_note() — action-bar Delete: remove every selected note.         */
+/* on_delete_note() — action-bar Delete: trash every selected note, or
+ * permanently delete it when the Trash is what's being viewed.              */
 static void
 on_delete_note(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
     GArray *ids = selected_note_ids(lw);
-    delete_notes_with_confirm(lw, ids);
+    if (in_trash_view(lw))
+        delete_notes_permanently(lw, ids);
+    else
+        trash_notes(lw, ids);
     g_array_free(ids, TRUE);
 }
 
-/* on_delete_folder() — sidebar-toolbar Delete: remove the selected folder
- * (and, by cascade, everything inside it).                                  */
+/* on_delete_folder() — sidebar-toolbar Delete: move the selected folder
+ * (with its whole subtree) to the Trash; a folder already in the Trash is
+ * permanently deleted instead (after confirmation).                         */
 static void
 on_delete_folder(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
-    if (lw->sel_kind != SB_KIND_FOLDER)
+    if (lw->sel_kind == SB_KIND_FOLDER) {
+        if (on_db_folder_trash(lw->app->db, lw->sel_id)) {
+            on_app_status(lw->app,
+                          "Folder \xe2\x80\x9c%s\xe2\x80\x9d moved to Trash",
+                          lw->sel_name);
+            lw->sel_kind = SB_KIND_ROOT;
+            lw->sel_id   = 0;
+            refresh_sidebar(lw);
+            refresh_notes(lw);
+        }
+    } else if (lw->sel_kind == SB_KIND_TRASH_FOLDER) {
+        if (confirm(lw,
+                    "Permanently delete this folder and everything "
+                    "inside it?",
+                    "This cannot be undone.")) {
+            GArray *ids = on_db_folder_note_ids(lw->app->db, lw->sel_id);
+            close_editors_for_ids(lw, (const gint64 *)ids->data, ids->len);
+            g_array_free(ids, TRUE);
+            on_db_folder_delete(lw->app->db, lw->sel_id);
+            lw->sel_kind = SB_KIND_TRASH;
+            lw->sel_id   = 0;
+            refresh_sidebar(lw);
+            refresh_notes(lw);
+        }
+    }
+}
+
+/* on_restore_folder() — Trash context menu: put the selected trashed
+ * folder (and its subtree) back where it was deleted from; the selection
+ * follows it to its restored spot.                                          */
+static void
+on_restore_folder(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    if (lw->sel_kind != SB_KIND_TRASH_FOLDER)
         return;
-    if (confirm(lw, "Delete this folder and everything inside it?",
-                "This cannot be undone.")) {
-        on_db_folder_delete(lw->app->db, lw->sel_id);
-        lw->sel_kind = SB_KIND_ROOT;
-        lw->sel_id   = 0;
+    if (on_db_folder_restore(lw->app->db, lw->sel_id)) {
+        on_app_status(lw->app,
+                      "Folder \xe2\x80\x9c%s\xe2\x80\x9d restored",
+                      lw->sel_name);
+        lw->sel_kind = SB_KIND_FOLDER;   /* same id, back in the tree       */
         refresh_sidebar(lw);
+        refresh_notes(lw);
+    }
+}
+
+/* on_empty_trash() — Trash context menu: permanently delete everything in
+ * the Trash after one confirmation.                                         */
+static void
+on_empty_trash(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    if (!confirm(lw, "Permanently delete everything in the Trash?",
+                 "This cannot be undone."))
+        return;
+
+    /* Close editors for every note the purge will take with it —
+     * including notes inside trashed folder subtrees.                      */
+    GArray *ids = on_db_trash_note_ids(lw->app->db);
+    close_editors_for_ids(lw, (const gint64 *)ids->data, ids->len);
+    g_array_free(ids, TRUE);
+
+    if (on_db_trash_empty(lw->app->db)) {
+        on_app_status(lw->app, "Trash emptied");
+        refresh_sidebar(lw);         /* the Trash section disappears        */
         refresh_notes(lw);
     }
 }
@@ -1120,13 +1304,18 @@ on_rename_folder(GtkWidget *widget, gpointer user_data)
 
 /* on_open_search() — sidebar-toolbar Search: open the search window (it
  * reads the live library selection each time Search is pressed).  The
- * scope radio defaults to the selection when it is narrower than "all".    */
+ * scope radio defaults to the selection when it is narrower than "all" —
+ * a folder or tag; the All Notes/Trash/Pinned sections have no folder
+ * scope, so they default to searching everything.                           */
 static void
 on_open_search(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
-    on_search_window_open(lw->app, lw->sel_kind != SB_KIND_ROOT);
+    gboolean scoped = lw->sel_kind == SB_KIND_FOLDER ||
+                      lw->sel_kind == SB_KIND_TAG ||
+                      lw->sel_kind == SB_KIND_TRASH_FOLDER;
+    on_search_window_open(lw->app, scoped);
 }
 
 /* on_open_settings() — File → Settings…                                     */
@@ -1497,7 +1686,23 @@ on_sidebar_button_press(GtkWidget *widget, GdkEventButton *event,
     g_signal_connect(menu, "selection-done",
                      G_CALLBACK(gtk_widget_destroy), NULL);
 
-    if (kind == SB_KIND_FOLDER || kind == SB_KIND_ROOT) {
+    if (kind == SB_KIND_TRASH) {
+        /* The Trash row's only action: purge it.                           */
+        add_menu_item(menu, "_Empty Trash\xe2\x80\xa6",
+                      G_CALLBACK(on_empty_trash), lw);
+        gtk_widget_show_all(menu);
+        gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+        return TRUE;
+    }
+
+    if (kind == SB_KIND_TRASH_FOLDER) {
+        add_menu_item(menu, "_Restore Folder",
+                      G_CALLBACK(on_restore_folder), lw);
+        add_menu_item(menu, "Delete _Permanently",
+                      G_CALLBACK(on_delete_folder), lw);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu),
+                              gtk_separator_menu_item_new());
+    } else if (kind == SB_KIND_FOLDER || kind == SB_KIND_ROOT) {
         add_menu_item(menu,
                       kind == SB_KIND_FOLDER ? "New _Subfolder\xe2\x80\xa6"
                                              : "New _Folder\xe2\x80\xa6",
@@ -1505,7 +1710,7 @@ on_sidebar_button_press(GtkWidget *widget, GdkEventButton *event,
         if (kind == SB_KIND_FOLDER) {
             add_menu_item(menu, "_Rename\xe2\x80\xa6",
                           G_CALLBACK(on_rename_folder), lw);
-            add_menu_item(menu, "_Delete Folder",
+            add_menu_item(menu, "Move to _Trash",
                           G_CALLBACK(on_delete_folder), lw);
         }
         gtk_menu_shell_append(GTK_MENU_SHELL(menu),
@@ -1704,7 +1909,30 @@ on_note_ctx_delete(GtkMenuItem *item, gpointer user_data)
     (void)item;
     OnLibrary *lw = user_data;       /* owning library window               */
     GArray *ids = selected_note_ids(lw);
-    delete_notes_with_confirm(lw, ids);
+    if (in_trash_view(lw))
+        delete_notes_permanently(lw, ids);
+    else
+        trash_notes(lw, ids);
+    g_array_free(ids, TRUE);
+}
+
+/* on_note_ctx_restore() — Trash-view context menu: put every selected
+ * note back where it was deleted from (top level when that folder is
+ * itself still in the Trash).                                               */
+static void
+on_note_ctx_restore(GtkMenuItem *item, gpointer user_data)
+{
+    (void)item;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    GArray *ids = selected_note_ids(lw);
+    if (ids->len > 0) {
+        for (guint i = 0; i < ids->len; i++)
+            on_db_note_restore(lw->app->db, g_array_index(ids, gint64, i));
+        on_app_status(lw->app, "Restored %u note%s",
+                      ids->len, ids->len == 1 ? "" : "s");
+        refresh_notes(lw);
+        refresh_sidebar(lw);         /* counts + the Trash section          */
+    }
     g_array_free(ids, TRUE);
 }
 
@@ -1747,16 +1975,27 @@ show_note_context_menu(OnLibrary *lw, gint64 note_id, GdkEventButton *event)
     gboolean pinned = meta != NULL && meta->pinned;
     on_db_note_meta_free(meta);
 
-    struct { const gchar *label; GCallback cb; } items[] = {
+    /* Two menus: the normal one, and the Trash view's restore/purge one.   */
+    typedef struct { const gchar *label; GCallback cb; } NoteMenuItem;
+    NoteMenuItem normal_items[] = {
         { "_Open",                          G_CALLBACK(on_note_ctx_open) },
         { pinned ? "Un_pin" : "_Pin",       G_CALLBACK(on_note_ctx_toggle_pin) },
         { NULL,                             NULL /* separator */          },
         { "Export as _HTML\xe2\x80\xa6",    G_CALLBACK(on_note_ctx_export_html) },
         { "Export as _Markdown\xe2\x80\xa6",G_CALLBACK(on_note_ctx_export_md)   },
         { NULL,                             NULL /* separator */          },
-        { "_Delete",                        G_CALLBACK(on_note_ctx_delete) },
+        { "Move to _Trash",                 G_CALLBACK(on_note_ctx_delete) },
     };
-    for (gsize i = 0; i < G_N_ELEMENTS(items); i++) {
+    NoteMenuItem trash_items[] = {
+        { "_Open",                          G_CALLBACK(on_note_ctx_open) },
+        { "_Restore",                       G_CALLBACK(on_note_ctx_restore) },
+        { NULL,                             NULL /* separator */          },
+        { "Delete _Permanently",            G_CALLBACK(on_note_ctx_delete) },
+    };
+    NoteMenuItem *items = in_trash_view(lw) ? trash_items : normal_items;
+    gsize n_items = in_trash_view(lw) ? G_N_ELEMENTS(trash_items)
+                                      : G_N_ELEMENTS(normal_items);
+    for (gsize i = 0; i < n_items; i++) {
         GtkWidget *mi;               /* menu item (or separator)            */
         if (items[i].label == NULL) {
             mi = gtk_separator_menu_item_new();
@@ -1870,8 +2109,12 @@ status_path_update(OnLibrary *lw)
         return;
 
     gchar *text;                     /* what the label should show          */
-    if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED) {
+    if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED ||
+        lw->sel_kind == SB_KIND_ALL || lw->sel_kind == SB_KIND_TRASH) {
         text = g_strdup(lw->sel_name != NULL ? lw->sel_name : "");
+    } else if (lw->sel_kind == SB_KIND_TRASH_FOLDER) {
+        text = g_strdup_printf("Trash/%s",
+                               lw->sel_name != NULL ? lw->sel_name : "");
     } else {
         gchar *path = on_db_folder_path(lw->app->db, lw->sel_id);
         text = g_strdup_printf("/%s", path);
@@ -1992,6 +2235,15 @@ on_library_get_scope(OnApp *app, OnSearchScope *scope, gint64 *id,
         ? g_object_get_data(G_OBJECT(app->library_window), "on-library")
         : NULL;
     if (lw == NULL)
+        return;
+
+    /* Only tags and folder-like selections (including a trashed folder
+     * browsed from the Trash section) make a meaningful scope; All Notes,
+     * Trash and Pinned keep the "everything" default above.                 */
+    if (lw->sel_kind != SB_KIND_TAG &&
+        lw->sel_kind != SB_KIND_FOLDER &&
+        lw->sel_kind != SB_KIND_TRASH_FOLDER &&
+        lw->sel_kind != SB_KIND_ROOT)
         return;
 
     *scope = (lw->sel_kind == SB_KIND_TAG) ? ON_SCOPE_TAG
@@ -2178,7 +2430,8 @@ build_action_bar(OnLibrary *lw)
                     "New Folder", "Create a folder inside the selection",
                     G_CALLBACK(on_new_folder));
     add_tool_button(lw, toolbar, "delete-folder", "\xe2\x9c\x95",
-                    "Delete Folder", "Delete the selected folder",
+                    "Delete Folder",
+                    "Move the selected folder to the Trash",
                     G_CALLBACK(on_delete_folder));
     /* Rename lives in the folder's right-click menu only.                  */
 
@@ -2190,7 +2443,8 @@ build_action_bar(OnLibrary *lw)
                     "Create a note in the current folder",
                     G_CALLBACK(on_new_note));
     add_tool_button(lw, toolbar, "delete", "\xe2\x9c\x95",
-                    "Delete Note", "Delete the selected note",
+                    "Delete Note",
+                    "Move the selected notes to the Trash",
                     G_CALLBACK(on_delete_note));
     add_tool_button(lw, toolbar, "view", "\xe2\x8a\x9e",
                     "List/Grid", "Toggle between list and grid view",
@@ -2336,7 +2590,9 @@ sidebar_name_cell_func(GtkTreeViewColumn *col, GtkCellRenderer *cell,
     gtk_tree_model_get(model, iter, SB_KIND, &kind, -1);
     gboolean bold = kind == SB_KIND_ROOT ||
                     kind == SB_KIND_TAGS_HEADER ||
-                    kind == SB_KIND_PINNED;
+                    kind == SB_KIND_PINNED ||
+                    kind == SB_KIND_ALL ||
+                    kind == SB_KIND_TRASH;
     g_object_set(cell, "weight",
                  bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL, NULL);
 }
@@ -2376,7 +2632,9 @@ sb_fit_measure(GtkTreeModel *model, GtkTreePath *path,
     if (name && *name) {
         gboolean bold = (kind == SB_KIND_ROOT  ||
                          kind == SB_KIND_TAGS_HEADER ||
-                         kind == SB_KIND_PINNED);
+                         kind == SB_KIND_PINNED ||
+                         kind == SB_KIND_ALL ||
+                         kind == SB_KIND_TRASH);
         PangoAttrList *al = pango_attr_list_new();
         if (bold)
             pango_attr_list_insert(al,

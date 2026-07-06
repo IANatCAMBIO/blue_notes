@@ -293,7 +293,9 @@ search_worker(gpointer user_data)
 
     GList *notes;                    /* OnNoteMeta* candidates              */
     if (!job->scoped)
-        notes = on_db_note_list_all(db);
+        /* All-scope deliberately includes the Trash: deleted notes stay
+         * findable until the Trash is emptied.                              */
+        notes = on_db_note_list_all(db, TRUE);
     else if (job->scope_tag)
         notes = on_db_notes_by_tag(db, job->scope_id);
     else

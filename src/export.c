@@ -671,7 +671,7 @@ on_export_all(OnApp *app, const gchar *dest_dir, OnExportFormat format,
         return -1;
     }
 
-    GList *notes = on_db_note_list_all(app->db);
+    GList *notes = on_db_note_list_all(app->db, FALSE);
     gint exported = 0;               /* notes successfully written          */
 
     /* Paths emitted this run (for within-run uniquification) and a

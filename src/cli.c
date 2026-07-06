@@ -206,7 +206,7 @@ cmd_list_notes(OnDatabase *db, const gchar *path)
 {
     GList *notes;                    /* the OnNoteMeta* result set          */
     if (g_strcmp0(path, "--all") == 0) {
-        notes = on_db_note_list_all(db);
+        notes = on_db_note_list_all(db, FALSE);
     } else {
         gint64 folder;               /* resolved folder id                  */
         if (!on_cli_resolve_folder_path(db, path, FALSE, &folder)) {
