@@ -3619,6 +3619,21 @@ on_library_window_create(OnApp *app)
             "treeview.view:selected {"
             "  background-color: rgb(86,131,224);"
             "  color: white;"
+            "}"
+            /* Drop indicator (drawn as the border of the row under the
+             * pointer, state :drop(active) + a position class): a 2px
+             * line in the selection blue — top edge for BEFORE, bottom
+             * for AFTER, a full box for INTO.                             */
+            "treeview.view:drop(active) {"
+            "  border-color: rgb(86,131,224);"
+            "  border-width: 2px;"
+            "  border-style: solid;"
+            "}"
+            "treeview.view:drop(active).before {"
+            "  border-style: solid none none none;"
+            "}"
+            "treeview.view:drop(active).after {"
+            "  border-style: none none solid none;"
             "}",
             -1, NULL);
         gtk_style_context_add_provider(
@@ -3677,6 +3692,31 @@ on_library_window_create(OnApp *app)
     /* --- notes list view ---------------------------------------------------*/
     lw->notes_list = GTK_TREE_VIEW(
         gtk_tree_view_new_with_model(GTK_TREE_MODEL(lw->notes_store)));
+
+    /* Same drop-indicator styling as the sidebar: a 2px line in the
+     * selection blue for the in-list reorder drag.  Notes are a flat
+     * list, so there is no real "into" — GTK still reports INTO_OR_*
+     * over the middle of a row, but a list-store drop there INSERTS
+     * BEFORE that row, so the .into indicator is drawn as the same
+     * between-rows line (top edge), never a box.                          */
+    {
+        GtkCssProvider *css = gtk_css_provider_new();
+        gtk_css_provider_load_from_data(css,
+            "treeview.view:drop(active) {"
+            "  border-color: rgb(86,131,224);"
+            "  border-width: 2px;"
+            "  border-style: solid none none none;"
+            "}"
+            "treeview.view:drop(active).after {"
+            "  border-style: none none solid none;"
+            "}",
+            -1, NULL);
+        gtk_style_context_add_provider(
+            gtk_widget_get_style_context(GTK_WIDGET(lw->notes_list)),
+            GTK_STYLE_PROVIDER(css),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(css);
+    }
     {
         /* Each column gets a data func painting the alternating row tint.  */
         GtkCellRenderer *r1 = gtk_cell_renderer_text_new();
