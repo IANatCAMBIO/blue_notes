@@ -325,7 +325,15 @@ sees the new flags.
   pane itself.
 - Multi-note deletes go through `on_db_notes_delete` (one transaction +
   one orphan-tag prune), not per-note `on_db_note_delete` (which
-  fsyncs and prunes per call). The `#tag` autocomplete queries the tag
+  fsyncs and prunes per call).  Multi-note DROPS likewise use
+  `on_db_notes_move` (one transaction) — per-note `on_db_note_move`
+  fsyncs per call and froze the GUI on big drops.  The drop handler
+  also calls `gtk_drag_finish` BEFORE its refreshes so the DnD
+  handshake isn't stalled by the model rebuilds.  Autofit column
+  measuring rides refresh_notes' population loop (one PangoLayout, one
+  measurement per unique folder path, skipped while the grid is the
+  visible view — on_view_list re-measures on switch); it never does a
+  second model walk. The `#tag` autocomplete queries the tag
   list ONCE per capture (`ed->tag_choices`) and filters in memory per
   keystroke. `on_app_config_set` skips the ini rewrite when the value
   is unchanged. The startup/exit DB hash streams through `GChecksum`

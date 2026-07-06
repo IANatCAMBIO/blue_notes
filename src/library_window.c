@@ -189,7 +189,8 @@ static void    refresh_sidebar(OnLibrary *lw);
 static void    refresh_notes(OnLibrary *lw);
 static void    status_path_update(OnLibrary *lw);
 static GArray *selected_note_ids(OnLibrary *lw);
-static void    list_autofit_now(OnLibrary *lw);
+static void    list_autofit_set(OnLibrary *lw, PangoLayout *lay,
+                                const gchar *key, gint content_w);
 static GtkTreePath *notes_sel_unblock(OnLibrary *lw, gboolean want_path);
 static void    close_editors_for_ids(OnLibrary *lw, const gint64 *ids,
                                      gsize n);
@@ -789,6 +790,22 @@ refresh_notes(OnLibrary *lw)
      * folders, never per note (shared/network DBs).                        */
     GHashTable *paths = on_db_folder_path_map(lw->app->db);
 
+    /* Autofit measuring rides this population loop (no second model
+     * walk, no re-fetching the strings) and only while the LIST is the
+     * visible view — the grid doesn't show these columns, and switching
+     * back to list re-measures (on_view_list).  Repeated folder paths
+     * are measured once, keyed by folder id.                               */
+    gboolean     fit      = lw->list_autofit && !want_thumbs;
+    PangoLayout *fit_lay  = NULL;    /* reused measuring layout             */
+    GHashTable  *fit_seen = NULL;    /* folder id → measured path width     */
+    gint fit_path_w = 0, fit_mod_w = 0;  /* running content maxima          */
+    if (fit) {
+        fit_lay  = gtk_widget_create_pango_layout(
+            GTK_WIDGET(lw->notes_list), NULL);
+        fit_seen = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                         g_free, NULL);
+    }
+
     for (GList *l = notes; l != NULL; l = l->next) {
         OnNoteMeta *m = l->data;     /* one note                            */
 
@@ -802,6 +819,26 @@ refresh_notes(OnLibrary *lw)
         const gchar *fpath = m->folder_id != 0
             ? g_hash_table_lookup(paths, &m->folder_id) : NULL;
         gchar *where = g_strdup_printf("/%s", fpath != NULL ? fpath : "");
+
+        if (fit) {
+            gint w;                  /* width of the current string         */
+            gpointer cached =
+                g_hash_table_lookup(fit_seen, &m->folder_id);
+            if (cached != NULL) {
+                w = GPOINTER_TO_INT(cached);
+            } else {
+                pango_layout_set_text(fit_lay, where, -1);
+                pango_layout_get_pixel_size(fit_lay, &w, NULL);
+                gint64 *k = g_new(gint64, 1);
+                *k = m->folder_id;
+                g_hash_table_insert(fit_seen, k, GINT_TO_POINTER(w));
+            }
+            fit_path_w = MAX(fit_path_w, w);
+
+            pango_layout_set_text(fit_lay, when, -1);
+            pango_layout_get_pixel_size(fit_lay, &w, NULL);
+            fit_mod_w = MAX(fit_mod_w, w);
+        }
 
         GtkTreeIter iter;
         gtk_list_store_append(lw->notes_store, &iter);
@@ -819,6 +856,13 @@ refresh_notes(OnLibrary *lw)
     }
     g_hash_table_destroy(paths);
     on_db_note_list_free(notes);
+
+    if (fit) {
+        list_autofit_set(lw, fit_lay, "path",     fit_path_w);
+        list_autofit_set(lw, fit_lay, "modified", fit_mod_w);
+        g_hash_table_destroy(fit_seen);
+        g_object_unref(fit_lay);
+    }
     lw->populating--;
 
     lw->shown_kind = lw->sel_kind;
@@ -826,7 +870,6 @@ refresh_notes(OnLibrary *lw)
     if (keep_scroll && scroll_pos > 0)
         scroll_keep_queue(vadj, scroll_pos);
 
-    list_autofit_now(lw);            /* re-fit columns to the new content   */
     status_path_update(lw);
 }
 
@@ -1286,10 +1329,11 @@ on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
                     on_app_status(lw->app, "Moved %u note%s to Trash",
                                   ids->len, ids->len == 1 ? "" : "s");
             } else {
-                for (guint i = 0; i < ids->len; i++)
-                    success |= on_db_note_move(
-                        lw->app->db, g_array_index(ids, gint64, i),
-                        dest_id);
+                /* ONE transaction for the whole selection: per-note
+                 * moves fsync per call and froze the GUI on big drops.  */
+                success = on_db_notes_move(
+                    lw->app->db, (const gint64 *)ids->data, ids->len,
+                    dest_id);
                 if (success)
                     on_app_status(lw->app,
                                   "Moved %u note%s to "
@@ -1392,15 +1436,19 @@ on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
         g_free(fname);
     }
 
-    if (success) {
-        refresh_sidebar(lw);         /* tree shape and counts changed       */
-        refresh_notes(lw);
-    }
     g_free(dest_raw);
     if (dest_path != NULL)
         gtk_tree_path_free(dest_path);
     gtk_tree_path_free(src_path);
+
+    /* Finish the DnD handshake FIRST — the refreshes below rebuild both
+     * models, and running them before gtk_drag_finish() stalls the drop
+     * (the source sits waiting while we repaint).                          */
     gtk_drag_finish(context, success, FALSE, time);
+    if (success) {
+        refresh_sidebar(lw);         /* tree shape and counts changed       */
+        refresh_notes(lw);
+    }
 }
 
 /* ===========================================================================
@@ -2187,6 +2235,8 @@ on_view_list(GtkWidget *widget, gpointer user_data)
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
     gtk_stack_set_visible_child_name(GTK_STACK(lw->stack), "list");
+    if (lw->list_autofit)
+        refresh_notes(lw);           /* re-measure the widths grid skipped  */
 }
 
 static void
@@ -2928,9 +2978,9 @@ on_notes_columns_changed(GtkTreeView *view, gpointer user_data)
  * Autofit does NOT use GTK_TREE_VIEW_COLUMN_AUTOSIZE: tree-view columns
  * cache resized/requested widths that override it (they neither grow to
  * long content nor shrink back for short content).  Instead every column
- * goes FIXED, and list_autofit_now() MEASURES the content with a
- * PangoLayout after each refresh and sets the exact widths — same
- * technique as the sidebar width fit.
+ * goes FIXED, and refresh_notes() MEASURES the content with a
+ * PangoLayout as it populates the model (see list_autofit_set) and
+ * sets the exact widths — same technique as the sidebar width fit.
  *
  *   ON  — Path and Modified: no ellipsize, FIXED at their measured
  *         content width (grips off — the next refresh would reclaim
@@ -2982,61 +3032,30 @@ list_autofit_apply(OnLibrary *lw)
         gtk_tree_view_column_queue_resize(c);
     }
     g_list_free(cols);
-    list_autofit_now(lw);            /* size Path/Modified right away       */
 }
 
+/* Extra pixels beyond the raw text: the renderer's xpad (10 a side)
+ * plus tree-view cell chrome; headers get room for the sort arrow.        */
+#define AUTOFIT_CELL_EXTRA   30
+#define AUTOFIT_HEADER_EXTRA 40
+
 /* ---------------------------------------------------------------------------
- * list_autofit_now() — fit the Path and Modified columns to their widest
- * content RIGHT NOW by measuring every row's string with a PangoLayout
- * (the view's own font) and setting the fixed width to the maximum.
- * Runs after every refresh_notes() while autofit is on, so the columns
- * both grow for long paths and shrink back for short ones.  No-op when
- * autofit is off.
+ * list_autofit_set() — apply a measured content width to one column
+ * (bounded below by what its header label needs).  The measuring itself
+ * rides refresh_notes()'s population loop — no second model walk.
  * ------------------------------------------------------------------------- */
 static void
-list_autofit_now(OnLibrary *lw)
+list_autofit_set(OnLibrary *lw, PangoLayout *lay, const gchar *key,
+                 gint content_w)
 {
-    if (!lw->list_autofit)
+    GtkTreeViewColumn *c = list_column_by_key(lw, key);
+    if (c == NULL || !gtk_tree_view_column_get_visible(c))
         return;
-
-    /* Extra pixels beyond the raw text: the renderer's xpad (10 a side)
-     * plus tree-view cell chrome; headers get room for the sort arrow.    */
-    static const gint CELL_EXTRA   = 30;
-    static const gint HEADER_EXTRA = 40;
-
-    static const struct { const gchar *key; gint mcol; } FIT[] = {
-        { "path",     NL_PATH     },
-        { "modified", NL_MODIFIED },
-    };
-
-    PangoLayout *lay = gtk_widget_create_pango_layout(
-        GTK_WIDGET(lw->notes_list), NULL);
-    GtkTreeModel *model = GTK_TREE_MODEL(lw->notes_store);
-
-    for (gsize i = 0; i < G_N_ELEMENTS(FIT); i++) {
-        GtkTreeViewColumn *c = list_column_by_key(lw, FIT[i].key);
-        if (c == NULL || !gtk_tree_view_column_get_visible(c))
-            continue;
-
-        gint w = 0;                  /* width of the current string         */
-        pango_layout_set_text(lay, gtk_tree_view_column_get_title(c), -1);
-        pango_layout_get_pixel_size(lay, &w, NULL);
-        gint max_w = w + HEADER_EXTRA;   /* running maximum                 */
-
-        GtkTreeIter iter;            /* row cursor                          */
-        gboolean valid = gtk_tree_model_get_iter_first(model, &iter);
-        while (valid) {
-            gchar *s = NULL;         /* this row's cell text                */
-            gtk_tree_model_get(model, &iter, FIT[i].mcol, &s, -1);
-            pango_layout_set_text(lay, s != NULL ? s : "", -1);
-            pango_layout_get_pixel_size(lay, &w, NULL);
-            g_free(s);
-            max_w = MAX(max_w, w + CELL_EXTRA);
-            valid = gtk_tree_model_iter_next(model, &iter);
-        }
-        gtk_tree_view_column_set_fixed_width(c, max_w);
-    }
-    g_object_unref(lay);
+    gint w = 0;                      /* header label width                  */
+    pango_layout_set_text(lay, gtk_tree_view_column_get_title(c), -1);
+    pango_layout_get_pixel_size(lay, &w, NULL);
+    gtk_tree_view_column_set_fixed_width(
+        c, MAX(content_w + AUTOFIT_CELL_EXTRA, w + AUTOFIT_HEADER_EXTRA));
 }
 
 /* on_autofit_toggled() — the "Autofit Column Widths" check item flipped:
@@ -3048,6 +3067,7 @@ on_autofit_toggled(GtkCheckMenuItem *item, gpointer user_data)
     lw->list_autofit = gtk_check_menu_item_get_active(item);
     on_app_config_set("list_autofit", lw->list_autofit ? "1" : "0");
     list_autofit_apply(lw);
+    refresh_notes(lw);               /* measuring rides the populate loop   */
 }
 
 /* on_column_toggled() — a check item in the header menu flipped:
@@ -3060,7 +3080,8 @@ on_column_toggled(GtkCheckMenuItem *item, gpointer user_data)
     gtk_tree_view_column_set_visible(
         c, gtk_check_menu_item_get_active(item));
     list_columns_persist(lw);
-    list_autofit_now(lw);            /* a re-shown column needs its width   */
+    if (lw->list_autofit)
+        refresh_notes(lw);           /* a re-shown column needs its width   */
 }
 
 /* ---------------------------------------------------------------------------

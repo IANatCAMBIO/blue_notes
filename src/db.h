@@ -164,6 +164,14 @@ gboolean on_db_notes_delete(OnDatabase *db, const gint64 *ids, gsize n);
  * the end of that folder. Returns TRUE on success.                          */
 gboolean on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id);
 
+/* Move `n` notes into folder `folder_id` in ONE transaction (per-note
+ * moves fsync per call — a big multi-selection drop froze the GUI),
+ * appended in array order.  Like on_db_note_move, clears each note's
+ * trashed flag (drag out of Trash = restore).  Returns TRUE if every
+ * move succeeded (all-or-nothing: failure rolls the batch back).            */
+gboolean on_db_notes_move(OnDatabase *db, const gint64 *note_ids, gsize n,
+                          gint64 folder_id);
+
 /* Persist a note's title, serialized content, and searchable plain text.
  *   id        — note to save.
  *   title     — display title (first line of the note).

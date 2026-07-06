@@ -505,6 +505,38 @@ on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id)
 }
 
 gboolean
+on_db_notes_move(OnDatabase *db, const gint64 *note_ids, gsize n,
+                 gint64 folder_id)
+{
+    if (!exec_simple(db, "BEGIN"))
+        return FALSE;
+    /* Same statement as on_db_note_move; the MAX subselect re-evaluates
+     * per row inside the transaction, so the notes land appended in
+     * array order.                                                          */
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE notes SET folder_id=?, trashed=0, sort_order="
+        "  COALESCE((SELECT MAX(sort_order)+1 FROM notes "
+        "            WHERE folder_id IS ?), 0) "
+        "WHERE id=?");
+    if (stmt == NULL) {
+        exec_simple(db, "ROLLBACK");
+        return FALSE;
+    }
+
+    gboolean ok = TRUE;                  /* set FALSE on first failure      */
+    for (gsize i = 0; i < n && ok; i++) {
+        bind_id_or_null(stmt, 1, folder_id);
+        bind_id_or_null(stmt, 2, folder_id);
+        sqlite3_bind_int64(stmt, 3, note_ids[i]);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+    exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
+    return ok;
+}
+
+gboolean
 on_db_note_save(OnDatabase *db, gint64 id, const gchar *title,
                 const guint8 *content, gsize len, const gchar *body_text)
 {
