@@ -1980,7 +1980,7 @@ on_open_db(GtkWidget *widget, gpointer user_data)
 /* ---------------------------------------------------------------------------
  * on_restore_db() — File → Restore Database…: replace the current
  * database with a backup file (after confirmation; the replaced file is
- * kept as notes.db.pre-restore).
+ * kept as blue_notes.db.pre-restore).
  * ------------------------------------------------------------------------- */
 static void
 on_restore_db(GtkWidget *widget, gpointer user_data)
@@ -2008,7 +2008,7 @@ on_restore_db(GtkWidget *widget, gpointer user_data)
 
     if (confirm(lw, "Replace ALL current notes with this backup?",
                 "The current database will be kept as "
-                "notes.db.pre-restore.")) {
+                "blue_notes.db.pre-restore.")) {
         gboolean ok = on_app_restore_database(lw->app, path);
         GtkWidget *msg = gtk_message_dialog_new(
             GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,

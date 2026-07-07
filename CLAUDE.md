@@ -54,7 +54,11 @@ sees the new flags.
 
 ## Data & formats
 
-- DB: `~/.local/share/blue_notes/notes.db` (GLib user-data dir; renamed
+- DB: `~/.local/share/blue_notes/blue_notes.db` (GLib user-data dir; the
+  filename is `ON_DB_FILENAME` in db.h — a legacy `notes.db` (pre-1.4) is
+  renamed in place by `on_db_migrate_legacy_name()`, called before every
+  directory-level open: GUI/CLI startup, db switch, first-run chooser;
+  the dir was renamed
   from `orange-notes` pre-release — do NOT rename again once released,
   user data will live there).
 - Note content: **BNBF v5** blobs (magic `BNBF`; the pre-rename `ONBF` magic is accepted forever) (see header comment in `serialize.h`).
@@ -90,8 +94,12 @@ sees the new flags.
   Keys: `db_dir`, `toolbar_style_library`, `toolbar_style_editor`
   (`text|icons|both`, default icons), `code_copy_button` (`1|0`),
   `code_line_numbers` (`1|0`), `native_menubar` (`1|0`),
+  `db_integrity_check` (`1|0`, default 1 — hash-compare the DB file at
+  startup, offering Open Anyway / Run Integrity Check when it changed;
+  `db_hash` is the stored snapshot, written at clean exit),
   `sidebar_counts` (`1|0`, default 0 — folder/tag counts in the
-  sidebar), `first_line_h1` (`1|0`, default 0 — auto-style the first
+  sidebar), `first_line_h1` (`1|0`, code default 0, but
+  blue_notes.ini.defaults seeds it to 1 — auto-style the first
   line of a new note as H1), `compact_editor_toolbar` (`1|0`, default 0
   — collapse the editor's H1/H2/¶ buttons into a "Styles" menu button
   and the list buttons into a "Lists" one; applies live via
@@ -119,17 +127,18 @@ sees the new flags.
   any config read — main() calls it first thing), never in the DB.
   `on_app_switch_database()` switches live: closes all editors (flushing
   saves), swaps the handle, copies the current file to the target if no
-  notes.db exists there, persists, refreshes the library. Failure
+  blue_notes.db exists there, persists, refreshes the library. Failure
   reverts to the old DB. If the configured DB can't be opened at
   startup, main.c ERRORS OUT — deliberately NO fallback to the default
   location: a silent fallback once made a user's notes "disappear" and
   strands writes in the wrong file (the trigger was a relaunch racing
   the dying instance's final flush past the 5 s busy timeout). One
-  configured database, or a clear error. When no notes.db EXISTS at the
-  expected location (first launch / emptied dir), `startup_first_run()`
-  asks — "Open a notes.db File" (chooser filtered to notes.db; persists
-  the new db_dir) or "Create a New notes.db" — instead of silently
-  creating an empty DB; both paths clear any stale db_hash.
+  configured database, or a clear error. When no blue_notes.db EXISTS at
+  the expected location (first launch / emptied dir),
+  `startup_first_run()` asks — "Open a blue_notes.db File" (chooser also
+  accepts a legacy notes.db, renamed on selection; persists the new
+  db_dir) or "Create a New blue_notes.db" — instead of silently creating
+  an empty DB; both paths clear any stale db_hash.
 - **Trash is a soft-delete flag, not a folder**: `notes.trashed` /
   `folders.trashed` columns + the `trash_folder_ids` view (recursive
   closure — only the TOP deleted folder is flagged; its subtree stays
@@ -149,7 +158,7 @@ sees the new flags.
   deletes elsewhere just trash with a status message, no dialog.
 - **Backup/Restore** (File menu): `on_db_backup_to()` uses SQLite's
   online backup API on the live DB; `on_app_restore_database()` closes
-  editors, keeps the old file as `notes.db.pre-restore`, copies the
+  editors, keeps the old file as `blue_notes.db.pre-restore`, copies the
   backup in, reopens (rolls back if the file isn't a usable DB).
 - **CLI ↔ GUI coexistence is socket-based, not lock-based**: a running
   GUI serves later CLI invocations over a unix socket (`src/ipc.c`), so

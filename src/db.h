@@ -2,7 +2,8 @@
  * db.h — SQLite persistence layer for Blue Notes
  *
  * All notes, folders and tags live in a single SQLite database file stored
- * in the user's data directory (e.g. ~/.local/share/blue_notes/notes.db).
+ * in the user's data directory
+ * (e.g. ~/.local/share/blue_notes/blue_notes.db).
  *
  * Note *content* is stored as an opaque binary BLOB in the custom "BNBF"
  * format produced by serialize.c; this module never interprets it.
@@ -90,7 +91,17 @@ typedef struct {
 
 /* --------------------------- lifecycle ---------------------------------- */
 
-/* The default database path (~/.local/share/blue_notes/notes.db),
+/* The database filename inside its directory (default or configured).
+ * Pre-1.4 builds used "notes.db" — on_db_migrate_legacy_name() renames
+ * such a file in place, so the old name never needs handling elsewhere.    */
+#define ON_DB_FILENAME "blue_notes.db"
+
+/* Rename a legacy "notes.db" in `dir` (NULL = the default data directory)
+ * to ON_DB_FILENAME, if the directory has the old file but not the new.
+ * Call before testing for / opening the database in any directory.         */
+void on_db_migrate_legacy_name(const gchar *dir);
+
+/* The default database path (~/.local/share/blue_notes/blue_notes.db),
  * creating the directory if needed. Returns a new string; g_free() it.     */
 gchar *on_db_default_path(void);
 

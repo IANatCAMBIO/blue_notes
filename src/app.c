@@ -418,10 +418,11 @@ gboolean
 on_app_switch_database(OnApp *app, const gchar *new_dir)
 {
     /* Resolve the target file inside the requested directory.              */
-    gchar *target;                   /* path of notes.db at the new home    */
+    gchar *target;                   /* path of the db at the new home      */
     if (new_dir != NULL) {
         g_mkdir_with_parents(new_dir, 0755);
-        target = g_build_filename(new_dir, "notes.db", NULL);
+        on_db_migrate_legacy_name(new_dir);  /* pre-1.4 name: notes.db      */
+        target = g_build_filename(new_dir, ON_DB_FILENAME, NULL);
     } else {
         target = on_db_default_path();
     }

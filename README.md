@@ -79,11 +79,15 @@ header bars anywhere). The first line of the note becomes its title.
 
 - **Appearance** — toolbar button style (text / icons / icons above
   text), set separately for library and editor windows (also available
-  by right-clicking any toolbar), and — when built with
-  gtk-mac-integration — a native macOS menu bar option.
+  by right-clicking any toolbar); note counts next to folders and tags;
+  and — when built with gtk-mac-integration — a native macOS menu bar
+  option.
 - **Editor** — show/hide the code-block copy button and code-block line
-  numbers.
-- **Database** — store the database in a custom folder (see Storage).
+  numbers; auto-style the first line of a new note as Heading 1; a
+  compact toolbar that collapses the style and list buttons into menus;
+  and a custom image-viewer program for opening images.
+- **Database** — store the database in a custom folder (see Storage)
+  and toggle the startup integrity check.
 
 All changes apply live and persist (in `blue_notes.ini` next to the
 binary). Toolbar icons are PNGs bundled in `icons/` — replaceable by
@@ -101,7 +105,7 @@ pipe tables and `- [ ]` task items.
 
 Everything lives in a single SQLite database:
 
-- `~/.local/share/blue_notes/notes.db` by default (GLib's user-data
+- `~/.local/share/blue_notes/blue_notes.db` by default (GLib's user-data
   directory). *File → Settings… → Database* can point the app at a custom
   folder instead — e.g. a shared drive used by two machines (never open
   it from both at once). The choice is stored in `blue_notes.ini` in
@@ -111,13 +115,14 @@ Everything lives in a single SQLite database:
   silently opens a different database.
 - *File → Back Up Database…* snapshots the live database to a file;
   *File → Restore Database…* replaces the current data with a backup
-  (keeping the old file as `notes.db.pre-restore`).
-- **Single-instance failsafe** — a running instance marks the database
-  in use (`user@host`, pid, start time). A second instance opening the
-  same database is offered **Open Read-Only** (writes are refused at the
-  SQLite level) or **Override Lock** (for stale markers left by a
-  crash). The marker is released on quit, window close, and SIGTERM;
-  CLI commands warn when the database is marked in use.
+  (keeping the old file as `blue_notes.db.pre-restore`).
+- **CLI and GUI cooperate over a socket** — while the GUI is running,
+  `blue_notes` command-line invocations are forwarded to it over a unix
+  socket instead of opening the database a second time, so the two never
+  write concurrently. If the database file changed on disk since the
+  last clean exit (shared folder, crash), startup offers **Open Anyway**
+  or **Run Integrity Check** before proceeding (the check can be turned
+  off in Settings).
 
 Note content is stored as a compact binary blob ("BNBF", currently
 version 5) holding styled text runs, PNG image records, tables and task
@@ -238,11 +243,10 @@ Semantics worth knowing when querying directly:
   backfills it on first search). Treat it as read-only convenience — the
   `content` blob is the source of truth.
 - `tags.name` is stored without the leading `#`.
-- `settings` holds exactly one key: the instance lock. While a GUI has
-  the database open, `in_use` is set to `"user@host (pid N, since …)"`
-  and removed on exit — respect it before writing from your own tools.
-  (App preferences live in `blue_notes.ini` next to the binary, not
-  in the database.)
+- `settings` is legacy-only: nothing writes to it anymore (old versions
+  kept UI preferences and an instance lock there; startup migrates and
+  deletes any leftovers). App preferences live in `blue_notes.ini` next
+  to the binary, not in the database.
 
 Example — every note with its full folder path:
 

@@ -42,8 +42,9 @@ static OnDatabase *
 cli_open_db(void)
 {
     gchar *db_dir = on_app_config_load_db_dir();
+    on_db_migrate_legacy_name(db_dir);   /* pre-1.4 name: notes.db          */
     gchar *path = (db_dir != NULL)
-                  ? g_build_filename(db_dir, "notes.db", NULL)
+                  ? g_build_filename(db_dir, ON_DB_FILENAME, NULL)
                   : NULL;
     OnDatabase *db = on_db_open(path);
     if (db == NULL) {

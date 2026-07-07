@@ -8,7 +8,9 @@
 
 #include "db.h"
 
+#include <errno.h>
 #include <string.h>
+#include <glib/gstdio.h>
 
 /* ---------------------------------------------------------------------------
  * SCHEMA_SQL — DDL executed every time the database is opened.
@@ -133,9 +135,28 @@ on_db_default_path(void)
     gchar *dir = g_build_filename(g_get_user_data_dir(),
                                   "blue_notes", NULL);
     g_mkdir_with_parents(dir, 0700);
-    gchar *path = g_build_filename(dir, "notes.db", NULL);
+    gchar *path = g_build_filename(dir, ON_DB_FILENAME, NULL);
     g_free(dir);
     return path;
+}
+
+void
+on_db_migrate_legacy_name(const gchar *dir)
+{
+    gchar *d = (dir != NULL)         /* directory holding the database      */
+               ? g_strdup(dir)
+               : g_build_filename(g_get_user_data_dir(), "blue_notes",
+                                  NULL);
+    gchar *old_path = g_build_filename(d, "notes.db", NULL);
+    gchar *new_path = g_build_filename(d, ON_DB_FILENAME, NULL);
+    if (!g_file_test(new_path, G_FILE_TEST_EXISTS) &&
+        g_file_test(old_path, G_FILE_TEST_EXISTS) &&
+        g_rename(old_path, new_path) != 0)
+        g_warning("db: cannot rename legacy %s: %s", old_path,
+                  g_strerror(errno));
+    g_free(old_path);
+    g_free(new_path);
+    g_free(d);
 }
 
 OnDatabase *

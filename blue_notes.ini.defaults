@@ -1,6 +1,6 @@
 # Blue Notes default configuration — copied to blue_notes.ini on
 # first launch. An empty db_dir means the default database location
-# (~/.local/share/blue_notes/notes.db).
+# (~/.local/share/blue_notes/blue_notes.db).
 [blue-notes]
 db_dir=
 toolbar_style_library=icons
@@ -8,6 +8,9 @@ toolbar_style_editor=icons
 code_copy_button=1
 code_line_numbers=1
 native_menubar=1
+sidebar_counts=0
+image_viewer=
+db_integrity_check=1
 search_win_w=538
 search_win_h=299
 first_line_h1=1

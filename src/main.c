@@ -105,10 +105,10 @@ startup_integrity_check(OnApp *app)
     return ok;
 }
 
-/* startup_first_run() — no notes.db exists at the expected location: ask
- * whether to open an existing file or create a new one there, instead of
- * silently creating an empty database (a user pointing at a shared folder
- * usually means to OPEN a file that is already there).
+/* startup_first_run() — no blue_notes.db exists at the expected location:
+ * ask whether to open an existing file or create a new one there, instead
+ * of silently creating an empty database (a user pointing at a shared
+ * folder usually means to OPEN a file that is already there).
  *   expected — the path where the database was looked for (dialog text).
  *   db_dir   — in/out: the configured db directory; replaced (and
  *              persisted to the ini) when an existing file is opened.
@@ -126,8 +126,8 @@ startup_first_run(const gchar *expected, gchar **db_dir, gchar **db_path)
             expected);
         gtk_window_set_title(GTK_WINDOW(dlg), "Blue Notes - Welcome");
         gtk_dialog_add_buttons(GTK_DIALOG(dlg),
-            "_Open a notes.db File",  1,
-            "Create a _New notes.db", 2,
+            "_Open a blue_notes.db File",  1,
+            "Create a _New blue_notes.db", 2,
             NULL);
         gint resp = gtk_dialog_run(GTK_DIALOG(dlg));
         gtk_widget_destroy(dlg);
@@ -149,11 +149,14 @@ startup_first_run(const gchar *expected, gchar **db_dir, gchar **db_path)
             NULL);
         gtk_window_set_title(GTK_WINDOW(chooser),
                              "Blue Notes - Open Database");
-        /* The app's model is a directory + the fixed name notes.db (the
-         * ini stores db_dir only), so only notes.db files are openable.    */
+        /* The app's model is a directory + the fixed name blue_notes.db
+         * (the ini stores db_dir only), so only that name — or the
+         * pre-1.4 "notes.db", renamed on selection — is openable.          */
         GtkFileFilter *ff = gtk_file_filter_new();
+        gtk_file_filter_add_pattern(ff, ON_DB_FILENAME);
         gtk_file_filter_add_pattern(ff, "notes.db");
-        gtk_file_filter_set_name(ff, "Notes Database (notes.db)");
+        gtk_file_filter_set_name(ff,
+            "Notes Database (" ON_DB_FILENAME ", notes.db)");
         gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), ff);
 
         gchar *file_path = NULL;     /* the chosen database file            */
@@ -165,10 +168,13 @@ startup_first_run(const gchar *expected, gchar **db_dir, gchar **db_path)
             continue;                /* cancelled — back to the choice      */
 
         gchar *dir = g_path_get_dirname(file_path);
+        g_free(file_path);
+        on_db_migrate_legacy_name(dir);       /* legacy pick → new name     */
         on_app_config_set("db_dir",  dir);
         on_app_config_set("db_hash", NULL);   /* stale for this file        */
         g_free(*db_dir);   *db_dir  = dir;
-        g_free(*db_path);  *db_path = file_path;
+        g_free(*db_path);  *db_path = g_build_filename(dir, ON_DB_FILENAME,
+                                                       NULL);
         return TRUE;
     }
 }
@@ -347,11 +353,12 @@ main(int argc, char *argv[])
      * instance's shutdown flush).  One configured database, or a clear
      * error.                                                               */
     gchar *db_dir = on_app_config_load_db_dir();
+    on_db_migrate_legacy_name(db_dir);   /* pre-1.4 name: notes.db          */
     gchar *db_path = (db_dir != NULL)
-                     ? g_build_filename(db_dir, "notes.db", NULL)
+                     ? g_build_filename(db_dir, ON_DB_FILENAME, NULL)
                      : NULL;
 
-    /* First launch (or an emptied configured directory): no notes.db at
+    /* First launch (or an emptied configured directory): no database at
      * the expected location.  Ask before creating one — the user may mean
      * to open an existing file elsewhere.  Needs GTK up early for the
      * dialog; skipped without a display (old create-silently behavior).    */
