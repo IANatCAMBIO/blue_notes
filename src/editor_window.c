@@ -106,6 +106,10 @@
  *                     being typed and should be styled as Heading 1
  *                     (File → Settings…); cleared once the title line
  *                     is finished (Enter pressed).
+ *   status_path     — status-bar label (bottom left): the note's folder
+ *                     path, same format as the library window's.  Set at
+ *                     open and refreshed on window focus-in, so a move
+ *                     made in the library shows up on return.
  * ------------------------------------------------------------------------- */
 typedef struct {
     OnApp          *app;
@@ -141,6 +145,7 @@ typedef struct {
     gboolean        dirty;
     gboolean        tags_modified;
     gboolean        auto_h1;
+    GtkWidget      *status_path;
 } OnEditor;
 
 /* ---------------------------------------------------------------------------
@@ -1884,8 +1889,9 @@ tag_emoji_in_range(OnEditor *ed, gint start_off, gint end_off)
 /* ---------------------------------------------------------------------------
  * on_emoji_clicked() — toolbar "Emoji": open GTK's built-in emoji chooser
  * at the cursor via the text view's "insert-emoji" action (the same one
- * bound to Ctrl+.).  The picked emoji is inserted as plain UTF-8 text, so
- * styling, storage and export handle it like any typed character.
+ * bound to Ctrl+. natively and Ctrl/Cmd+E in on_view_key_press).  The
+ * picked emoji is inserted as plain UTF-8 text, so styling, storage and
+ * export handle it like any typed character.
  * ------------------------------------------------------------------------- */
 static void
 on_emoji_clicked(GtkToolButton *btn, gpointer user_data)
@@ -1917,6 +1923,34 @@ on_insert_table_clicked(GtkToolButton *btn, gpointer user_data)
     attach_table_widget(ed, anchor);
     ed->internal_change--;
     editor_queue_autosave(ed);
+}
+
+/* ---------------------------------------------------------------------------
+ * editor_insert_date() — insert today's date in ISO format (YYYY-MM-DD)
+ * at the cursor, replacing the selection like typed text would.  It goes
+ * through the normal insert-text path, so styling, autosave and undo of
+ * the surrounding text behave exactly as for a paste.  Shared by the
+ * Insert menu item and the Ctrl/Cmd+D shortcut.
+ * ------------------------------------------------------------------------- */
+static void
+editor_insert_date(OnEditor *ed)
+{
+    GDateTime *now = g_date_time_new_now_local();
+    gchar *date = g_date_time_format(now, "%Y-%m-%d");
+    gtk_text_buffer_delete_selection(ed->buffer, TRUE, TRUE);
+    gtk_text_buffer_insert_at_cursor(ed->buffer, date, -1);
+    g_free(date);
+    g_date_time_unref(now);
+}
+
+/* on_insert_date_clicked() — Insert menu "Date": see editor_insert_date(). */
+static void
+on_insert_date_clicked(GtkWidget *item, gpointer user_data)
+{
+    (void)item;
+    OnEditor *ed = user_data;        /* owning editor                       */
+    gtk_widget_grab_focus(GTK_WIDGET(ed->view));
+    editor_insert_date(ed);
 }
 
 /* ===========================================================================
@@ -2481,6 +2515,12 @@ on_view_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
         case GDK_KEY_u:
             toggle_inline_format(ed, ON_FMT_UNDERLINE);
             return TRUE;
+        case GDK_KEY_d:
+            editor_insert_date(ed);
+            return TRUE;
+        case GDK_KEY_e:
+            g_signal_emit_by_name(ed->view, "insert-emoji");
+            return TRUE;
         case GDK_KEY_f:
             gtk_widget_grab_focus(ed->search_entry);
             return TRUE;
@@ -2795,6 +2835,45 @@ on_editor_destroy(GtkWidget *widget, gpointer user_data)
 }
 
 /* ===========================================================================
+ * status bar
+ * =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * editor_status_path_update() — put the note's folder path in the status
+ * bar's left label, same format as the library window's: "/" for the top
+ * level, "/Folder/Sub" otherwise.
+ * ------------------------------------------------------------------------- */
+static void
+editor_status_path_update(OnEditor *ed)
+{
+    if (ed->status_path == NULL)
+        return;
+
+    OnNoteMeta *meta = on_db_note_get(ed->app->db, ed->note_id);
+    if (meta == NULL)
+        return;
+
+    gchar *path = on_db_folder_path(ed->app->db, meta->folder_id);
+    gchar *text = g_strdup_printf("/%s", path);
+    gtk_label_set_text(GTK_LABEL(ed->status_path), text);
+    g_free(text);
+    g_free(path);
+    on_db_note_meta_free(meta);
+}
+
+/* on_editor_focus_in() — the window regained focus: re-read the note's
+ * location, so a move or folder rename made in the library while this
+ * editor sat in the background shows up on return.                          */
+static gboolean
+on_editor_focus_in(GtkWidget *widget, GdkEventFocus *event,
+                   gpointer user_data)
+{
+    (void)widget; (void)event;
+    editor_status_path_update(user_data);
+    return FALSE;                    /* let GTK handle the focus change     */
+}
+
+/* ===========================================================================
  * toolbar + window construction
  * =========================================================================== */
 
@@ -2956,7 +3035,8 @@ build_toolbar(OnEditor *ed)
     } INSERTS[] = {
         { "_Image\xe2\x80\xa6", G_CALLBACK(on_insert_image_clicked) },
         { "_Table",             G_CALLBACK(on_insert_table_clicked) },
-        { "_Emoji\xe2\x80\xa6", G_CALLBACK(on_emoji_clicked) },
+        { "_Emoji\xe2\x80\xa6 (Ctrl+E)", G_CALLBACK(on_emoji_clicked) },
+        { "_Date (Ctrl+D)",              G_CALLBACK(on_insert_date_clicked) },
     };
     for (gsize i = 0; i < G_N_ELEMENTS(INSERTS); i++) {
         GtkWidget *mi = gtk_menu_item_new_with_mnemonic(INSERTS[i].label);
@@ -2966,9 +3046,9 @@ build_toolbar(OnEditor *ed)
     }
 
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
-                       menu_tool_button_new("Insert",
-                           "Insert an image, a table, or an emoji at the "
-                           "cursor", insert_menu), -1);
+                       menu_tool_button_new("+",
+                           "Insert an image, a table, an emoji, or "
+                           "today's date at the cursor", insert_menu), -1);
 
     /* In-note search, pinned to the toolbar's right edge (Ctrl+F) by an
      * expanding blank spacer.                                              */
@@ -3152,6 +3232,39 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
                                               FALSE);
     gtk_container_add(GTK_CONTAINER(scroll), GTK_WIDGET(ed->view));
     gtk_box_pack_start(GTK_BOX(vbox), scroll, TRUE, TRUE, 0);
+
+    /* --- status bar: note location (bottom left), library-style ---------- */
+    ed->status_path = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(ed->status_path), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(ed->status_path),
+                            PANGO_ELLIPSIZE_MIDDLE);
+
+    /* A step smaller than the UI font, like the library's labels.          */
+    {
+        GtkCssProvider *css = gtk_css_provider_new();
+        gtk_css_provider_load_from_data(css, "label { font-size: 85%; }",
+                                        -1, NULL);
+        gtk_style_context_add_provider(
+            gtk_widget_get_style_context(ed->status_path),
+            GTK_STYLE_PROVIDER(css),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(css);
+    }
+
+    GtkWidget *status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_set_margin_start(status_bar, 8);
+    gtk_widget_set_margin_end(status_bar, 8);
+    gtk_widget_set_margin_top(status_bar, 3);
+    gtk_widget_set_margin_bottom(status_bar, 3);
+    gtk_box_pack_start(GTK_BOX(status_bar), ed->status_path,
+                       TRUE, TRUE, 0);
+
+    gtk_box_pack_start(GTK_BOX(vbox),
+                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
+                       FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), status_bar, FALSE, FALSE, 0);
+    editor_status_path_update(ed);
+
     gtk_container_add(GTK_CONTAINER(ed->window), vbox);
 
     /* --- signals (connected after load so loading doesn't autosave) ----- */
@@ -3179,6 +3292,8 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
                            G_CALLBACK(on_view_draw), ed);
     g_signal_connect(ed->window, "destroy",
                      G_CALLBACK(on_editor_destroy), ed);
+    g_signal_connect(ed->window, "focus-in-event",
+                     G_CALLBACK(on_editor_focus_in), ed);
 
     /* Give existing code blocks their floating copy buttons.               */
     code_buttons_queue_rebuild(ed);
