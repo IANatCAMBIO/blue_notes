@@ -67,6 +67,7 @@ typedef struct {
  *   folder_id  — id of the containing folder, or 0 for top level.
  *   title      — display title, derived from the first line (owned string).
  *   updated_at — UNIX timestamp of the last save.
+ *   created_at — UNIX timestamp of the note's creation.
  *   pinned     — whether the note appears in the Pinned Notes section.
  * ------------------------------------------------------------------------- */
 typedef struct {
@@ -74,6 +75,7 @@ typedef struct {
     gint64   folder_id;
     gchar   *title;
     gint64   updated_at;
+    gint64   created_at;
     gboolean pinned;
 } OnNoteMeta;
 

@@ -652,7 +652,8 @@ on_db_note_load(OnDatabase *db, gint64 id, gsize *out_len)
 /* Column list shared by every note-metadata query, matching
  * meta_from_row()'s expectations.                                           */
 #define NOTE_META_COLS \
-    "id, COALESCE(folder_id,0), title, sort_order, updated_at, pinned"
+    "id, COALESCE(folder_id,0), title, sort_order, updated_at, pinned, " \
+    "created_at"
 
 /* ---------------------------------------------------------------------------
  * meta_from_row() — build one OnNoteMeta from the current result row of a
@@ -667,6 +668,7 @@ meta_from_row(sqlite3_stmt *stmt)
     m->title      = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
     m->updated_at = sqlite3_column_int64(stmt, 4);
     m->pinned     = sqlite3_column_int(stmt, 5) != 0;
+    m->created_at = sqlite3_column_int64(stmt, 6);
     return m;
 }
 
@@ -962,7 +964,7 @@ on_db_notes_by_tag(OnDatabase *db, gint64 tag_id)
 {
     sqlite3_stmt *stmt = prepare(db,
         "SELECT n.id, COALESCE(n.folder_id,0), n.title, n.sort_order, "
-        "       n.updated_at, n.pinned "
+        "       n.updated_at, n.pinned, n.created_at "
         "FROM notes n JOIN note_tags nt ON nt.note_id = n.id "
         "WHERE nt.tag_id=? AND n.trashed=0 AND (n.folder_id IS NULL OR "
         "      n.folder_id NOT IN (SELECT id FROM trash_folder_ids)) "

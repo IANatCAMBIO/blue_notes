@@ -76,6 +76,8 @@ enum {
     NL_THUMB,                        /* cairo_surface_t*: grid thumbnail    */
     NL_UPDATED,                      /* gint64: raw updated_at (sort key)   */
     NL_PATH,                         /* gchar*: "/Folder/Sub" location      */
+    NL_CREATED,                      /* gchar*: formatted created_at        */
+    NL_CREATED_RAW,                  /* gint64: raw created_at (sort key)   */
     NL_N_COLS
 };
 
@@ -798,7 +800,8 @@ refresh_notes(OnLibrary *lw)
     gboolean     fit      = lw->list_autofit && !want_thumbs;
     PangoLayout *fit_lay  = NULL;    /* reused measuring layout             */
     GHashTable  *fit_seen = NULL;    /* folder id → measured path width     */
-    gint fit_path_w = 0, fit_mod_w = 0;  /* running content maxima          */
+    gint fit_path_w = 0, fit_mod_w = 0,  /* running content maxima          */
+         fit_cre_w = 0;
     if (fit) {
         fit_lay  = gtk_widget_create_pango_layout(
             GTK_WIDGET(lw->notes_list), NULL);
@@ -809,9 +812,13 @@ refresh_notes(OnLibrary *lw)
     for (GList *l = notes; l != NULL; l = l->next) {
         OnNoteMeta *m = l->data;     /* one note                            */
 
-        /* Format the modification time like "Jun 3, 2026 14:05".           */
+        /* Format the modification and creation times like
+         * "Jun 3, 2026 14:05".                                             */
         GDateTime *dt = g_date_time_new_from_unix_local(m->updated_at);
         gchar *when = g_date_time_format(dt, "%b %e, %Y %H:%M");
+        g_date_time_unref(dt);
+        dt = g_date_time_new_from_unix_local(m->created_at);
+        gchar *born = g_date_time_format(dt, "%b %e, %Y %H:%M");
         g_date_time_unref(dt);
 
         /* "/Folder/Sub" location, "/" for the top level — the same
@@ -838,6 +845,10 @@ refresh_notes(OnLibrary *lw)
             pango_layout_set_text(fit_lay, when, -1);
             pango_layout_get_pixel_size(fit_lay, &w, NULL);
             fit_mod_w = MAX(fit_mod_w, w);
+
+            pango_layout_set_text(fit_lay, born, -1);
+            pango_layout_get_pixel_size(fit_lay, &w, NULL);
+            fit_cre_w = MAX(fit_cre_w, w);
         }
 
         GtkTreeIter iter;
@@ -850,9 +861,12 @@ refresh_notes(OnLibrary *lw)
                                                     : NULL,
                            NL_UPDATED,  m->updated_at,
                            NL_PATH,     where,
+                           NL_CREATED,  born,
+                           NL_CREATED_RAW, m->created_at,
                            -1);
         g_free(where);
         g_free(when);
+        g_free(born);
     }
     g_hash_table_destroy(paths);
     on_db_note_list_free(notes);
@@ -860,6 +874,7 @@ refresh_notes(OnLibrary *lw)
     if (fit) {
         list_autofit_set(lw, fit_lay, "path",     fit_path_w);
         list_autofit_set(lw, fit_lay, "modified", fit_mod_w);
+        list_autofit_set(lw, fit_lay, "created",  fit_cre_w);
         g_hash_table_destroy(fit_seen);
         g_object_unref(fit_lay);
     }
@@ -2992,9 +3007,10 @@ list_column_by_key(OnLibrary *lw, const gchar *key)
 
 /* ---------------------------------------------------------------------------
  * list_columns_apply() — put the saved column order and visibility back
- * (default: Path, Title, Modified, all visible).  Unknown keys are
- * skipped, missing ones keep their built order, and at least one column
- * is forced visible (a hand-edited ini can't blank the view).
+ * (default: Path and Created hidden, Title and Modified visible).
+ * Unknown keys are skipped, missing ones keep their built order and
+ * visibility, and at least one column is forced visible (a hand-edited
+ * ini can't blank the view).
  * ------------------------------------------------------------------------- */
 static void
 list_columns_apply(OnLibrary *lw)
@@ -3002,7 +3018,7 @@ list_columns_apply(OnLibrary *lw)
     gchar *cfg = on_app_config_get("list_columns");
     if (cfg == NULL || *cfg == '\0') {
         g_free(cfg);
-        cfg = g_strdup("path:1,title:1,modified:1");
+        cfg = g_strdup("path:0,title:1,modified:1,created:0");
     }
 
     GtkTreeViewColumn *prev = NULL;  /* each entry moves after the last     */
@@ -3243,6 +3259,19 @@ sort_by_updated(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
     gtk_tree_model_get(model, a, NL_UPDATED, &ua, -1);
     gtk_tree_model_get(model, b, NL_UPDATED, &ub, -1);
     return (ub > ua) - (ub < ua);
+}
+
+/* sort_by_created() — sort for the Created header, inverted like
+ * sort_by_updated so the first click puts the newest notes on top.         */
+static gint
+sort_by_created(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
+                gpointer user_data)
+{
+    (void)user_data;
+    gint64 ca, cb;                   /* the two timestamps                  */
+    gtk_tree_model_get(model, a, NL_CREATED_RAW, &ca, -1);
+    gtk_tree_model_get(model, b, NL_CREATED_RAW, &cb, -1);
+    return (cb > ca) - (cb < ca);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3671,7 +3700,9 @@ on_library_window_create(OnApp *app)
         G_TYPE_STRING,                   /* NL_MODIFIED                    */
         CAIRO_GOBJECT_TYPE_SURFACE,      /* NL_THUMB                       */
         G_TYPE_INT64,                    /* NL_UPDATED                     */
-        G_TYPE_STRING);                  /* NL_PATH                        */
+        G_TYPE_STRING,                   /* NL_PATH                        */
+        G_TYPE_STRING,                   /* NL_CREATED                     */
+        G_TYPE_INT64);                   /* NL_CREATED_RAW                 */
     g_signal_connect(lw->notes_store, "row-deleted",
                      G_CALLBACK(on_notes_row_deleted), lw);
 
@@ -3857,6 +3888,21 @@ on_library_window_create(OnApp *app)
                                                 NULL, NULL);
         gtk_tree_view_column_set_resizable(c2, TRUE);
         gtk_tree_view_append_column(lw->notes_list, c2);
+
+        /* Created column — built HIDDEN: a saved list_columns without a
+         * "created" entry (every pre-existing ini) keeps the built state,
+         * so the column stays off until toggled in the header menu.        */
+        GtkCellRenderer *rc = gtk_cell_renderer_text_new();
+        g_object_set(rc, "xpad", 10, NULL);
+        GtkTreeViewColumn *cc =
+            gtk_tree_view_column_new_with_attributes("Created", rc,
+                                                     "text", NL_CREATED,
+                                                     NULL);
+        gtk_tree_view_column_set_cell_data_func(cc, rc, notes_row_bg_func,
+                                                NULL, NULL);
+        gtk_tree_view_column_set_resizable(cc, TRUE);
+        gtk_tree_view_column_set_visible(cc, FALSE);
+        gtk_tree_view_append_column(lw->notes_list, cc);
         gtk_tree_view_column_set_expand(c1, TRUE);
 
         /* Clickable headers: Title sorts alphabetically, Modified sorts
@@ -3870,9 +3916,13 @@ on_library_window_create(OnApp *app)
         gtk_tree_sortable_set_sort_func(
             GTK_TREE_SORTABLE(lw->notes_store), NL_PATH,
             sort_by_path, NULL, NULL);
+        gtk_tree_sortable_set_sort_func(
+            GTK_TREE_SORTABLE(lw->notes_store), NL_CREATED_RAW,
+            sort_by_created, NULL, NULL);
         gtk_tree_view_column_set_sort_column_id(c1, NL_TITLE);
         gtk_tree_view_column_set_sort_column_id(cp, NL_PATH);
         gtk_tree_view_column_set_sort_column_id(c2, NL_UPDATED);
+        gtk_tree_view_column_set_sort_column_id(cc, NL_CREATED_RAW);
 
         /* Default sort: Modified with the most recent on top
          * (sort_by_updated is deliberately inverted, so ASCENDING =
@@ -3890,6 +3940,7 @@ on_library_window_create(OnApp *app)
         struct { GtkTreeViewColumn *col; GtkCellRenderer *cell;
                  const gchar *key; } COLS[] = {
             { c1, r1, "title" }, { cp, rp, "path" }, { c2, r2, "modified" },
+            { cc, rc, "created" },
         };
         for (gsize i = 0; i < G_N_ELEMENTS(COLS); i++) {
             g_object_set_data(G_OBJECT(COLS[i].col), "on-colkey",
