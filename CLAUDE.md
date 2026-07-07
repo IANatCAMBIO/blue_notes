@@ -13,11 +13,13 @@ make          # builds ./blue_notes
 make run
 make app      # dist/BlueNotes-<version>.app (macOS; sips/iconutil;
               # vinyl.png → .icns; NOT self-contained — needs MacPorts GTK)
-make deb      # dist/blue-notes_<version>_<arch>.deb (needs dpkg-deb,
-make rpm      # dist/blue-notes-<version>-1.<arch>.rpm  needs rpmbuild —
+make deb      # dist/blue_notes_<version>_<arch>.deb (needs dpkg-deb,
+make rpm      # dist/blue_notes-<version>-1.<arch>.rpm  needs rpmbuild —
               # build these ON the target Linux distro; they install to
-              # /opt/blue-notes + a /usr/bin wrapper script that execs by
-              # absolute path so argv[0]-relative icons/defaults resolve)
+              # /opt/blue_notes + a /usr/bin wrapper script that execs by
+              # absolute path so argv[0]-relative icons/defaults resolve;
+              # the deb control Package: field stays "blue-notes" —
+              # Debian forbids "_" in package names)
 ```
 
 The semantic version is the `VERSION` variable at the top of the

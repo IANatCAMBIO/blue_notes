@@ -14,16 +14,16 @@
 #     make app      — macOS .app bundle → dist/BlueNotes-<version>.app
 #                     (needs the macOS sips/iconutil tools; the bundle
 #                     still depends on the MacPorts GTK libraries)
-#     make deb      — Debian package → dist/blue-notes_<version>_<arch>.deb
+#     make deb      — Debian package → dist/blue_notes_<version>_<arch>.deb
 #                     (needs dpkg-deb; build ON a Debian/Ubuntu machine —
 #                     the packaged binary is whatever `make` produced)
-#     make rpm      — RPM package → dist/blue-notes-<version>-1.<arch>.rpm
+#     make rpm      — RPM package → dist/blue_notes-<version>-1.<arch>.rpm
 #                     (needs rpmbuild; same caveat as deb)
 # =============================================================================
 
 # Semantic version — the single source: it is baked into the binary
 # (ON_VERSION, shown in the About dialog) and into every package filename.
-VERSION  := 1.4.0
+VERSION  := 1.4.2
 
 # The compiler to use.  clang is the system compiler on macOS.
 CC       := cc
@@ -152,7 +152,7 @@ app: $(BIN)
 	@echo "built $(APP_DIR)"
 
 # --- shared Linux package staging ---------------------------------------------
-# Both deb and rpm install the whole app to /opt/blue-notes (the binary
+# Both deb and rpm install the whole app to /opt/blue_notes (the binary
 # resolves icons/ and its defaults ini relative to argv[0]) and put a
 # wrapper script on PATH that execs it by absolute path so that
 # resolution works.  Per-user settings fall back to ~/.config/blue_notes/
@@ -162,18 +162,18 @@ PKGROOT  := $(DIST)/pkgroot
 
 pkgroot: $(BIN)
 	rm -rf $(PKGROOT)
-	mkdir -p $(PKGROOT)/opt/blue-notes $(PKGROOT)/usr/bin \
+	mkdir -p $(PKGROOT)/opt/blue_notes $(PKGROOT)/usr/bin \
 	         $(PKGROOT)/usr/share/applications \
 	         $(PKGROOT)/usr/share/icons/hicolor/512x512/apps
-	cp $(BIN) $(PKGROOT)/opt/blue-notes/
-	cp -R icons $(PKGROOT)/opt/blue-notes/icons
-	cp blue_notes.ini.defaults $(PKGROOT)/opt/blue-notes/
+	cp $(BIN) $(PKGROOT)/opt/blue_notes/
+	cp -R icons $(PKGROOT)/opt/blue_notes/icons
+	cp blue_notes.ini.defaults $(PKGROOT)/opt/blue_notes/
 	find $(PKGROOT) -name .DS_Store -delete
 	printf '%s\n' \
 	  '#!/bin/sh' \
 	  '# Blue Notes finds icons/ and its defaults ini next to argv[0];' \
-	  '# exec by absolute path so both resolve into /opt/blue-notes.' \
-	  'exec /opt/blue-notes/blue_notes "$$@"' \
+	  '# exec by absolute path so both resolve into /opt/blue_notes.' \
+	  'exec /opt/blue_notes/blue_notes "$$@"' \
 	  > $(PKGROOT)/usr/bin/blue_notes
 	chmod 755 $(PKGROOT)/usr/bin/blue_notes
 	printf '%s\n' \
@@ -182,14 +182,17 @@ pkgroot: $(BIN)
 	  'Name=Blue Notes' \
 	  'Comment=Notes with folders, tags and rich text' \
 	  'Exec=/usr/bin/blue_notes' \
-	  'Icon=blue-notes' \
+	  'Icon=blue_notes' \
 	  'Terminal=false' \
 	  'Categories=Utility;Office;' \
-	  > $(PKGROOT)/usr/share/applications/blue-notes.desktop
+	  > $(PKGROOT)/usr/share/applications/blue_notes.desktop
 	cp icons/vinyl.png \
-	   $(PKGROOT)/usr/share/icons/hicolor/512x512/apps/blue-notes.png
+	   $(PKGROOT)/usr/share/icons/hicolor/512x512/apps/blue_notes.png
 
 # --- Debian package ------------------------------------------------------------
+# The control "Package:" field stays blue-notes: Debian policy (and
+# dpkg-deb) forbid "_" in package names.  Every path and filename uses
+# blue_notes.
 DEB_ARCH := $(shell dpkg --print-architecture 2>/dev/null || \
                     uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 DEB_ROOT := $(DIST)/deb-root
@@ -213,7 +216,7 @@ deb: pkgroot
 	  ' Apple Notes-style desktop notes application (GTK3 + SQLite).' \
 	  > $(DEB_ROOT)/DEBIAN/control
 	dpkg-deb --build --root-owner-group $(DEB_ROOT) \
-	  $(DIST)/blue-notes_$(VERSION)_$(DEB_ARCH).deb
+	  $(DIST)/blue_notes_$(VERSION)_$(DEB_ARCH).deb
 
 # --- RPM package ----------------------------------------------------------------
 RPM_ARCH := $(shell uname -m)
@@ -225,7 +228,7 @@ rpm: pkgroot
 	rm -rf $(DIST)/rpm
 	mkdir -p $(DIST)/rpm/SPECS
 	printf '%s\n' \
-	  'Name: blue-notes' \
+	  'Name: blue_notes' \
 	  'Version: $(VERSION)' \
 	  'Release: 1' \
 	  'Summary: Notes app with folders, tags and rich text' \
@@ -235,13 +238,13 @@ rpm: pkgroot
 	  '%install' \
 	  'cp -a $(abspath $(PKGROOT))/. %{buildroot}/' \
 	  '%files' \
-	  '/opt/blue-notes' \
+	  '/opt/blue_notes' \
 	  '/usr/bin/blue_notes' \
-	  '/usr/share/applications/blue-notes.desktop' \
-	  '/usr/share/icons/hicolor/512x512/apps/blue-notes.png' \
-	  > $(DIST)/rpm/SPECS/blue-notes.spec
+	  '/usr/share/applications/blue_notes.desktop' \
+	  '/usr/share/icons/hicolor/512x512/apps/blue_notes.png' \
+	  > $(DIST)/rpm/SPECS/blue_notes.spec
 	rpmbuild -bb --define "_topdir $(abspath $(DIST))/rpm" \
-	  $(DIST)/rpm/SPECS/blue-notes.spec
-	cp $(DIST)/rpm/RPMS/*/blue-notes-$(VERSION)-1.*.rpm $(DIST)/
+	  $(DIST)/rpm/SPECS/blue_notes.spec
+	cp $(DIST)/rpm/RPMS/*/blue_notes-$(VERSION)-1.*.rpm $(DIST)/
 
 .PHONY: all run clean app pkgroot deb rpm
