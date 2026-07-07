@@ -348,6 +348,25 @@ main(int argc, char *argv[])
      * overlay style (must be set before GTK initializes).                  */
     g_setenv("GTK_OVERLAY_SCROLLING", "0", TRUE);
 
+    /* Touch assistance disabled (the default): take X11 CORE pointer
+     * events only.  GDK then never classifies the pointer as a
+     * touchscreen — some Linux input stacks (VM tablet devices, certain
+     * trackpads) otherwise make GTK pop up its touch aids for plain
+     * mouse input: selection handles, the magnifier, and the tap
+     * cut/copy/paste bubble.  The bubble in particular cannot be hidden
+     * with CSS (its buttons would stay clickable while invisible), so
+     * this is the one lever that kills all three at the source.  Costs
+     * XInput2 niceties (pixel-smooth scrolling); ignored on non-X11
+     * backends.  Must be set before GTK initializes, so the Settings
+     * toggle fully applies on the next start (the CSS half of
+     * on_app_apply_touch_assist still applies live).                       */
+    {
+        gchar *ta = on_app_config_get("touch_assist");
+        if (g_strcmp0(ta, "1") != 0)
+            g_setenv("GDK_CORE_DEVICE_EVENTS", "1", TRUE);
+        g_free(ta);
+    }
+
     /* Open (or create) the notes database first — without it there is
      * nothing to show.  A custom location (e.g. a shared folder) may be
      * configured in the config file.  There is deliberately NO fallback

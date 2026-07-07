@@ -298,7 +298,9 @@ on_compact_toolbar_toggled(GtkToggleButton *check, gpointer user_data)
 }
 
 /* on_touch_assist_toggled() — the checkbox DISABLES the touch aids, so
- * active = touch_assist off (see on_app_apply_touch_assist), live.          */
+ * active = touch_assist off.  The CSS half (handles, magnifier) applies
+ * live; the tap-popup half is the GDK_CORE_DEVICE_EVENTS env var in
+ * main(), which only takes effect on the next start.                        */
 static void
 on_touch_assist_toggled(GtkToggleButton *check, gpointer user_data)
 {
@@ -306,6 +308,7 @@ on_touch_assist_toggled(GtkToggleButton *check, gpointer user_data)
     on_app_config_set("touch_assist",
                       gtk_toggle_button_get_active(check) ? "0" : "1");
     on_app_apply_touch_assist(app);
+    on_app_status(app, "Touch assistance fully applies after a restart");
 }
 
 /* on_db_integrity_check_toggled() — enable/disable the startup hash check.  */
@@ -461,7 +464,11 @@ on_settings_window_open(OnApp *app)
     gtk_box_pack_start(GTK_BOX(vbox), compact_check, FALSE, FALSE, 0);
 
     GtkWidget *touch_check = gtk_check_button_new_with_label(
-        "Disable touch assistance (selection drag handles, magnifier)");
+        "Disable touch assistance (selection handles, magnifier, "
+        "tap popup)");
+    gtk_widget_set_tooltip_text(touch_check,
+        "Hides the touch aids GTK pops up under text selections.\n"
+        "The tap cut/copy/paste popup needs a restart to change.");
     gtk_widget_set_margin_start(touch_check, 12);
     {
         gchar *ta = on_app_config_get("touch_assist");

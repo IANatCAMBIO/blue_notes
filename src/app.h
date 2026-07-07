@@ -221,7 +221,11 @@ gchar *on_app_config_get(const gchar *key);
  * Linux input stacks pop these up for plain mouse selections; GTK3 has
  * no API to turn them off, so CSS is the lever.  Removes the provider
  * again when assistance is re-enabled.  Safe to call any time after GTK
- * is initialized; applies live.
+ * is initialized; applies live.  The tap cut/copy/paste bubble is the
+ * OTHER half of the setting: CSS cannot hide it safely (its buttons
+ * would stay clickable while invisible), so main() suppresses it — and
+ * the touch classification behind all of these — with
+ * GDK_CORE_DEVICE_EVENTS=1 before GTK init (restart to change).
  *   app — the application context (owns the provider).
  * ------------------------------------------------------------------------- */
 void on_app_apply_touch_assist(OnApp *app);

@@ -105,12 +105,16 @@ sees the new flags.
   and the list buttons into a "Lists" one; applies live via
   `on_editor_rebuild_toolbars_all`), `touch_assist` (`1|0`, default 0 =
   DISABLED — GTK's touch aids: the teardrop drag handles under text
-  selections/the cursor and the selection magnifier, which some Linux
-  input stacks show for plain mouse selections; hidden screen-wide via
-  CSS in `on_app_apply_touch_assist` (`cursor-handle` nodes collapsed,
-  `popover.magnifier` rendered transparent — GTK3 has no API for
-  either), `image_viewer` (program path;
-  unset = system default),
+  selections/the cursor, the selection magnifier, and the tap
+  cut/copy/paste bubble, which some Linux input stacks (VM tablets)
+  show for plain mouse input; GTK3 has no API for any of them.  Two
+  levers: CSS in `on_app_apply_touch_assist` hides handles + magnifier
+  live (`cursor-handle` collapsed, `popover.magnifier` transparent —
+  the bubble can't be CSS-hidden: invisible-but-clickable buttons), and
+  main() sets GDK_CORE_DEVICE_EVENTS=1 before GTK init, which stops the
+  touchscreen classification driving all three — restart to change;
+  costs XI2 smooth scrolling; no-op off X11), `image_viewer` (program
+  path; unset = system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
   for the next one), `list_columns` (list-view column layout,
   `key:vis` pairs in display order, default `path:1,title:1,modified:1`
