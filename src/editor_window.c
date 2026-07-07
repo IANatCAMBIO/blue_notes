@@ -2885,6 +2885,9 @@ build_toolbar(OnEditor *ed)
         ed->toggle_buttons[i] = GTK_WIDGET(item);
     }
 
+    add_para_button(ed, toolbar, "code-block", "{\xc2\xa0}", "Code",
+                    "Code block (monospace)", ON_FMT_CODEBLOCK);
+
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
                        gtk_separator_tool_item_new(), -1);
 
@@ -2936,12 +2939,6 @@ build_toolbar(OnEditor *ed)
                         "Task list with checkboxes (click a box to toggle)",
                         ON_FMT_LIST_CHECK);
     }
-
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
-                       gtk_separator_tool_item_new(), -1);
-
-    add_para_button(ed, toolbar, "code-block", "{\xc2\xa0}", "Code",
-                    "Code block (monospace)", ON_FMT_CODEBLOCK);
 
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
                        gtk_separator_tool_item_new(), -1);

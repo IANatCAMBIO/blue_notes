@@ -2751,7 +2751,7 @@ status_path_update(OnLibrary *lw)
     if (lw->status_path == NULL)
         return;
 
-    gchar *text;                     /* what the label should show          */
+    gchar *text;                     /* the location part                   */
     if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED ||
         lw->sel_kind == SB_KIND_ALL || lw->sel_kind == SB_KIND_TRASH) {
         text = g_strdup(lw->sel_name != NULL ? lw->sel_name : "");
@@ -2763,8 +2763,28 @@ status_path_update(OnLibrary *lw)
         text = g_strdup_printf("/%s", path);
         g_free(path);
     }
+
     gtk_label_set_text(GTK_LABEL(lw->status_path), text);
     g_free(text);
+}
+
+/* on_notes_selection_status() — selection changed in either notes view:
+ * post "N files selected" as a transient event message (right label,
+ * fades like any other).  Nothing is posted when the selection empties,
+ * and refresh_notes() repopulation (which clears the selection row by
+ * row) is skipped via the populating guard.                                 */
+static void
+on_notes_selection_status(gpointer view_or_selection, gpointer user_data)
+{
+    (void)view_or_selection;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    if (lw->populating != 0)
+        return;
+    GArray *sel = selected_note_ids(lw);
+    if (sel->len > 0)
+        on_app_status(lw->app, "%u file%s selected",
+                      sel->len, sel->len == 1 ? "" : "s");
+    g_array_free(sel, TRUE);
 }
 
 /* status_fade_timeout() — the display period ended: fade the event
@@ -3898,6 +3918,9 @@ on_library_window_create(OnApp *app)
     gtk_tree_selection_set_mode(
         gtk_tree_view_get_selection(lw->notes_list),
         GTK_SELECTION_MULTIPLE);
+    g_signal_connect(gtk_tree_view_get_selection(lw->notes_list),
+                     "changed",
+                     G_CALLBACK(on_notes_selection_status), lw);
 
     /* Built-in drag reordering; the new order is persisted from the
      * model's row-deleted signal.                                          */
@@ -3949,6 +3972,8 @@ on_library_window_create(OnApp *app)
     gtk_icon_view_set_item_width(lw->notes_grid, THUMB_SIZE);
     gtk_icon_view_set_selection_mode(lw->notes_grid,
                                      GTK_SELECTION_MULTIPLE);
+    g_signal_connect(lw->notes_grid, "selection-changed",
+                     G_CALLBACK(on_notes_selection_status), lw);
     gtk_icon_view_enable_model_drag_source(lw->notes_grid,
                                            GDK_BUTTON1_MASK,
                                            &ROW_TARGET, 1,
