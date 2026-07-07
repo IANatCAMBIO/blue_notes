@@ -85,7 +85,8 @@ header bars anywhere). The first line of the note becomes its title.
 - **Editor** — show/hide the code-block copy button and code-block line
   numbers; auto-style the first line of a new note as Heading 1; a
   compact toolbar that collapses the style and list buttons into menus;
-  and a custom image-viewer program for opening images.
+  show/hide the touch drag handles under selected text; and a custom
+  image-viewer program for opening images.
 - **Database** — store the database in a custom folder (see Storage)
   and toggle the startup integrity check.
 

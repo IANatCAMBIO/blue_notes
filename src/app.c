@@ -382,6 +382,43 @@ config_save_db_dir(const gchar *dir)
 }
 
 void
+on_app_apply_selection_handles(OnApp *app)
+{
+    gchar *v = on_app_config_get("selection_handles");
+    gboolean show = g_strcmp0(v, "0") != 0;   /* default: shown            */
+    g_free(v);
+
+    if (!show && app->handles_css == NULL) {
+        GtkCssProvider *css = gtk_css_provider_new();
+        gtk_css_provider_load_from_data(css,
+            /* Collapse the handle nodes entirely: no themed teardrop
+             * graphic and a 0x0 allocation, so they neither draw nor
+             * grab pointer input.                                          */
+            "cursor-handle {"
+            "  -gtk-icon-source: none;"
+            "  background: none;"
+            "  border: none;"
+            "  box-shadow: none;"
+            "  min-width: 0;"
+            "  min-height: 0;"
+            "  padding: 0;"
+            "  margin: 0;"
+            "}",
+            -1, NULL);
+        gtk_style_context_add_provider_for_screen(
+            gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        app->handles_css = css;
+    } else if (show && app->handles_css != NULL) {
+        gtk_style_context_remove_provider_for_screen(
+            gdk_screen_get_default(),
+            GTK_STYLE_PROVIDER(app->handles_css));
+        g_object_unref(app->handles_css);
+        app->handles_css = NULL;
+    }
+}
+
+void
 on_app_close_all_editors(OnApp *app)
 {
     /* Destroying an editor removes it from the table, so copy the window

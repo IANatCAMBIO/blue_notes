@@ -103,7 +103,11 @@ sees the new flags.
   line of a new note as H1), `compact_editor_toolbar` (`1|0`, default 0
   — collapse the editor's H1/H2/¶ buttons into a "Styles" menu button
   and the list buttons into a "Lists" one; applies live via
-  `on_editor_rebuild_toolbars_all`), `image_viewer` (program path;
+  `on_editor_rebuild_toolbars_all`), `selection_handles` (`1|0`, default
+  1 — GTK's touch drag handles under text selections; 0 collapses their
+  `cursor-handle` CSS nodes screen-wide via
+  `on_app_apply_selection_handles`, the only way GTK3 allows: there is
+  no API for them), `image_viewer` (program path;
   unset = system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
   for the next one), `list_columns` (list-view column layout,

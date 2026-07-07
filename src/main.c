@@ -265,6 +265,9 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
                                        theme_dir);
     g_free(theme_dir);
 
+    /* Hide the text-selection drag handles if configured off.              */
+    on_app_apply_selection_handles(app);
+
     /* DB integrity check: warn if the file changed since last exit.        */
     gboolean db_verified = FALSE;    /* did the startup check actually pass?*/
     if (app->db_integrity_check &&

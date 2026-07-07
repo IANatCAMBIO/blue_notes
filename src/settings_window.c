@@ -297,6 +297,17 @@ on_compact_toolbar_toggled(GtkToggleButton *check, gpointer user_data)
     on_editor_rebuild_toolbars_all(app);
 }
 
+/* on_selection_handles_toggled() — show/hide the text-selection drag
+ * handles (see on_app_apply_selection_handles), live.                       */
+static void
+on_selection_handles_toggled(GtkToggleButton *check, gpointer user_data)
+{
+    OnApp *app = user_data;          /* application context                 */
+    on_app_config_set("selection_handles",
+                      gtk_toggle_button_get_active(check) ? "1" : "0");
+    on_app_apply_selection_handles(app);
+}
+
 /* on_db_integrity_check_toggled() — enable/disable the startup hash check.  */
 static void
 on_db_integrity_check_toggled(GtkToggleButton *check, gpointer user_data)
@@ -448,6 +459,19 @@ on_settings_window_open(OnApp *app)
     g_signal_connect(compact_check, "toggled",
                      G_CALLBACK(on_compact_toolbar_toggled), app);
     gtk_box_pack_start(GTK_BOX(vbox), compact_check, FALSE, FALSE, 0);
+
+    GtkWidget *handles_check = gtk_check_button_new_with_label(
+        "Show drag handles under selected text (touch aid)");
+    gtk_widget_set_margin_start(handles_check, 12);
+    {
+        gchar *sh = on_app_config_get("selection_handles");
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(handles_check),
+                                     g_strcmp0(sh, "0") != 0);
+        g_free(sh);
+    }
+    g_signal_connect(handles_check, "toggled",
+                     G_CALLBACK(on_selection_handles_toggled), app);
+    gtk_box_pack_start(GTK_BOX(vbox), handles_check, FALSE, FALSE, 0);
 
     /* Program used by an image's "Open" action; empty = system default.   */
     GtkWidget *viewer_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);

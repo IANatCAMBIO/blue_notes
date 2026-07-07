@@ -106,6 +106,8 @@ typedef struct OnApp {
     gboolean         db_integrity_check;
     gboolean         db_transient;     /* TRUE when the current DB was opened
                                         * for this session only (not default) */
+    GtkCssProvider  *handles_css;      /* screen CSS hiding the text-selection
+                                        * drag handles; NULL = handles shown  */
 } OnApp;
 
 /* ---------------------------------------------------------------------------
@@ -208,6 +210,17 @@ void on_app_config_init(const gchar *argv0);
  * Returns a new string (g_free() it), or NULL when unset/empty.
  * ------------------------------------------------------------------------- */
 gchar *on_app_config_get(const gchar *key);
+
+/* ---------------------------------------------------------------------------
+ * on_app_apply_selection_handles() — honor the "selection_handles"
+ * setting (`1|0`, default 1): when 0, install a screen-wide CSS provider
+ * that collapses GTK's "cursor-handle" nodes — the touch drag handles
+ * some Linux input stacks pop up under every text selection (GTK3 has
+ * no API to disable them) — and remove it again when re-enabled.  Safe
+ * to call any time after GTK is initialized; applies live.
+ *   app — the application context (owns the provider).
+ * ------------------------------------------------------------------------- */
+void on_app_apply_selection_handles(OnApp *app);
 
 /* ---------------------------------------------------------------------------
  * on_app_config_set() — change one setting: updates the in-memory config
