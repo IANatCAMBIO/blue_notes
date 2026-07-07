@@ -103,11 +103,13 @@ sees the new flags.
   line of a new note as H1), `compact_editor_toolbar` (`1|0`, default 0
   — collapse the editor's H1/H2/¶ buttons into a "Styles" menu button
   and the list buttons into a "Lists" one; applies live via
-  `on_editor_rebuild_toolbars_all`), `selection_handles` (`1|0`, default
-  1 — GTK's touch drag handles under text selections; 0 collapses their
-  `cursor-handle` CSS nodes screen-wide via
-  `on_app_apply_selection_handles`, the only way GTK3 allows: there is
-  no API for them), `image_viewer` (program path;
+  `on_editor_rebuild_toolbars_all`), `touch_assist` (`1|0`, default 0 =
+  DISABLED — GTK's touch aids: the teardrop drag handles under text
+  selections/the cursor and the selection magnifier, which some Linux
+  input stacks show for plain mouse selections; hidden screen-wide via
+  CSS in `on_app_apply_touch_assist` (`cursor-handle` nodes collapsed,
+  `popover.magnifier` rendered transparent — GTK3 has no API for
+  either), `image_viewer` (program path;
   unset = system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
   for the next one), `list_columns` (list-view column layout,
