@@ -116,7 +116,20 @@
  *                     path, same format as the library window's.  Set at
  *                     open and refreshed on window focus-in, so a move
  *                     made in the library shows up on return.
+ *   undo_stack      — past buffer snapshots, oldest first (see the
+ *                     undo/redo section for the whole design).
+ *   redo_stack      — snapshots undone and re-doable, oldest first.
+ *   undo_current    — snapshot matching the last committed buffer state
+ *                     (what Ctrl+Z returns FROM).
+ *   undo_commit_source — pending group-commit timer id, 0 if none.
+ *   undo_restoring  — TRUE while undo/redo rebuilds the buffer, so the
+ *                     resulting mutations don't record history.
+ *   undo_sentences  — sentence enders ('.'/'?') typed into the pending
+ *                     undo group; the UNDO_MAX_SENTENCES-th commits the
+ *                     group early (reset on every commit).
  * ------------------------------------------------------------------------- */
+typedef struct UndoSnap UndoSnap;    /* defined in the undo/redo section    */
+
 typedef struct {
     OnApp          *app;
     gint64          note_id;
@@ -153,6 +166,13 @@ typedef struct {
     gboolean        tags_modified;
     gboolean        auto_h1;
     GtkWidget      *status_path;
+
+    GPtrArray      *undo_stack;
+    GPtrArray      *redo_stack;
+    UndoSnap       *undo_current;
+    guint           undo_commit_source;
+    gboolean        undo_restoring;
+    gint            undo_sentences;
 } OnEditor;
 
 /* ---------------------------------------------------------------------------
@@ -191,6 +211,7 @@ static void     attach_checkbox_widget(OnEditor *ed,
                                        GtkTextChildAnchor *anchor);
 static void     insert_checkbox_at(OnEditor *ed, gint at);
 static void     editor_search_next(OnEditor *ed);
+static void     undo_notify_change(OnEditor *ed);
 
 /* ===========================================================================
  * small helpers
@@ -2220,6 +2241,624 @@ tag_popup_move_selection(OnEditor *ed, gint delta)
 }
 
 /* ===========================================================================
+ * undo / redo
+ *
+ * GTK3's GtkTextBuffer has no undo (that arrived in GTK4), so the editor
+ * keeps its own history of whole-buffer SNAPSHOTS: a segment list
+ * mirroring the serializer's walk — text runs with ON_FMT_* flags, plus
+ * one segment per child anchor (image / checkbox / table).  Images are
+ * held by pixbuf REFERENCE, shared across snapshots and with the live
+ * buffer, so no PNG bytes are copied and nothing is re-decoded; tables
+ * are deep-copied because the anchor's OnTable is mutated in place by
+ * its cell entries.  Editor-only tags (emoji padding, search hits) stay
+ * out of snapshots — restore re-runs the emoji pass.
+ *
+ * Grouping: every buffer mutation already funnels through
+ * editor_queue_autosave(), which (re)arms a UNDO_GROUP_MS debounce
+ * timer — like the autosave debounce, each change RESETS it, so a group
+ * commits only after the user pauses for UNDO_GROUP_MS: one undo step
+ * per typing burst.  When it fires, the previously committed snapshot
+ * is pushed on the undo stack and a fresh capture becomes "current".
+ * Ctrl/Cmd+Z flushes any pending group, then swaps the current snapshot
+ * for the popped one (old current goes to the redo stack); Ctrl/Cmd+Y
+ * or Ctrl/Cmd+Shift+Z mirrors it.  A commit that captures a state
+ * identical to the current snapshot (e.g. an autosave queued by a
+ * no-op) pushes nothing.  Two caps keep a non-stop burst from becoming
+ * one giant step: a typed linebreak commits the group immediately, and
+ * so does the UNDO_MAX_SENTENCES-th sentence ender ('.' or '?').
+ *
+ * Restore is MINIMAL-DIFF: the common prefix and suffix (in characters)
+ * between the buffer's present state and the target snapshot stay
+ * untouched — only the differing middle is deleted and re-inserted.
+ * Undoing a word therefore doesn't churn every image widget in the note
+ * or yank the scroll position the way a full clear-and-rebuild did.
+ * =========================================================================== */
+
+#define UNDO_GROUP_MS      1000      /* pause that closes an undo group     */
+#define UNDO_MAX_GROUPS    100       /* history depth (oldest dropped)      */
+#define UNDO_MAX_SENTENCES 5         /* sentence enders per group, tops     */
+
+typedef enum {
+    UNDO_SEG_TEXT,                   /* styled text run                     */
+    UNDO_SEG_IMAGE,                  /* image anchor                        */
+    UNDO_SEG_CHECK,                  /* task-checkbox anchor                */
+    UNDO_SEG_TABLE,                  /* table anchor                        */
+} UndoSegKind;
+
+/* One buffer segment.  `flags` covers the whole run — for anchors, the
+ * anchor's own 0xFFFC character (checkbox anchors carry the
+ * on-list-check paragraph tag, and every anchor char sits inside its
+ * line's paragraph span).                                                   */
+typedef struct {
+    UndoSegKind kind;
+    guint32     flags;               /* ON_FMT_* bits on the segment        */
+    gchar      *text;                /* TEXT: owned UTF-8 run               */
+    GdkPixbuf  *pixbuf;              /* IMAGE: owned reference              */
+    gint        display_width;       /* IMAGE: chosen on-screen width       */
+    gboolean    checked;             /* CHECK: checkbox state               */
+    OnTable    *table;               /* TABLE: owned deep copy              */
+} UndoSeg;
+
+/* One history entry: the whole buffer plus the cursor position.            */
+struct UndoSnap {
+    GPtrArray *segs;                 /* UndoSeg*, in buffer order           */
+    gint       cursor;               /* insert-mark offset at capture time  */
+    gboolean   has_tags;             /* any run carries ON_FMT_TAG (used to
+                                      * set tags_modified on restore)       */
+};
+
+/* Full flag ⇄ tag map, same set the serializer uses (its copy is static
+ * to serialize.c).  INLINE_TOGGLES only covers the four inline styles.     */
+static const struct {
+    OnFormatFlags flag;              /* format bit                          */
+    const gchar  *tag_name;          /* matching GtkTextTag name            */
+} UNDO_FLAG_TAGS[] = {
+    { ON_FMT_BOLD,        ON_TAGNAME_BOLD        },
+    { ON_FMT_ITALIC,      ON_TAGNAME_ITALIC      },
+    { ON_FMT_UNDERLINE,   ON_TAGNAME_UNDERLINE   },
+    { ON_FMT_STRIKE,      ON_TAGNAME_STRIKE      },
+    { ON_FMT_H1,          ON_TAGNAME_H1          },
+    { ON_FMT_H2,          ON_TAGNAME_H2          },
+    { ON_FMT_CODEBLOCK,   ON_TAGNAME_CODEBLOCK   },
+    { ON_FMT_LIST_BULLET, ON_TAGNAME_LIST_BULLET },
+    { ON_FMT_LIST_NUMBER, ON_TAGNAME_LIST_NUMBER },
+    { ON_FMT_LIST_CHECK,  ON_TAGNAME_LIST_CHECK  },
+    { ON_FMT_TAG,         ON_TAGNAME_TAG         },
+};
+
+/* undo_seg_free() — release one segment and whatever it owns.               */
+static void
+undo_seg_free(UndoSeg *seg)
+{
+    g_free(seg->text);
+    if (seg->pixbuf != NULL)
+        g_object_unref(seg->pixbuf);
+    if (seg->table != NULL)
+        on_table_free(seg->table);
+    g_free(seg);
+}
+
+/* undo_snap_free() — release one snapshot and all its segments.             */
+static void
+undo_snap_free(UndoSnap *snap)
+{
+    for (guint i = 0; i < snap->segs->len; i++)
+        undo_seg_free(g_ptr_array_index(snap->segs, i));
+    g_ptr_array_free(snap->segs, TRUE);
+    g_free(snap);
+}
+
+/* undo_table_copy() — deep copy of a table (cells + header flag).           */
+static OnTable *
+undo_table_copy(OnTable *src)
+{
+    OnTable *copy = on_table_new(src->rows, src->cols);
+    copy->header = src->header;
+    for (gint r = 0; r < src->rows; r++)
+        for (gint c = 0; c < src->cols; c++)
+            on_table_set(copy, r, c, on_table_get(src, r, c));
+    return copy;
+}
+
+/* undo_flags_at_iter() — ALL format bits in effect at `iter` (inline +
+ * paragraph + #tag), unlike iter_inline_flags() which is inline-only.       */
+static guint32
+undo_flags_at_iter(GtkTextBuffer *buffer, const GtkTextIter *iter)
+{
+    guint32 flags = 0;               /* accumulated bits                    */
+    for (gsize i = 0; i < G_N_ELEMENTS(UNDO_FLAG_TAGS); i++) {
+        GtkTextTag *tag = lookup_tag(buffer, UNDO_FLAG_TAGS[i].tag_name);
+        if (tag != NULL && gtk_text_iter_has_tag(iter, tag))
+            flags |= UNDO_FLAG_TAGS[i].flag;
+    }
+    return flags;
+}
+
+/* undo_flush_run() — append the pending text run (if any) as a segment.     */
+static void
+undo_flush_run(UndoSnap *snap, GString *run, guint32 flags)
+{
+    if (run->len == 0)
+        return;
+    UndoSeg *seg = g_new0(UndoSeg, 1);
+    seg->kind  = UNDO_SEG_TEXT;
+    seg->flags = flags;
+    seg->text  = g_strndup(run->str, run->len);
+    g_ptr_array_add(snap->segs, seg);
+    if (flags & ON_FMT_TAG)
+        snap->has_tags = TRUE;
+    g_string_truncate(run, 0);
+}
+
+/* ---------------------------------------------------------------------------
+ * undo_snapshot_capture() — walk the buffer into a new snapshot.  Same
+ * traversal as on_note_serialize(): anchors interrupt text runs; runs
+ * split where the flag set changes; imageless anchors and stray 0xFFFC
+ * chars are dropped (as on save).
+ * ------------------------------------------------------------------------- */
+static UndoSnap *
+undo_snapshot_capture(OnEditor *ed)
+{
+    UndoSnap *snap = g_new0(UndoSnap, 1);
+    snap->segs = g_ptr_array_new();
+
+    GtkTextIter ins;                 /* current cursor                      */
+    gtk_text_buffer_get_iter_at_mark(ed->buffer, &ins,
+                                     gtk_text_buffer_get_insert(ed->buffer));
+    snap->cursor = gtk_text_iter_get_offset(&ins);
+
+    GtkTextIter iter;                /* walk position                       */
+    gtk_text_buffer_get_start_iter(ed->buffer, &iter);
+
+    GString *run       = g_string_new(NULL); /* pending text run            */
+    guint32  run_flags = 0;                  /* its formatting              */
+
+    while (!gtk_text_iter_is_end(&iter)) {
+        GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(&iter);
+        if (anchor != NULL) {
+            UndoSeg   *seg = NULL;   /* segment for this anchor             */
+            gboolean   checked;      /* checkbox state                      */
+            gint       dw;           /* image display width                 */
+            GdkPixbuf *pixbuf;       /* anchor's image, if any              */
+            OnTable   *table;        /* anchor's table, if any              */
+
+            if (on_anchor_is_checkbox(anchor, &checked)) {
+                seg = g_new0(UndoSeg, 1);
+                seg->kind    = UNDO_SEG_CHECK;
+                seg->checked = checked;
+            } else if ((table = on_anchor_get_table(anchor)) != NULL) {
+                seg = g_new0(UndoSeg, 1);
+                seg->kind  = UNDO_SEG_TABLE;
+                seg->table = undo_table_copy(table);
+            } else if ((pixbuf = on_anchor_get_image(anchor, &dw)) != NULL) {
+                seg = g_new0(UndoSeg, 1);
+                seg->kind          = UNDO_SEG_IMAGE;
+                seg->pixbuf        = g_object_ref(pixbuf);
+                seg->display_width = dw;
+            }
+            if (seg != NULL) {       /* payloadless anchors are dropped     */
+                undo_flush_run(snap, run, run_flags);
+                seg->flags = undo_flags_at_iter(ed->buffer, &iter);
+                g_ptr_array_add(snap->segs, seg);
+            }
+            gtk_text_iter_forward_char(&iter);
+            continue;
+        }
+
+        guint32 flags = undo_flags_at_iter(ed->buffer, &iter);
+        if (flags != run_flags) {
+            undo_flush_run(snap, run, run_flags);
+            run_flags = flags;
+        }
+        gunichar ch = gtk_text_iter_get_char(&iter);
+        if (ch != 0xFFFC)
+            g_string_append_unichar(run, ch);
+        gtk_text_iter_forward_char(&iter);
+    }
+    undo_flush_run(snap, run, run_flags);
+    g_string_free(run, TRUE);
+    return snap;
+}
+
+/* undo_seg_equal() — content equality of two segments.                      */
+static gboolean
+undo_seg_equal(const UndoSeg *x, const UndoSeg *y)
+{
+    if (x->kind != y->kind || x->flags != y->flags)
+        return FALSE;
+    switch (x->kind) {
+    case UNDO_SEG_TEXT:
+        return g_strcmp0(x->text, y->text) == 0;
+    case UNDO_SEG_IMAGE:
+        return x->pixbuf == y->pixbuf &&
+               x->display_width == y->display_width;
+    case UNDO_SEG_CHECK:
+        return x->checked == y->checked;
+    case UNDO_SEG_TABLE:
+        if (x->table->rows != y->table->rows ||
+            x->table->cols != y->table->cols ||
+            x->table->header != y->table->header)
+            return FALSE;
+        for (gint c = 0; c < x->table->rows * x->table->cols; c++)
+            if (g_strcmp0(g_ptr_array_index(x->table->cells, c),
+                          g_ptr_array_index(y->table->cells, c)) != 0)
+                return FALSE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* undo_snap_equal() — content equality (cursor position ignored).           */
+static gboolean
+undo_snap_equal(const UndoSnap *a, const UndoSnap *b)
+{
+    if (a->segs->len != b->segs->len)
+        return FALSE;
+    for (guint i = 0; i < a->segs->len; i++)
+        if (!undo_seg_equal(g_ptr_array_index(a->segs, i),
+                            g_ptr_array_index(b->segs, i)))
+            return FALSE;
+    return TRUE;
+}
+
+/* undo_seg_len() / undo_snap_len() — length in buffer characters (every
+ * anchor occupies one 0xFFFC character).                                    */
+static gint
+undo_seg_len(const UndoSeg *seg)
+{
+    return seg->kind == UNDO_SEG_TEXT
+           ? (gint)g_utf8_strlen(seg->text, -1) : 1;
+}
+
+static gint
+undo_snap_len(const UndoSnap *snap)
+{
+    gint len = 0;                    /* accumulated char count              */
+    for (guint i = 0; i < snap->segs->len; i++)
+        len += undo_seg_len(g_ptr_array_index(snap->segs, i));
+    return len;
+}
+
+/* ---------------------------------------------------------------------------
+ * undo_common_prefix() / undo_common_suffix() — how many leading/trailing
+ * characters two snapshots share.  Whole equal segments are consumed in
+ * lockstep; at the first differing pair, two text runs with the SAME
+ * flags still contribute their common prefix/suffix characters.  The
+ * caller must clamp so the two regions never overlap.
+ * ------------------------------------------------------------------------- */
+static gint
+undo_common_prefix(const UndoSnap *a, const UndoSnap *b)
+{
+    gint  chars = 0;                 /* shared leading characters           */
+    guint i     = 0;                 /* segment index in both snapshots     */
+    while (i < a->segs->len && i < b->segs->len) {
+        const UndoSeg *x = g_ptr_array_index(a->segs, i);
+        const UndoSeg *y = g_ptr_array_index(b->segs, i);
+        if (undo_seg_equal(x, y)) {
+            chars += undo_seg_len(x);
+            i++;
+            continue;
+        }
+        if (x->kind == UNDO_SEG_TEXT && y->kind == UNDO_SEG_TEXT &&
+            x->flags == y->flags) {
+            const gchar *p = x->text, *q = y->text;
+            while (*p != '\0' && *q != '\0' &&
+                   g_utf8_get_char(p) == g_utf8_get_char(q)) {
+                chars++;
+                p = g_utf8_next_char(p);
+                q = g_utf8_next_char(q);
+            }
+        }
+        break;
+    }
+    return chars;
+}
+
+static gint
+undo_common_suffix(const UndoSnap *a, const UndoSnap *b)
+{
+    gint chars = 0;                  /* shared trailing characters          */
+    gint i = (gint)a->segs->len - 1; /* walk both tails leftwards           */
+    gint j = (gint)b->segs->len - 1;
+    while (i >= 0 && j >= 0) {
+        const UndoSeg *x = g_ptr_array_index(a->segs, i);
+        const UndoSeg *y = g_ptr_array_index(b->segs, j);
+        if (undo_seg_equal(x, y)) {
+            chars += undo_seg_len(x);
+            i--;
+            j--;
+            continue;
+        }
+        if (x->kind == UNDO_SEG_TEXT && y->kind == UNDO_SEG_TEXT &&
+            x->flags == y->flags) {
+            const gchar *p = x->text + strlen(x->text);
+            const gchar *q = y->text + strlen(y->text);
+            while (p > x->text && q > y->text) {
+                const gchar *pp = g_utf8_prev_char(p);
+                const gchar *qq = g_utf8_prev_char(q);
+                if (g_utf8_get_char(pp) != g_utf8_get_char(qq))
+                    break;
+                chars++;
+                p = pp;
+                q = qq;
+            }
+        }
+        break;
+    }
+    return chars;
+}
+
+/* ---------------------------------------------------------------------------
+ * undo_commit_now() — close the in-progress edit group: push the old
+ * current snapshot on the undo stack (unless nothing actually changed)
+ * and capture the buffer as the new current state.  Any real commit
+ * invalidates the redo branch.
+ * ------------------------------------------------------------------------- */
+static void
+undo_commit_now(OnEditor *ed)
+{
+    ed->undo_sentences = 0;          /* the cap counts per group            */
+    if (ed->undo_commit_source != 0) {
+        g_source_remove(ed->undo_commit_source);
+        ed->undo_commit_source = 0;
+    }
+
+    UndoSnap *now = undo_snapshot_capture(ed);
+    if (ed->undo_current != NULL && undo_snap_equal(now, ed->undo_current)) {
+        undo_snap_free(ed->undo_current);
+        ed->undo_current = now;      /* content unchanged: refresh cursor   */
+        return;
+    }
+
+    if (ed->undo_current != NULL) {
+        if (ed->undo_stack->len >= UNDO_MAX_GROUPS) {
+            undo_snap_free(g_ptr_array_index(ed->undo_stack, 0));
+            g_ptr_array_remove_index(ed->undo_stack, 0);
+        }
+        g_ptr_array_add(ed->undo_stack, ed->undo_current);
+    }
+    ed->undo_current = now;
+
+    for (guint i = 0; i < ed->redo_stack->len; i++)
+        undo_snap_free(g_ptr_array_index(ed->redo_stack, i));
+    g_ptr_array_set_size(ed->redo_stack, 0);
+}
+
+/* on_undo_commit_timeout() — the group timer fired: commit.                 */
+static gboolean
+on_undo_commit_timeout(gpointer user_data)
+{
+    OnEditor *ed = user_data;        /* owning editor                       */
+    ed->undo_commit_source = 0;
+    undo_commit_now(ed);
+    return G_SOURCE_REMOVE;
+}
+
+/* ---------------------------------------------------------------------------
+ * undo_notify_change() — called (via editor_queue_autosave) on every
+ * buffer mutation: (re)arm the group-commit debounce.  Each change
+ * resets the timer, so the group closes UNDO_GROUP_MS after the user
+ * STOPS editing — one undo step per typing burst.
+ * ------------------------------------------------------------------------- */
+static void
+undo_notify_change(OnEditor *ed)
+{
+    if (ed->undo_restoring || ed->undo_stack == NULL)
+        return;
+    if (ed->undo_commit_source != 0)
+        g_source_remove(ed->undo_commit_source);
+    ed->undo_commit_source = g_timeout_add(UNDO_GROUP_MS,
+                                           on_undo_commit_timeout, ed);
+}
+
+/* ---------------------------------------------------------------------------
+ * undo_insert_seg_slice() — insert characters [s, s+n) of one segment at
+ * buffer offset `at`: text slices by UTF-8 offset, anchors whole (their
+ * slice is always the single 0xFFFC char).  The fresh span first has
+ * every Blue Notes tag stripped — GtkTextBuffer makes insertions inherit
+ * tags applied on BOTH sides of the insertion point — then the segment's
+ * own flags applied.  Returns n.
+ * ------------------------------------------------------------------------- */
+static gint
+undo_insert_seg_slice(OnEditor *ed, const UndoSeg *seg, gint s, gint n,
+                      gint at)
+{
+    GtkTextIter it;                  /* insertion point                     */
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &it, at);
+
+    if (seg->kind == UNDO_SEG_TEXT) {
+        const gchar *ps = g_utf8_offset_to_pointer(seg->text, s);
+        const gchar *pe = g_utf8_offset_to_pointer(ps, n);
+        gtk_text_buffer_insert(ed->buffer, &it, ps, (gint)(pe - ps));
+    } else {
+        GtkTextChildAnchor *anchor =
+            gtk_text_buffer_create_child_anchor(ed->buffer, &it);
+        switch (seg->kind) {
+        case UNDO_SEG_IMAGE:
+            on_anchor_set_image(anchor, seg->pixbuf, seg->display_width);
+            attach_image_widget(ed, anchor);
+            break;
+        case UNDO_SEG_CHECK:
+            on_anchor_set_checkbox(anchor, seg->checked);
+            attach_checkbox_widget(ed, anchor);
+            break;
+        case UNDO_SEG_TABLE:
+            on_anchor_set_table(anchor, undo_table_copy(seg->table));
+            attach_table_widget(ed, anchor);
+            break;
+        default:
+            break;
+        }
+    }
+
+    GtkTextIter ss, se;              /* the span just inserted              */
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &ss, at);
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &se, at + n);
+    for (gsize t = 0; t < G_N_ELEMENTS(UNDO_FLAG_TAGS); t++) {
+        if (seg->flags & UNDO_FLAG_TAGS[t].flag)
+            gtk_text_buffer_apply_tag_by_name(
+                ed->buffer, UNDO_FLAG_TAGS[t].tag_name, &ss, &se);
+        else
+            gtk_text_buffer_remove_tag_by_name(
+                ed->buffer, UNDO_FLAG_TAGS[t].tag_name, &ss, &se);
+    }
+    gtk_text_buffer_remove_tag_by_name(ed->buffer, "on-search-hit",
+                                       &ss, &se);
+    return n;
+}
+
+/* ---------------------------------------------------------------------------
+ * undo_restore() — take the buffer from state `from` (its present
+ * content) to state `to`, touching as little as possible: the common
+ * prefix and suffix stay in place, only the differing middle is deleted
+ * and re-inserted (recreating any anchors + widgets inside it).  Then
+ * re-run the emoji padding over the seam, put the cursor back, and
+ * re-adopt the inline style there.  Runs with history recording
+ * suppressed; the change still autosaves.
+ * ------------------------------------------------------------------------- */
+static void
+undo_restore(OnEditor *ed, const UndoSnap *from, const UndoSnap *to)
+{
+    if (ed->tag_start != NULL)       /* abandon a half-typed #tag           */
+        tag_capture_end(ed, FALSE);
+
+    ed->undo_restoring = TRUE;
+    ed->internal_change++;
+
+    gint buf_len = gtk_text_buffer_get_char_count(ed->buffer);
+    gint len_to  = undo_snap_len(to);
+
+    gint prefix = undo_common_prefix(from, to);
+    gint suffix = undo_common_suffix(from, to);
+    /* The two regions must never overlap ("aaaa" → "aaa" counts 3+3).      */
+    gint max_common = MIN(undo_snap_len(from), len_to) - prefix;
+    suffix = CLAMP(suffix, 0, max_common);
+    /* Belt and braces vs. the live buffer (from should always match it).   */
+    prefix = MIN(prefix, buf_len);
+    suffix = MIN(suffix, buf_len - prefix);
+
+    /* Replace buffer [prefix, buf_len - suffix)
+     * with `to`'s   [prefix, len_to - suffix).                             */
+    GtkTextIter ds, de;              /* doomed middle range                 */
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &ds, prefix);
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &de, buf_len - suffix);
+    if (!gtk_text_iter_equal(&ds, &de))
+        gtk_text_buffer_delete(ed->buffer, &ds, &de);
+
+    gint at       = prefix;          /* insertion offset                    */
+    gint want_end = len_to - suffix; /* target chars [prefix, want_end)     */
+    gint pos      = 0;               /* char offset within `to`             */
+    for (guint i = 0; i < to->segs->len && pos < want_end; i++) {
+        const UndoSeg *seg = g_ptr_array_index(to->segs, i);
+        gint slen = undo_seg_len(seg);
+        gint s    = MAX(prefix - pos, 0);    /* slice within this segment   */
+        gint e    = MIN(want_end - pos, slen);
+        if (s < e)
+            at += undo_insert_seg_slice(ed, seg, s, e - s, at);
+        pos += slen;
+    }
+
+    /* Editor-only emoji padding is never part of snapshots — refresh it
+     * over the replaced span plus one char each side (the pad tag also
+     * covers the char after an emoji).                                     */
+    gint emo_s = MAX(prefix - 1, 0);
+    gint emo_e = MIN(at + 1, gtk_text_buffer_get_char_count(ed->buffer));
+    if (emo_s < emo_e) {
+        GtkTextIter es, ee;          /* emoji-refresh span                  */
+        gtk_text_buffer_get_iter_at_offset(ed->buffer, &es, emo_s);
+        gtk_text_buffer_get_iter_at_offset(ed->buffer, &ee, emo_e);
+        gtk_text_buffer_remove_tag_by_name(ed->buffer, "on-emoji",
+                                           &es, &ee);
+        tag_emoji_in_range(ed, emo_s, emo_e);
+    }
+
+    GtkTextIter cur;                 /* restored cursor position            */
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &cur, to->cursor);
+    gtk_text_buffer_place_cursor(ed->buffer, &cur);
+
+    ed->internal_change--;
+
+    /* Re-adopt the inline style at the restored cursor (the guarded
+     * cursor-position notify never saw the move).                          */
+    ed->inline_flags = gtk_text_iter_backward_char(&cur)
+                       ? iter_inline_flags(ed->buffer, &cur) : 0;
+    update_toggle_buttons(ed);
+
+    editor_queue_autosave(ed);       /* undo_restoring suppresses grouping  */
+    code_buttons_queue_rebuild(ed);
+    ed->undo_restoring = FALSE;
+
+    gtk_text_view_scroll_to_mark(ed->view,
+                                 gtk_text_buffer_get_insert(ed->buffer),
+                                 0.1, FALSE, 0.0, 0.0);
+}
+
+/* ---------------------------------------------------------------------------
+ * editor_undo() / editor_redo() — Ctrl/Cmd+Z and Ctrl/Cmd+Y.  Undo first
+ * flushes the in-progress group so the very latest edits are what gets
+ * undone.  tags_modified goes up whenever either side of the swap
+ * contains #tag spans — the restore may change the note's tag set.
+ * ------------------------------------------------------------------------- */
+static void
+editor_undo(OnEditor *ed)
+{
+    if (ed->undo_commit_source != 0)
+        undo_commit_now(ed);
+    if (ed->undo_stack->len == 0)
+        return;
+
+    UndoSnap *snap =                 /* state we are going back to          */
+        g_ptr_array_index(ed->undo_stack, ed->undo_stack->len - 1);
+    g_ptr_array_remove_index(ed->undo_stack, ed->undo_stack->len - 1);
+
+    UndoSnap *from = ed->undo_current;   /* the buffer's present state      */
+    if (snap->has_tags || from->has_tags)
+        ed->tags_modified = TRUE;
+    g_ptr_array_add(ed->redo_stack, from);
+    ed->undo_current = snap;
+    undo_restore(ed, from, snap);
+}
+
+static void
+editor_redo(OnEditor *ed)
+{
+    if (ed->undo_commit_source != 0)
+        undo_commit_now(ed);         /* may clear the redo stack            */
+    if (ed->redo_stack->len == 0)
+        return;
+
+    UndoSnap *snap =                 /* state we are going forward to       */
+        g_ptr_array_index(ed->redo_stack, ed->redo_stack->len - 1);
+    g_ptr_array_remove_index(ed->redo_stack, ed->redo_stack->len - 1);
+
+    UndoSnap *from = ed->undo_current;   /* the buffer's present state      */
+    if (snap->has_tags || from->has_tags)
+        ed->tags_modified = TRUE;
+    g_ptr_array_add(ed->undo_stack, from);
+    ed->undo_current = snap;
+    undo_restore(ed, from, snap);
+}
+
+/* undo_free_history() — release both stacks and the current snapshot.       */
+static void
+undo_free_history(OnEditor *ed)
+{
+    if (ed->undo_stack != NULL) {
+        for (guint i = 0; i < ed->undo_stack->len; i++)
+            undo_snap_free(g_ptr_array_index(ed->undo_stack, i));
+        g_ptr_array_free(ed->undo_stack, TRUE);
+        ed->undo_stack = NULL;
+    }
+    if (ed->redo_stack != NULL) {
+        for (guint i = 0; i < ed->redo_stack->len; i++)
+            undo_snap_free(g_ptr_array_index(ed->redo_stack, i));
+        g_ptr_array_free(ed->redo_stack, TRUE);
+        ed->redo_stack = NULL;
+    }
+    g_clear_pointer(&ed->undo_current, undo_snap_free);
+}
+
+/* ===========================================================================
  * buffer signal handlers
  * =========================================================================== */
 
@@ -2319,6 +2958,28 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
         ed->internal_change--;
         /* location may have been invalidated by tag ops; refresh it.       */
         gtk_text_buffer_get_iter_at_offset(buffer, location, end_off);
+    }
+
+    /* --- undo group caps: a linebreak closes the pending group at once,
+     * and so does the UNDO_MAX_SENTENCES-th sentence ender, so one long
+     * unbroken burst can't become a single giant undo step ---------------- */
+    {
+        gboolean cap_hit = FALSE;    /* commit the group after this char?   */
+        for (const gchar *p = text; p < text + len;
+             p = g_utf8_next_char(p)) {
+            gunichar c = g_utf8_get_char(p);
+            if (c == '\n') {
+                cap_hit = TRUE;
+                break;
+            }
+            if ((c == '.' || c == '?') &&
+                ++ed->undo_sentences >= UNDO_MAX_SENTENCES) {
+                cap_hit = TRUE;
+                break;
+            }
+        }
+        if (cap_hit)
+            undo_commit_now(ed);     /* also resets the sentence counter    */
     }
 
     /* --- jobs 2 & 3: tag capture ---------------------------------------- */
@@ -2537,8 +3198,12 @@ on_view_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
         event->keyval == GDK_KEY_KP_Enter) {
         if (ed->tag_start != NULL)
             tag_capture_end(ed, TRUE);
-        if (handle_return_in_list(ed))
+        if (handle_return_in_list(ed)) {
+            undo_commit_now(ed);     /* linebreak: close the undo group
+                                        (list Enter inserts internally, so
+                                        the insert-text cap never sees it)  */
             return TRUE;
+        }
     }
 
     /* Ctrl (or Cmd on macOS) + B/I/U inline-style shortcuts, and Ctrl+F
@@ -2553,6 +3218,15 @@ on_view_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
             return TRUE;
         case GDK_KEY_u:
             toggle_inline_format(ed, ON_FMT_UNDERLINE);
+            return TRUE;
+        case GDK_KEY_z:
+            if (event->state & GDK_SHIFT_MASK)
+                editor_redo(ed);
+            else
+                editor_undo(ed);
+            return TRUE;
+        case GDK_KEY_y:
+            editor_redo(ed);
             return TRUE;
         case GDK_KEY_d:
             editor_insert_date(ed);
@@ -2820,6 +3494,9 @@ static void
 editor_queue_autosave(OnEditor *ed)
 {
     ed->dirty = TRUE;                /* there is now something to save      */
+    undo_notify_change(ed);          /* every mutation passes through here,
+                                        so this is also where undo groups
+                                        start (no-op while restoring)       */
     if (ed->autosave_source != 0)
         g_source_remove(ed->autosave_source);
     ed->autosave_source = g_timeout_add(AUTOSAVE_DELAY_MS,
@@ -2852,6 +3529,11 @@ on_editor_destroy(GtkWidget *widget, gpointer user_data)
         g_source_remove(ed->initial_search_idle);
         ed->initial_search_idle = 0;
     }
+    if (ed->undo_commit_source != 0) {
+        g_source_remove(ed->undo_commit_source);
+        ed->undo_commit_source = 0;
+    }
+    undo_free_history(ed);
     g_clear_pointer(&ed->pending_search, g_free);
     g_slist_free(ed->code_buttons);  /* widgets die with the window         */
     ed->code_buttons = NULL;
@@ -3253,6 +3935,11 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
      * when the option is enabled.                                          */
     ed->auto_h1 = app->first_line_h1 &&
                   gtk_text_buffer_get_char_count(ed->buffer) == 0;
+
+    /* Undo history starts at the loaded state.                             */
+    ed->undo_stack   = g_ptr_array_new();
+    ed->redo_stack   = g_ptr_array_new();
+    ed->undo_current = undo_snapshot_capture(ed);
 
     /* --- layout ----------------------------------------------------------*/
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
