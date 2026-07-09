@@ -298,6 +298,17 @@ sees the new flags.
     usefully, point `gtk_tree_view_set_search_column` at a text column
     (e.g. NL_TITLE) instead.
 
+17. **`notify::cursor-position` fires INSIDE the insert-text class
+    handler** — after the character lands in the buffer but BEFORE any
+    after-handlers run.  So a cursor-moved handler that adopts the style
+    of the char left of the cursor reads the brand-new, still-untagged
+    character and wiped `ed->inline_flags` before the insert
+    after-handler could apply it (broke arming bold with no selection:
+    Ctrl/Cmd+B, then type).  Fix: an insert-text BEFORE-handler sets
+    `ed->typing_insert` for ≤2-char (typed) insertions; on_cursor_moved
+    skips style adoption while it's up; the after-handler clears it.
+    Real navigation (clicks, arrows) still adopts.
+
 ## Performance decisions
 
 - Grid thumbnails render ONLY while grid view is visible (`want_thumbs`

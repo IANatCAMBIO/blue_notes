@@ -74,6 +74,12 @@
  *   buffer          — the view's buffer; we hold an extra ref so the final
  *                     save on window destroy can still read it.
  *   inline_flags    — ON_FMT_* bits applied to newly typed characters.
+ *   typing_insert   — TRUE from the insert-text before-handler to the
+ *                     after-handler for short (typed) insertions, so
+ *                     on_cursor_moved() knows the cursor jump it sees
+ *                     mid-insert comes from typing and must not adopt
+ *                     the (still untagged) new character's style —
+ *                     that would wipe a style armed with no selection.
  *   internal_change — nesting counter; >0 while *we* mutate the buffer
  *                     programmatically, so signal handlers know to ignore
  *                     the resulting insert/delete events.
@@ -119,6 +125,7 @@ typedef struct {
     GtkTextBuffer  *buffer;
 
     guint32         inline_flags;
+    gboolean        typing_insert;
     gint            internal_change;
     guint           autosave_source;
 
@@ -2217,6 +2224,29 @@ tag_popup_move_selection(OnEditor *ed, gint delta)
  * =========================================================================== */
 
 /* ---------------------------------------------------------------------------
+ * on_buffer_insert_text_before() — runs BEFORE an insertion is carried
+ * out.  Marks short (typed) insertions so on_cursor_moved() can tell the
+ * resulting cursor jump apart from real navigation: GtkTextBuffer emits
+ * notify::cursor-position INSIDE its insert-text class handler — before
+ * on_buffer_insert_text_after() has applied ed->inline_flags to the new
+ * text — so adopting the new character's (still untagged) style there
+ * would clear a style armed via Ctrl/Cmd+B with no selection.  The same
+ * ≤2-char threshold as the after-handler's enforcement keeps pastes on
+ * the old adopt-from-buffer path.
+ * ------------------------------------------------------------------------- */
+static void
+on_buffer_insert_text_before(GtkTextBuffer *buffer, GtkTextIter *location,
+                             gchar *text, gint len, gpointer user_data)
+{
+    (void)buffer; (void)location;
+    OnEditor *ed = user_data;        /* owning editor                       */
+    if (ed->internal_change > 0)
+        return;
+    if (g_utf8_strlen(text, len) <= 2)
+        ed->typing_insert = TRUE;
+}
+
+/* ---------------------------------------------------------------------------
  * on_buffer_insert_text_after() — runs after every insertion.  Three jobs:
  *   1. enforce ed->inline_flags on short (typed) insertions,
  *   2. start a tag capture when '#' is typed at a word boundary,
@@ -2227,6 +2257,9 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
                             gchar *text, gint len, gpointer user_data)
 {
     OnEditor *ed = user_data;        /* owning editor                       */
+    ed->typing_insert = FALSE;       /* set by the before-handler; the
+                                      * insertion is fully processed once
+                                      * this handler runs                   */
     if (ed->internal_change > 0)
         return;
 
@@ -2439,7 +2472,13 @@ on_cursor_moved(GObject *object, GParamSpec *pspec, gpointer user_data)
             tag_capture_end(ed, TRUE);
     }
 
-    /* Adopt the style of the character to the left of the cursor.          */
+    /* Adopt the style of the character to the left of the cursor — but
+     * NOT when the move comes from typing: this notify fires inside the
+     * insert-text class handler, before the after-handler has applied
+     * ed->inline_flags to the new character, so probing it here would
+     * clear a style armed with no selection (Ctrl/Cmd+B, then type).      */
+    if (ed->typing_insert)
+        return;
     GtkTextIter probe = cursor;      /* the char whose style we adopt       */
     if (gtk_text_iter_backward_char(&probe))
         ed->inline_flags = iter_inline_flags(ed->buffer, &probe);
@@ -3268,6 +3307,8 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
     gtk_container_add(GTK_CONTAINER(ed->window), vbox);
 
     /* --- signals (connected after load so loading doesn't autosave) ----- */
+    g_signal_connect(ed->buffer, "insert-text",
+                     G_CALLBACK(on_buffer_insert_text_before), ed);
     g_signal_connect_after(ed->buffer, "insert-text",
                            G_CALLBACK(on_buffer_insert_text_after), ed);
     g_signal_connect(ed->buffer, "delete-range",
