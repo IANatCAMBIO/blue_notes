@@ -1,15 +1,13 @@
 # Blue Notes
 
 Blue Notes is my take on an Apple Notes–style app, coded in classic C
-with GTK3 and SQLite — with the help of Claude Code for edits, testing,
-and code organization. No web view, no framework of the week — it
-starts fast, stays out of your way, and runs the same on macOS and
-Linux. I built it because I wanted it, and I'm pretty happy with how
-it turned out.
+with GTK3 and SQLite — **with the help of Claude Code for edits,
+testing, and code organization**. No electron or interpreted code. Low
+resource usage, and runs the same on MacOS and Linux.
 
 ![Blue Notes](Screenshot.png)
 
-Here's the shape of it: your notes live in a single SQLite file you can
+TLDR; your notes live in a single SQLite file you can
 take anywhere. You organize them in a Library window — nested folders
 and `#tags` in the sidebar, notes as a list or a grid of thumbnails —
 and each note opens in its own Editor window. The editor is proper
@@ -73,5 +71,3 @@ make run
 
 The Makefile auto-detects `gtk-mac-integration-gtk3`; if you install it
 later, rebuild from clean (`make clean && make`) so every file sees it.
-
-Enjoy — I hope it becomes part of your day the way it has mine.
