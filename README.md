@@ -1,11 +1,11 @@
 # Blue Notes
 
-Blue Notes is our take on an Apple Notes–style app, coded in classic C
+Blue Notes is my take on an Apple Notes–style app, coded in classic C
 with GTK3 and SQLite — with the help of Claude Code for edits, testing,
 and code organization. No web view, no framework of the week — it
 starts fast, stays out of your way, and runs the same on macOS and
-Linux. We built it because we wanted it, and we're pretty happy with
-how it turned out.
+Linux. I built it because I wanted it, and I'm pretty happy with how
+it turned out.
 
 ![Blue Notes](Screenshot.png)
 
@@ -30,7 +30,7 @@ Want more detail?
 
 ## Migrating from Apple Notes
 
-Coming from Apple Notes? We were too. Bring everything with you:
+Coming from Apple Notes? I was too. Bring everything with you:
 
 ```sh
 tools/import-apple-notes.sh
@@ -41,7 +41,7 @@ permission to control Notes), converts the bodies to text, saves image
 attachments, and imports the lot — hierarchy included — under an
 "Apple Notes Import" folder. Your notes even keep their original
 last-edited dates. A couple of honest caveats: images land at the end
-of each note (Notes' scripting interface won't tell us where they were
+of each note (Notes' scripting interface won't say where they were
 inline), and non-image attachments like PDFs and scans are skipped with
 a count. Re-running the script duplicates notes, so delete the import
 folder first if you want a do-over.
@@ -74,4 +74,4 @@ make run
 The Makefile auto-detects `gtk-mac-integration-gtk3`; if you install it
 later, rebuild from clean (`make clean && make`) so every file sees it.
 
-Enjoy — we hope it becomes part of your day the way it has ours.
+Enjoy — I hope it becomes part of your day the way it has mine.
