@@ -23,7 +23,7 @@
 
 # Semantic version — the single source: it is baked into the binary
 # (ON_VERSION, shown in the About dialog) and into every package filename.
-VERSION  := 1.4.12
+VERSION  := 1.5.0
 
 # The compiler to use.  clang is the system compiler on macOS.
 CC       := cc
