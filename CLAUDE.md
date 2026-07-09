@@ -103,8 +103,8 @@ sees the new flags.
   sidebar), `first_line_h1` (`1|0`, code default 0, but
   blue_notes.ini.defaults seeds it to 1 — auto-style the first
   line of a new note as H1), `compact_editor_toolbar` (`1|0`, default 0
-  — collapse the editor's H1/H2/¶ buttons into a "Styles" menu button
-  and the list buttons into a "Lists" one; applies live via
+  — collapse the editor's H1/H2/¶ buttons into an "Aa" Styles menu
+  button and the list buttons into a "≡" Lists one; applies live via
   `on_editor_rebuild_toolbars_all`), `touch_assist` (`1|0`, default 0 =
   DISABLED — GTK's touch aids: the teardrop drag handles under text
   selections/the cursor, the selection magnifier, and the tap

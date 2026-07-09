@@ -3638,17 +3638,22 @@ add_para_menu_item(OnEditor *ed, GtkWidget *menu, const gchar *label,
 }
 
 /* ---------------------------------------------------------------------------
- * menu_tool_button_new() — helper: a labelled GtkMenuButton wrapped in a
- * GtkToolItem.  A GtkMenuButton + GtkMenu is used instead of a
- * GtkComboBox: the combo's popup grab is unreliable inside a toolbar (it
- * could close the moment the pointer moved); a real menu holds its grab.
+ * menu_tool_button_new() — helper: a glyph-labelled GtkMenuButton wrapped
+ * in a GtkToolItem.  `markup` is Pango markup rendered as the button face
+ * so the compact menu buttons match the letter-glyph tool buttons.  A
+ * GtkMenuButton + GtkMenu is used instead of a GtkComboBox: the combo's
+ * popup grab is unreliable inside a toolbar (it could close the moment
+ * the pointer moved); a real menu holds its grab.
  * ------------------------------------------------------------------------- */
 static GtkToolItem *
-menu_tool_button_new(const gchar *label, const gchar *tooltip,
+menu_tool_button_new(const gchar *markup, const gchar *tooltip,
                      GtkWidget *menu)
 {
     GtkWidget *btn = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(btn), label);
+    gtk_button_set_label(GTK_BUTTON(btn), markup);
+    GtkWidget *face = gtk_bin_get_child(GTK_BIN(btn));
+    if (GTK_IS_LABEL(face))          /* set_label's child IS the label      */
+        gtk_label_set_use_markup(GTK_LABEL(face), TRUE);
     gtk_menu_button_set_popup(GTK_MENU_BUTTON(btn), menu);
     gtk_widget_set_tooltip_text(btn, tooltip);
 
@@ -3662,8 +3667,8 @@ menu_tool_button_new(const gchar *label, const gchar *tooltip,
  * toggles, paragraph-style buttons, code-block and image insertion.  The
  * toolbar is registered with the app so it follows the global
  * text/icons/both style preference.  In compact mode (File → Settings…)
- * the three paragraph-style buttons collapse into a "Styles" menu button
- * and the three list buttons into a "Lists" one.
+ * the three paragraph-style buttons collapse into an "Aa" Styles menu
+ * button and the three list buttons into a "≡" Lists one.
  * Returns the toolbar widget.
  * ------------------------------------------------------------------------- */
 static GtkWidget *
@@ -3705,8 +3710,9 @@ build_toolbar(OnEditor *ed)
         add_para_menu_item(ed, styles_menu, "Heading _2", ON_FMT_H2);
         add_para_menu_item(ed, styles_menu, "_Body",      0);
         gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
-                           menu_tool_button_new("Styles",
-                               "Paragraph style: heading or body text",
+                           menu_tool_button_new("<b>A</b>a",
+                               "Styles \xe2\x80\x94 paragraph style: "
+                               "heading or body text",
                                styles_menu), -1);
     } else {
         add_para_button(ed, toolbar, "heading-1", "<b>H1</b>", "Heading 1",
@@ -3729,9 +3735,9 @@ build_toolbar(OnEditor *ed)
         add_para_menu_item(ed, lists_menu, "_Task List",
                            ON_FMT_LIST_CHECK);
         gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
-                           menu_tool_button_new("Lists",
-                               "List style: bullets, numbers, or task "
-                               "checkboxes", lists_menu), -1);
+                           menu_tool_button_new("\xe2\x89\xa1",
+                               "Lists \xe2\x80\x94 bullets, numbers, or "
+                               "task checkboxes", lists_menu), -1);
     } else {
         add_para_button(ed, toolbar, "list-bullet", "\xe2\x80\xa2",
                         "Bullets", "Bulleted list", ON_FMT_LIST_BULLET);
