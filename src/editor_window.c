@@ -242,17 +242,14 @@ iter_inline_flags(GtkTextBuffer *buffer, const GtkTextIter *iter)
 }
 
 /* ---------------------------------------------------------------------------
- * line_para_flags() — which PARA_MASK style the line containing `iter`
- * carries (0 if plain body text).  Paragraph tags are applied to whole
- * lines, so testing the first character is sufficient; for an empty line
- * the newline position itself is tested.
+ * iter_para_flags() — which PARA_MASK style the character at `iter`
+ * itself carries (0 if none).  Unlike line_para_flags() it does NOT snap
+ * to the line start — used to probe a specific position, e.g. a line's
+ * trailing newline (the one character an empty styled line owns).
  * ------------------------------------------------------------------------- */
 static guint32
-line_para_flags(GtkTextBuffer *buffer, const GtkTextIter *iter)
+iter_para_flags(GtkTextBuffer *buffer, const GtkTextIter *iter)
 {
-    GtkTextIter ls = *iter;          /* start of the line                   */
-    gtk_text_iter_set_line_offset(&ls, 0);
-
     static const struct { OnFormatFlags flag; const gchar *name; } PARA[] = {
         { ON_FMT_H1,          ON_TAGNAME_H1          },
         { ON_FMT_H2,          ON_TAGNAME_H2          },
@@ -263,10 +260,24 @@ line_para_flags(GtkTextBuffer *buffer, const GtkTextIter *iter)
     };
     for (gsize i = 0; i < G_N_ELEMENTS(PARA); i++) {
         GtkTextTag *tag = lookup_tag(buffer, PARA[i].name);
-        if (tag != NULL && gtk_text_iter_has_tag(&ls, tag))
+        if (tag != NULL && gtk_text_iter_has_tag(iter, tag))
             return PARA[i].flag;
     }
     return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * line_para_flags() — which PARA_MASK style the line containing `iter`
+ * carries (0 if plain body text).  Paragraph tags are applied to whole
+ * lines, so testing the first character is sufficient; for an empty line
+ * the newline position itself is tested.
+ * ------------------------------------------------------------------------- */
+static guint32
+line_para_flags(GtkTextBuffer *buffer, const GtkTextIter *iter)
+{
+    GtkTextIter ls = *iter;          /* start of the line                   */
+    gtk_text_iter_set_line_offset(&ls, 0);
+    return iter_para_flags(buffer, &ls);
 }
 
 /* ---------------------------------------------------------------------------
@@ -530,6 +541,18 @@ apply_paragraph_format(OnEditor *ed, guint32 flag)
         if (flag == 0)
             continue;                /* body text: nothing more to do       */
 
+        /* An empty LAST line has an empty span (no trailing newline), so
+         * a heading/code tag would have nothing to hold onto and the
+         * style would silently not stick.  Give the line its newline to
+         * carry the tag and keep the cursor on the styled line.  (Lists
+         * don't need this — their visible prefix is inserted below.)      */
+        if (gtk_text_iter_equal(&ls, &le) &&
+            (flag & (ON_FMT_H1 | ON_FMT_H2 | ON_FMT_CODEBLOCK))) {
+            gtk_text_buffer_insert(ed->buffer, &ls, "\n", -1);
+            line_span(ed->buffer, l, &ls, &le);
+            gtk_text_buffer_place_cursor(ed->buffer, &ls);
+        }
+
         /* For lists, insert the visible prefix first.                      */
         if (flag == ON_FMT_LIST_BULLET) {
             gtk_text_buffer_insert(ed->buffer, &ls, "\xe2\x80\xa2 ", -1);
@@ -561,17 +584,15 @@ apply_paragraph_format(OnEditor *ed, guint32 flag)
     gtk_widget_grab_focus(GTK_WIDGET(ed->view));
 }
 
-/* on_para_button() — click handler for paragraph-style tool buttons; the
- * style each button applies is stashed on it as object data "on-flag".
- * The buttons toggle: when every line in the selection already carries
- * the button's style, clicking it reverts those lines to body text.         */
+/* ---------------------------------------------------------------------------
+ * toggle_paragraph_format() — apply `flag` to the selected lines, or
+ * revert them to body text when every one already carries it.  Shared by
+ * the paragraph tool buttons/menu items and the Ctrl/Cmd+M code-block
+ * shortcut.
+ * ------------------------------------------------------------------------- */
 static void
-on_para_button(GtkToolButton *btn, gpointer user_data)
+toggle_paragraph_format(OnEditor *ed, guint32 flag)
 {
-    OnEditor *ed = user_data;        /* owning editor                       */
-    guint32 flag = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(btn),
-                                                      "on-flag"));
-
     if (flag != 0) {
         /* Determine the affected line range (same rule as apply).          */
         GtkTextIter start, end;      /* selection (or cursor twice)         */
@@ -596,6 +617,17 @@ on_para_button(GtkToolButton *btn, gpointer user_data)
             flag = 0;                /* toggle off: back to body text       */
     }
     apply_paragraph_format(ed, flag);
+}
+
+/* on_para_button() — click handler for paragraph-style tool buttons and
+ * compact-toolbar menu items; the style each widget applies is stashed on
+ * it as object data "on-flag".                                              */
+static void
+on_para_button(GtkToolButton *btn, gpointer user_data)
+{
+    OnEditor *ed = user_data;        /* owning editor                       */
+    toggle_paragraph_format(
+        ed, GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(btn), "on-flag")));
 }
 
 /* ---------------------------------------------------------------------------
@@ -2960,6 +2992,46 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
         gtk_text_buffer_get_iter_at_offset(buffer, location, end_off);
     }
 
+    /* --- job 1b: paragraph-style line continuity ------------------------ */
+    /* Inserted text only inherits tags that span BOTH sides of the insert
+     * point, so typing at the start of a styled line — in particular on
+     * an EMPTY styled line, whose only character is its tagged trailing
+     * newline — lands untagged and the line falls out of its style.
+     * Re-assert the line's style over the whole span (probing the
+     * trailing newline when the line start is the fresh untagged text).
+     * Exception: Enter at the end of a heading leaves an empty line whose
+     * newline inherited the heading tag — strip it instead, so the next
+     * line starts as body text (headings are single-line; code blocks by
+     * contrast grow line by line).                                        */
+    if (n_chars <= 2) {
+        GtkTextIter ls, le;          /* cursor line incl. trailing newline  */
+        line_span(buffer, gtk_text_iter_get_line(location), &ls, &le);
+        guint32 para = line_para_flags(buffer, &ls);
+        if (para == 0 && !gtk_text_iter_equal(&ls, &le)) {
+            GtkTextIter nl = le;     /* last char of the span (the newline) */
+            gtk_text_iter_backward_char(&nl);
+            para = iter_para_flags(buffer, &nl);
+        }
+        if (para != 0) {
+            ed->internal_change++;
+            if ((para & (ON_FMT_H1 | ON_FMT_H2)) &&
+                memchr(text, '\n', len) != NULL &&
+                gtk_text_iter_ends_line(&ls)) {
+                gtk_text_buffer_remove_tag_by_name(buffer, ON_TAGNAME_H1,
+                                                   &ls, &le);
+                gtk_text_buffer_remove_tag_by_name(buffer, ON_TAGNAME_H2,
+                                                   &ls, &le);
+            } else {
+                for (gsize i = 0; i < G_N_ELEMENTS(UNDO_FLAG_TAGS); i++)
+                    if (UNDO_FLAG_TAGS[i].flag == (OnFormatFlags)para)
+                        gtk_text_buffer_apply_tag_by_name(
+                            buffer, UNDO_FLAG_TAGS[i].tag_name, &ls, &le);
+            }
+            ed->internal_change--;
+            gtk_text_buffer_get_iter_at_offset(buffer, location, end_off);
+        }
+    }
+
     /* --- undo group caps: a linebreak closes the pending group at once,
      * and so does the UNDO_MAX_SENTENCES-th sentence ender, so one long
      * unbroken burst can't become a single giant undo step ---------------- */
@@ -3206,8 +3278,8 @@ on_view_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
         }
     }
 
-    /* Ctrl (or Cmd on macOS) + B/I/U inline-style shortcuts, and Ctrl+F
-     * to jump into the in-note search box.                                 */
+    /* Ctrl (or Cmd on macOS) + B/I/U inline-style shortcuts, Ctrl+M for
+     * a code block, and Ctrl+F to jump into the in-note search box.       */
     if (event->state & (GDK_CONTROL_MASK | GDK_META_MASK)) {
         switch (gdk_keyval_to_lower(event->keyval)) {
         case GDK_KEY_b:
@@ -3236,6 +3308,9 @@ on_view_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
             return TRUE;
         case GDK_KEY_f:
             gtk_widget_grab_focus(ed->search_entry);
+            return TRUE;
+        case GDK_KEY_m:
+            toggle_paragraph_format(ed, ON_FMT_CODEBLOCK);
             return TRUE;
         default:
             break;
@@ -3696,7 +3771,7 @@ build_toolbar(OnEditor *ed)
     }
 
     add_para_button(ed, toolbar, "code-block", "{\xc2\xa0}", "Code",
-                    "Code block (monospace)", ON_FMT_CODEBLOCK);
+                    "Code block (Ctrl+M)", ON_FMT_CODEBLOCK);
 
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
                        gtk_separator_tool_item_new(), -1);

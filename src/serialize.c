@@ -371,10 +371,15 @@ insert_with_flags(GtkTextBuffer *buffer, const gchar *text, gssize n,
 }
 
 /* ---------------------------------------------------------------------------
- * migrate_legacy_checkboxes() — notes saved by older builds carried task
- * state as literal glyphs (⬜/✅/☐/☑) at the start of check-list lines;
- * replace each with a checkbox anchor so the editor shows native
- * GtkCheckButtons.  Runs once per successful load.
+ * migrate_legacy_checkboxes() — LEGACY LOAD FIXUP, remove eventually:
+ * only safe once every note in every user's DB has been re-saved by a
+ * build with this pass (a note is only healed on disk when its next
+ * save rewrites the blob; until then it is re-fixed on every load).
+ *
+ * Notes saved by older builds carried task state as literal glyphs
+ * (⬜/✅/☐/☑) at the start of check-list lines; replace each with a
+ * checkbox anchor so the editor shows native GtkCheckButtons.  Runs
+ * once per successful load.
  * ------------------------------------------------------------------------- */
 static void
 migrate_legacy_checkboxes(GtkTextBuffer *buffer)
@@ -411,6 +416,47 @@ migrate_legacy_checkboxes(GtkTextBuffer *buffer)
         gtk_text_buffer_get_iter_at_offset(buffer, &ts, at);
         gtk_text_buffer_get_iter_at_offset(buffer, &te, at + 1);
         gtk_text_buffer_apply_tag(buffer, tag, &ts, &te);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * normalize_paragraph_tags() — LEGACY LOAD FIXUP, remove eventually:
+ * only safe once every note in every user's DB has been re-saved by a
+ * build with this pass (a note is only healed on disk when its next
+ * save rewrites the blob; until then it is re-fixed on every load).
+ *
+ * Paragraph styles are line-granular and must cover the trailing
+ * newline (typing at line end only inherits a tag present on BOTH
+ * sides of the insertion point).  Notes saved by older builds can
+ * carry half-tagged lines — styled text but a bare newline — where
+ * Enter at line end silently dropped out of the style (visible on
+ * code blocks).  Extend each line's start style over the whole line.
+ * Runs once per successful load.
+ * ------------------------------------------------------------------------- */
+static void
+normalize_paragraph_tags(GtkTextBuffer *buffer)
+{
+    static const gchar *PARA[] = {
+        ON_TAGNAME_H1, ON_TAGNAME_H2, ON_TAGNAME_CODEBLOCK,
+        ON_TAGNAME_LIST_BULLET, ON_TAGNAME_LIST_NUMBER,
+        ON_TAGNAME_LIST_CHECK,
+    };
+    GtkTextTagTable *table = gtk_text_buffer_get_tag_table(buffer);
+    gint n_lines = gtk_text_buffer_get_line_count(buffer);
+    for (gint line = 0; line < n_lines; line++) {
+        GtkTextIter ls;              /* line start                          */
+        gtk_text_buffer_get_iter_at_line(buffer, &ls, line);
+        if (gtk_text_iter_ends_line(&ls))
+            continue;                /* empty line: nothing to extend       */
+        GtkTextIter le = ls;         /* line span incl. trailing newline    */
+        gtk_text_iter_forward_to_line_end(&le);
+        if (!gtk_text_iter_is_end(&le))
+            gtk_text_iter_forward_char(&le);
+        for (gsize i = 0; i < G_N_ELEMENTS(PARA); i++) {
+            GtkTextTag *tag = gtk_text_tag_table_lookup(table, PARA[i]);
+            if (tag != NULL && gtk_text_iter_has_tag(&ls, tag))
+                gtk_text_buffer_apply_tag(buffer, tag, &ls, &le);
+        }
     }
 }
 
@@ -463,6 +509,7 @@ on_note_deserialize_scaled(GtkTextBuffer *buffer, const guint8 *data,
         guint8 rec = data[pos++];    /* record type byte                    */
         if (rec == REC_END) {
             migrate_legacy_checkboxes(buffer);
+            normalize_paragraph_tags(buffer);
             return TRUE;
         }
 

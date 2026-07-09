@@ -118,7 +118,12 @@ app: $(BIN)
 	rm -rf "$(APP_DIR)" "$(ICONSET)"
 	mkdir -p "$(APP_DIR)/Contents/MacOS" "$(APP_DIR)/Contents/Resources" \
 	         "$(ICONSET)"
-	cp $(BIN) "$(APP_DIR)/Contents/MacOS/"
+	# The executable is named "Blue Notes": for NIB-less apps (the
+	# gtkosx menubar is built programmatically) macOS titles the app
+	# menu with the PROCESS name, not CFBundleName — the binary's
+	# filename is the only lever.  argv[0]-relative lookups (icons,
+	# ini) resolve by directory, so the rename is harmless.
+	cp $(BIN) "$(APP_DIR)/Contents/MacOS/Blue Notes"
 	cp -R icons "$(APP_DIR)/Contents/MacOS/icons"
 	cp blue_notes.ini.defaults "$(APP_DIR)/Contents/MacOS/"
 	find "$(APP_DIR)" -name .DS_Store -delete
@@ -140,7 +145,7 @@ app: $(BIN)
 	  '  <key>CFBundleName</key><string>Blue Notes</string>' \
 	  '  <key>CFBundleDisplayName</key><string>Blue Notes</string>' \
 	  '  <key>CFBundleIdentifier</key><string>org.example.blue-notes</string>' \
-	  '  <key>CFBundleExecutable</key><string>blue_notes</string>' \
+	  '  <key>CFBundleExecutable</key><string>Blue Notes</string>' \
 	  '  <key>CFBundleIconFile</key><string>vinyl</string>' \
 	  '  <key>CFBundlePackageType</key><string>APPL</string>' \
 	  '  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
