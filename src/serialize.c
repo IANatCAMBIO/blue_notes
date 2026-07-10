@@ -13,6 +13,7 @@
  * =========================================================================== */
 
 #include "serialize.h"
+#include "db.h"                      /* OnActionItem (extraction result)    */
 
 #include <string.h>
 
@@ -720,6 +721,126 @@ on_note_extract_text(const guint8 *data, gsize len)
         }
     }
     return g_string_free(out, FALSE);
+}
+
+/* ---------------------------------------------------------------------------
+ * action_finish_line() — helper for on_note_extract_actions(): if the
+ * line just ended was an action line with real text, append it to *items
+ * (text trimmed, ord = list position); either way reset the line state.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    gboolean at_start;               /* cursor sits at a line start         */
+    gboolean is_action;              /* current line began with '!'         */
+    gboolean struck;                 /* every rest non-space char struck?   */
+    gboolean have_rest;              /* any non-space char after the '!'?   */
+    GString *text;                   /* rest-of-line accumulator            */
+} ActionScan;
+
+static void
+action_finish_line(ActionScan *s, GList **items, gint *ord)
+{
+    if (s->is_action && s->have_rest) {
+        OnActionItem *it = g_new0(OnActionItem, 1);
+        it->text = g_strstrip(g_strdup(s->text->str));
+        it->done = s->struck;
+        it->ord  = (*ord)++;
+        *items = g_list_prepend(*items, it);
+    }
+    g_string_truncate(s->text, 0);
+    s->at_start  = TRUE;
+    s->is_action = FALSE;
+}
+
+GList *
+on_note_extract_actions(const guint8 *data, gsize len)
+{
+    if (!magic_ok(data, len))
+        return NULL;
+    gsize   pos = 4;                 /* read cursor, past the magic         */
+    guint32 version;
+    if (!get_u32(data, len, &pos, &version) ||
+        version < 1 || version > BNBF_VERSION)
+        return NULL;
+
+    GList *items = NULL;             /* collected OnActionItem*, reversed   */
+    gint   ord   = 0;                /* next item's position index          */
+    ActionScan s = { TRUE, FALSE, TRUE, FALSE, g_string_new(NULL) };
+
+    while (pos < len) {
+        guint8 rec = data[pos++];    /* record type byte                    */
+        if (rec == REC_END)
+            break;
+
+        if (rec == REC_TEXT) {
+            guint32 flags, n;
+            if (!get_u32(data, len, &pos, &flags) ||
+                !get_u32(data, len, &pos, &n) || pos + n > len)
+                break;
+            const gchar *run = (const gchar *)data + pos;
+            for (guint32 i = 0; i < n; i++) {
+                gchar c = run[i];    /* one BYTE — '\n'/'!' are ASCII, and
+                                        UTF-8 tail bytes are all >= 0x80    */
+                if (c == '\n') {
+                    action_finish_line(&s, &items, &ord);
+                } else if (s.at_start) {
+                    s.at_start  = FALSE;
+                    s.is_action = c == '!' &&
+                                  (flags & ON_FMT_CODEBLOCK) == 0;
+                    if (s.is_action) {   /* the '!' itself is not item text */
+                        s.struck    = TRUE;
+                        s.have_rest = FALSE;
+                    }
+                } else if (s.is_action) {
+                    g_string_append_c(s.text, c);
+                    if (!g_ascii_isspace((guchar)c)) {
+                        s.have_rest = TRUE;
+                        if ((flags & ON_FMT_STRIKE) == 0)
+                            s.struck = FALSE;
+                    }
+                }
+            }
+            pos += n;
+        } else if (rec == REC_IMAGE) {
+            guint32 dw = 0, n;
+            if (version >= 2 && !get_u32(data, len, &pos, &dw))
+                break;
+            if (!get_u32(data, len, &pos, &n) || pos + n > len)
+                break;
+            pos += n;                /* skip the PNG payload                */
+            s.at_start = FALSE;      /* the object occupies the first slot  */
+        } else if (rec == REC_TABLE) {
+            guint32 tflags = 0, rows, cols;
+            if (version >= 4 && !get_u32(data, len, &pos, &tflags))
+                break;
+            if (!get_u32(data, len, &pos, &rows) ||
+                !get_u32(data, len, &pos, &cols) ||
+                rows == 0 || cols == 0 || rows > 1024 || cols > 1024)
+                break;               /* same clamp as the deserializer      */
+            gboolean bad = FALSE;    /* truncated cell encountered          */
+            for (guint32 i = 0; i < rows * cols && !bad; i++) {
+                guint32 n;
+                if (!get_u32(data, len, &pos, &n) || pos + n > len) {
+                    bad = TRUE;
+                    break;
+                }
+                pos += n;            /* cell text is not line text          */
+            }
+            if (bad)
+                break;
+            s.at_start = FALSE;
+        } else if (rec == REC_CHECK) {
+            if (pos >= len)
+                break;
+            pos += 1;                /* skip the state byte                 */
+            s.at_start = FALSE;      /* checkbox lines never start with '!' */
+        } else {
+            break;                   /* unknown record: stop safely         */
+        }
+    }
+    action_finish_line(&s, &items, &ord);   /* line without trailing '\n'   */
+
+    g_string_free(s.text, TRUE);
+    return g_list_reverse(items);
 }
 
 gchar *

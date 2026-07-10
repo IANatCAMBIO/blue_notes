@@ -42,6 +42,13 @@ static const char *SCHEMA_SQL =
     "  tag_id  INTEGER NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,"
     "  PRIMARY KEY (note_id, tag_id)"
     ");"
+    "CREATE TABLE IF NOT EXISTS action_items ("
+    "  note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,"
+    "  ord     INTEGER NOT NULL,"
+    "  text    TEXT NOT NULL,"
+    "  done    INTEGER NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY (note_id, ord)"
+    ");"
     "CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id);"
     "CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);"
     "CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);";
@@ -937,6 +944,145 @@ on_db_note_tag_list(OnDatabase *db, gint64 note_id)
         return NULL;
     sqlite3_bind_int64(stmt, 1, note_id);
     return run_tag_query(stmt);
+}
+
+/* =========================================================================
+ * action items — a queryable mirror of the '!' lines in note content,
+ * rebuilt whenever a save changes them (see on_note_extract_actions)
+ * ========================================================================= */
+
+gboolean
+on_db_note_set_actions(OnDatabase *db, gint64 note_id, GList *items)
+{
+    if (!exec_simple(db, "BEGIN"))
+        return FALSE;
+
+    /* Drop the note's old items, then insert the current set.              */
+    sqlite3_stmt *stmt = prepare(db,
+        "DELETE FROM action_items WHERE note_id=?");
+    gboolean ok = stmt != NULL;          /* overall success flag            */
+    if (ok) {
+        sqlite3_bind_int64(stmt, 1, note_id);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+    }
+
+    if (ok && items != NULL) {
+        stmt = prepare(db,
+            "INSERT INTO action_items (note_id, ord, text, done) "
+            "VALUES (?,?,?,?)");
+        ok = stmt != NULL;
+        gint ord = 0;                    /* row position, list order        */
+        for (GList *l = items; ok && l != NULL; l = l->next, ord++) {
+            OnActionItem *it = l->data;
+            sqlite3_bind_int64(stmt, 1, note_id);
+            sqlite3_bind_int(stmt, 2, ord);
+            sqlite3_bind_text(stmt, 3, it->text, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 4, it->done ? 1 : 0);
+            ok = sqlite3_step(stmt) == SQLITE_DONE;
+            sqlite3_reset(stmt);
+        }
+        if (stmt != NULL)
+            sqlite3_finalize(stmt);
+    }
+
+    exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
+    return ok;
+}
+
+GList *
+on_db_action_list(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT a.note_id, a.ord, a.text, a.done "
+        "FROM action_items a JOIN notes n ON n.id = a.note_id "
+        "WHERE n." NOTE_VISIBLE_SQL " "
+        "ORDER BY n.updated_at DESC, a.ord");
+    if (stmt == NULL)
+        return NULL;
+
+    GList *out = NULL;                   /* accumulated OnActionItem rows   */
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        OnActionItem *it = g_new0(OnActionItem, 1);
+        it->note_id = sqlite3_column_int64(stmt, 0);
+        it->ord     = sqlite3_column_int(stmt, 1);
+        it->text    = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
+        it->done    = sqlite3_column_int(stmt, 3) != 0;
+        out = g_list_prepend(out, it);
+    }
+    sqlite3_finalize(stmt);
+    return g_list_reverse(out);
+}
+
+gboolean
+on_db_action_set_done(OnDatabase *db, gint64 note_id, gint ord,
+                      gboolean done)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE action_items SET done=? WHERE note_id=? AND ord=?");
+    if (stmt != NULL) {
+        sqlite3_bind_int(stmt, 1, done ? 1 : 0);
+        sqlite3_bind_int64(stmt, 2, note_id);
+        sqlite3_bind_int(stmt, 3, ord);
+    }
+    return stmt_done(db, stmt);
+}
+
+void
+on_db_action_counts(OnDatabase *db, gint *total, gint *open)
+{
+    if (total != NULL) *total = 0;
+    if (open  != NULL) *open  = 0;
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT COUNT(*), COALESCE(SUM(a.done=0),0) "
+        "FROM action_items a JOIN notes n ON n.id = a.note_id "
+        "WHERE n." NOTE_VISIBLE_SQL);
+    if (stmt == NULL)
+        return;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (total != NULL) *total = sqlite3_column_int(stmt, 0);
+        if (open  != NULL) *open  = sqlite3_column_int(stmt, 1);
+    }
+    sqlite3_finalize(stmt);
+}
+
+/* free_action_item() — GDestroyNotify for one OnActionItem.                 */
+static void
+free_action_item(gpointer data)
+{
+    OnActionItem *it = data;
+    g_free(it->text);
+    g_free(it);
+}
+
+void
+on_db_action_list_free(GList *items)
+{
+    g_list_free_full(items, free_action_item);
+}
+
+/* --- schema version (PRAGMA user_version) — gates one-time backfills ---- */
+
+gint
+on_db_user_version(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db, "PRAGMA user_version");
+    if (stmt == NULL)
+        return 0;
+    gint v = 0;                          /* stored version, 0 = never set  */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        v = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return v;
+}
+
+gboolean
+on_db_set_user_version(OnDatabase *db, gint version)
+{
+    gchar *sql = g_strdup_printf("PRAGMA user_version=%d", version);
+    gboolean ok = exec_simple(db, sql);
+    g_free(sql);
+    return ok;
 }
 
 /* =========================================================================

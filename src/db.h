@@ -91,6 +91,25 @@ typedef struct {
     gchar  *name;
 } OnTag;
 
+/* ---------------------------------------------------------------------------
+ * OnActionItem — one follow-up action item: a note line starting with '!'
+ * (see on_note_extract_actions in serialize.h, which derives these from
+ * note content; the action_items table is a queryable mirror rebuilt on
+ * every save, like note_tags).
+ *
+ * Fields:
+ *   note_id — owning note (0 when coming straight from the extractor).
+ *   ord     — the item's position among the note's action lines.
+ *   text    — item text: the '!' line's remainder, trimmed (owned).
+ *   done    — completed: the whole text is struck through in the note.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    gint64   note_id;
+    gint     ord;
+    gchar   *text;
+    gboolean done;
+} OnActionItem;
+
 /* --------------------------- lifecycle ---------------------------------- */
 
 /* The database filename inside its directory (default or configured).      */
@@ -275,6 +294,37 @@ GList *on_db_notes_by_tag(OnDatabase *db, gint64 tag_id);
 /* List the tags labeling note `note_id`, ordered by name.
  * Returns a GList of OnTag*; free with on_db_tag_list_free().               */
 GList *on_db_note_tag_list(OnDatabase *db, gint64 note_id);
+
+/* --------------------------- action items -------------------------------- */
+
+/* Replace note `note_id`'s action_items rows with `items` (a GList of
+ * OnActionItem; ord is assigned from list order).  One transaction.
+ * Returns TRUE on success.                                                  */
+gboolean on_db_note_set_actions(OnDatabase *db, gint64 note_id,
+                                GList *items);
+
+/* Every action item of every visible (non-trashed) note, newest note
+ * first, note order preserved within a note.  Returns a GList of
+ * OnActionItem*; free with on_db_action_list_free().                        */
+GList *on_db_action_list(OnDatabase *db);
+
+/* Set one item's done flag (addressed by note id + position).               */
+gboolean on_db_action_set_done(OnDatabase *db, gint64 note_id, gint ord,
+                               gboolean done);
+
+/* Item counts across all visible notes (either out-param may be NULL):
+ * `total` = every item, `open` = the not-yet-done ones.                     */
+void on_db_action_counts(OnDatabase *db, gint *total, gint *open);
+
+/* Free a list of OnActionItem (from on_db_action_list or
+ * on_note_extract_actions).                                                 */
+void on_db_action_list_free(GList *items);
+
+/* --------------------------- schema version ------------------------------ */
+
+/* PRAGMA user_version accessors — gate one-time backfills (0 = unset).     */
+gint on_db_user_version(OnDatabase *db);
+gboolean on_db_set_user_version(OnDatabase *db, gint version);
 
 /* ----------------------------- trash ------------------------------------ */
 

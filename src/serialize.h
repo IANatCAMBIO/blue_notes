@@ -179,6 +179,20 @@ gboolean on_note_deserialize_scaled(GtkTextBuffer *buffer,
 gchar *on_note_extract_text(const guint8 *data, gsize len);
 
 /* ---------------------------------------------------------------------------
+ * on_note_extract_actions() — pull the ACTION ITEMS out of a BNBF blob
+ * without building a GtkTextBuffer (same cheap record walk as
+ * on_note_extract_text).  An action item is a line whose first character
+ * is '!' outside a code block (an embedded image/table/checkbox occupies
+ * the first slot like any character, so such lines never qualify): its
+ * text is the rest of the line, trimmed, and it is "done" when every
+ * non-space character of that rest carries ON_FMT_STRIKE.  Lines with
+ * nothing after the '!' are ignored.
+ * Returns a GList of OnActionItem (db.h; ord = list position, note_id
+ * left 0); free with on_db_action_list_free().
+ * ------------------------------------------------------------------------- */
+GList *on_note_extract_actions(const guint8 *data, gsize len);
+
+/* ---------------------------------------------------------------------------
  * on_buffer_first_line() — extract the note title: the text of the first
  * non-empty line, or "New Note" if the buffer is empty.
  *   buffer — buffer to inspect.
