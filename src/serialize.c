@@ -48,14 +48,11 @@ magic_ok(const guint8 *data, gsize len)
 #define REC_CHECK 0x04               /* task-list checkbox                  */
 
 /* ---------------------------------------------------------------------------
- * FLAG_TAG_NAMES — table pairing each ON_FMT_* bit with its tag name.
- * Both directions of the conversion iterate this single table so the two
- * can never fall out of sync.
+ * on_flag_tags — THE flag ⇄ tag-name table (declared in serialize.h).
+ * Serializer, editor, undo and export all iterate this single copy so the
+ * mapping can never fall out of sync.
  * ------------------------------------------------------------------------- */
-static const struct {
-    OnFormatFlags flag;              /* the bitmask bit                     */
-    const gchar  *tag_name;          /* the GtkTextTag name it maps to      */
-} FLAG_TAG_NAMES[] = {
+const OnFlagTag on_flag_tags[] = {
     { ON_FMT_BOLD,        ON_TAGNAME_BOLD        },
     { ON_FMT_ITALIC,      ON_TAGNAME_ITALIC      },
     { ON_FMT_UNDERLINE,   ON_TAGNAME_UNDERLINE   },
@@ -129,26 +126,33 @@ on_buffer_ensure_tags(GtkTextBuffer *buffer)
                                NULL);
 }
 
-/* ---------------------------------------------------------------------------
- * flags_at_iter() — compute the ON_FMT_* bitmask in effect at `iter`.
- *   buffer — buffer owning the tag table.
- *   iter   — position to inspect.
- * Returns the OR of every Blue Notes formatting bit whose tag covers
- * the character at `iter`.
- * ------------------------------------------------------------------------- */
-static guint32
-flags_at_iter(GtkTextBuffer *buffer, const GtkTextIter *iter)
+const gsize on_n_flag_tags = G_N_ELEMENTS(on_flag_tags);
+
+guint32
+on_flags_at_iter(GtkTextBuffer *buffer, const GtkTextIter *iter,
+                 guint32 mask)
 {
     GtkTextTagTable *table = gtk_text_buffer_get_tag_table(buffer);
     guint32 flags = 0;               /* accumulated format bits             */
 
-    for (gsize i = 0; i < G_N_ELEMENTS(FLAG_TAG_NAMES); i++) {
+    for (gsize i = 0; i < on_n_flag_tags; i++) {
+        if ((on_flag_tags[i].flag & mask) == 0)
+            continue;
         GtkTextTag *tag =
-            gtk_text_tag_table_lookup(table, FLAG_TAG_NAMES[i].tag_name);
+            gtk_text_tag_table_lookup(table, on_flag_tags[i].tag_name);
         if (tag != NULL && gtk_text_iter_has_tag(iter, tag))
-            flags |= FLAG_TAG_NAMES[i].flag;
+            flags |= on_flag_tags[i].flag;
     }
     return flags;
+}
+
+const gchar *
+on_tag_name_for_flag(guint32 flag)
+{
+    for (gsize i = 0; i < on_n_flag_tags; i++)
+        if (on_flag_tags[i].flag == (OnFormatFlags)flag)
+            return on_flag_tags[i].tag_name;
+    return NULL;
 }
 
 /* ---------------------------------------------------------------------------
@@ -293,7 +297,7 @@ on_note_serialize(GtkTextBuffer *buffer, gsize *out_len)
 
         /* Regular character: extend the current run, or flush and start a
          * new one when the formatting changes under the cursor.            */
-        guint32 flags = flags_at_iter(buffer, &iter);
+        guint32 flags = on_flags_at_iter(buffer, &iter, ~0u);
         if (flags != run_flags) {
             flush_text_run(out, run, run_flags);
             run_flags = flags;
@@ -363,10 +367,10 @@ insert_with_flags(GtkTextBuffer *buffer, const gchar *text, gssize n,
     gtk_text_buffer_get_iter_at_offset(buffer, &start, start_offset);
     gtk_text_buffer_get_end_iter(buffer, &end);
 
-    for (gsize i = 0; i < G_N_ELEMENTS(FLAG_TAG_NAMES); i++) {
-        if (flags & FLAG_TAG_NAMES[i].flag)
+    for (gsize i = 0; i < on_n_flag_tags; i++) {
+        if (flags & on_flag_tags[i].flag)
             gtk_text_buffer_apply_tag_by_name(
-                buffer, FLAG_TAG_NAMES[i].tag_name, &start, &end);
+                buffer, on_flag_tags[i].tag_name, &start, &end);
     }
 }
 
@@ -436,11 +440,6 @@ migrate_legacy_checkboxes(GtkTextBuffer *buffer)
 static void
 normalize_paragraph_tags(GtkTextBuffer *buffer)
 {
-    static const gchar *PARA[] = {
-        ON_TAGNAME_H1, ON_TAGNAME_H2, ON_TAGNAME_CODEBLOCK,
-        ON_TAGNAME_LIST_BULLET, ON_TAGNAME_LIST_NUMBER,
-        ON_TAGNAME_LIST_CHECK,
-    };
     GtkTextTagTable *table = gtk_text_buffer_get_tag_table(buffer);
     gint n_lines = gtk_text_buffer_get_line_count(buffer);
     for (gint line = 0; line < n_lines; line++) {
@@ -452,8 +451,11 @@ normalize_paragraph_tags(GtkTextBuffer *buffer)
         gtk_text_iter_forward_to_line_end(&le);
         if (!gtk_text_iter_is_end(&le))
             gtk_text_iter_forward_char(&le);
-        for (gsize i = 0; i < G_N_ELEMENTS(PARA); i++) {
-            GtkTextTag *tag = gtk_text_tag_table_lookup(table, PARA[i]);
+        for (gsize i = 0; i < on_n_flag_tags; i++) {
+            if ((on_flag_tags[i].flag & ON_FMT_PARA_MASK) == 0)
+                continue;
+            GtkTextTag *tag =
+                gtk_text_tag_table_lookup(table, on_flag_tags[i].tag_name);
             if (tag != NULL && gtk_text_iter_has_tag(&ls, tag))
                 gtk_text_buffer_apply_tag(buffer, tag, &ls, &le);
         }
@@ -654,6 +656,22 @@ on_char_is_checkbox(gunichar c, gboolean *out_checked)
     if (out_checked != NULL)
         *out_checked = checked;
     return is_box;
+}
+
+glong
+on_list_prefix_chars(const gchar *head)
+{
+    if (g_str_has_prefix(head, "\xe2\x80\xa2 ") ||
+        (on_char_is_checkbox(g_utf8_get_char(head), NULL) &&
+         g_utf8_get_char(g_utf8_next_char(head)) == ' '))
+        return 2;                    /* glyph + one space                   */
+
+    glong d = 0;                     /* leading digit characters            */
+    while (g_ascii_isdigit(head[d]))
+        d++;
+    if (d > 0 && head[d] == '.' && head[d + 1] == ' ')
+        return d + 2;                /* "12. "                              */
+    return 0;
 }
 
 OnTable *

@@ -86,20 +86,14 @@ startup_integrity_check(OnApp *app)
     gboolean ok = (errors->len == 0);
 
     if (ok) {
-        GtkWidget *d = gtk_message_dialog_new(
-            NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-            "The database passed the integrity check.");
-        gtk_window_set_title(GTK_WINDOW(d), "Blue Notes - Integrity Check");
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
+        on_app_notice(NULL, GTK_MESSAGE_INFO,
+                      "Blue Notes - Integrity Check",
+                      "The database passed the integrity check.");
     } else {
-        GtkWidget *d = gtk_message_dialog_new(
-            NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            "The integrity check found errors:\n\n%s", errors->str);
-        gtk_window_set_title(GTK_WINDOW(d),
-                             "Blue Notes - Integrity Check Failed");
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
+        on_app_notice(NULL, GTK_MESSAGE_ERROR,
+                      "Blue Notes - Integrity Check Failed",
+                      "The integrity check found errors:\n\n%s",
+                      errors->str);
     }
     g_string_free(errors, TRUE);
     return ok;
@@ -292,10 +286,8 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
 #ifdef HAVE_GTKOSX
     /* Honor the persisted native-menu-bar preference, then let the macOS
      * integration finish its launch handshake.                             */
-    gchar *native = on_app_config_get("native_menubar");
-    if (g_strcmp0(native, "1") == 0)
+    if (on_app_config_get_bool("native_menubar", FALSE))
         on_library_apply_native_menubar(app, TRUE);
-    g_free(native);
     gtkosx_application_ready(gtkosx_application_get());
 #endif
 }
@@ -360,12 +352,8 @@ main(int argc, char *argv[])
      * backends.  Must be set before GTK initializes, so the Settings
      * toggle fully applies on the next start (the CSS half of
      * on_app_apply_touch_assist still applies live).                       */
-    {
-        gchar *ta = on_app_config_get("touch_assist");
-        if (g_strcmp0(ta, "1") != 0)
-            g_setenv("GDK_CORE_DEVICE_EVENTS", "1", TRUE);
-        g_free(ta);
-    }
+    if (!on_app_config_get_bool("touch_assist", FALSE))
+        g_setenv("GDK_CORE_DEVICE_EVENTS", "1", TRUE);
 
     /* Open (or create) the notes database first — without it there is
      * nothing to show.  A custom location (e.g. a shared folder) may be
@@ -456,40 +444,21 @@ main(int argc, char *argv[])
     on_app_load_toolbar_styles(&app);
     on_app_init_icons_dir(&app, argv[0]);
 
-    /* Code-block copy buttons are on unless explicitly disabled.           */
-    gchar *ccb = on_app_config_get("code_copy_button");
-    app.code_copy_buttons = g_strcmp0(ccb, "0") != 0;
-    g_free(ccb);
-
-    /* Code-block line numbers are off unless explicitly enabled.           */
-    gchar *cln = on_app_config_get("code_line_numbers");
-    app.code_line_numbers = g_strcmp0(cln, "1") == 0;
-    g_free(cln);
-
-    /* Sidebar folder/tag counts (hidden unless explicitly enabled).        */
-    gchar *sbc = on_app_config_get("sidebar_counts");
-    app.sidebar_counts = g_strcmp0(sbc, "1") == 0;
-    g_free(sbc);
-
-    /* Auto-H1 for the first line of a new note (off unless enabled).      */
-    gchar *flh = on_app_config_get("first_line_h1");
-    app.first_line_h1 = g_strcmp0(flh, "1") == 0;
-    g_free(flh);
-
-    /* Compact editor toolbar (off unless explicitly enabled).              */
-    gchar *cet = on_app_config_get("compact_editor_toolbar");
-    app.compact_editor_toolbar = g_strcmp0(cet, "1") == 0;
-    g_free(cet);
-
-    /* DB integrity check is enabled unless explicitly disabled.            */
-    gchar *dic = on_app_config_get("db_integrity_check");
-    app.db_integrity_check = g_strcmp0(dic, "0") != 0;
-    g_free(dic);
-
-    /* Status-bar DB-path prefix is shown unless explicitly disabled.       */
-    gchar *sdp = on_app_config_get("statusbar_db_path");
-    app.statusbar_db_path = g_strcmp0(sdp, "0") != 0;
-    g_free(sdp);
+    /* Boolean preferences (second argument = default when unset).          */
+    app.code_copy_buttons =
+        on_app_config_get_bool("code_copy_button",       TRUE);
+    app.code_line_numbers =
+        on_app_config_get_bool("code_line_numbers",      FALSE);
+    app.sidebar_counts =
+        on_app_config_get_bool("sidebar_counts",         FALSE);
+    app.first_line_h1 =
+        on_app_config_get_bool("first_line_h1",          FALSE);
+    app.compact_editor_toolbar =
+        on_app_config_get_bool("compact_editor_toolbar", FALSE);
+    app.db_integrity_check =
+        on_app_config_get_bool("db_integrity_check",     TRUE);
+    app.statusbar_db_path =
+        on_app_config_get_bool("statusbar_db_path",      TRUE);
 
     app.gtk_app = gtk_application_new("org.example.blue-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);

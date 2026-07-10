@@ -161,7 +161,7 @@ sees the new flags.
   attached and is implicitly trashed via the view). folder_id/parent_id
   are untouched by deletion — they ARE the restore location; restore
   clears the flag and re-parents to top level only when the original
-  location is itself still trashed. Moving a note (`on_db_note_move`)
+  location is itself still trashed. Moving notes (`on_db_notes_move`)
   always clears the flag (drag out of Trash = restore-to-folder). All
   normal listings/counts filter through `NOTE_VISIBLE_SQL`; search's
   All-scope uses `on_db_note_list_all(db, TRUE)` to keep deleted notes
@@ -372,11 +372,10 @@ sees the new flags.
   caller pairs it with an explicit refresh_notes. If the old selection
   no longer exists it falls back to the root and refreshes the notes
   pane itself.
-- Multi-note deletes go through `on_db_notes_delete` (one transaction +
-  one orphan-tag prune), not per-note `on_db_note_delete` (which
-  fsyncs and prunes per call).  Multi-note DROPS likewise use
-  `on_db_notes_move` (one transaction) — per-note `on_db_note_move`
-  fsyncs per call and froze the GUI on big drops.  The drop handler
+- Note deletes/moves go through the BULK `on_db_notes_delete` /
+  `on_db_notes_move` (one transaction + one orphan-tag prune) — the
+  old per-note variants fsynced per call, froze the GUI on big drops,
+  and were REMOVED (pass `&id, 1` for one note).  The drop handler
   also calls `gtk_drag_finish` BEFORE its refreshes so the DnD
   handshake isn't stalled by the model rebuilds.  Autofit column
   measuring rides refresh_notes' population loop (one PangoLayout, one

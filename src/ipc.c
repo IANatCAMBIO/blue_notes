@@ -567,31 +567,41 @@ on_ipc_server_stop(void)
  * client (short-lived CLI invocation)
  * =========================================================================== */
 
+/* ---------------------------------------------------------------------------
+ * ipc_connect() — create a client socket and connect it to the per-user
+ * instance socket, with IPC_TIMEOUT_S set on every socket operation so a
+ * wedged server can never hang the CLI.
+ * Returns a connected GSocket (g_object_unref it), or NULL when no
+ * instance is listening (or the socket could not be created).
+ * ------------------------------------------------------------------------- */
+static GSocket *
+ipc_connect(void)
+{
+    gchar   *path = ipc_socket_path();
+    GSocket *sock = g_socket_new(G_SOCKET_FAMILY_UNIX, G_SOCKET_TYPE_STREAM,
+                                 G_SOCKET_PROTOCOL_DEFAULT, NULL);
+    if (sock != NULL) {
+        g_socket_set_timeout(sock, IPC_TIMEOUT_S);
+        GSocketAddress *addr = g_unix_socket_address_new(path);
+        if (!g_socket_connect(sock, addr, NULL, NULL))
+            g_clear_object(&sock);   /* nobody home                         */
+        g_object_unref(addr);
+    }
+    g_free(path);
+    return sock;
+}
+
 OnIpcResult
 on_ipc_try_remote(const gchar *command, gchar **reply_out)
 {
     if (reply_out != NULL)
         *reply_out = NULL;
 
-    gchar   *path = ipc_socket_path();
-    GSocket *sock = g_socket_new(G_SOCKET_FAMILY_UNIX, G_SOCKET_TYPE_STREAM,
-                                 G_SOCKET_PROTOCOL_DEFAULT, NULL);
-    if (sock == NULL) {
-        g_free(path);
+    /* The whole exchange is one short line each way; on connect failure
+     * the caller starts the GUI itself.                                    */
+    GSocket *sock = ipc_connect();
+    if (sock == NULL)
         return ON_IPC_NO_SERVER;
-    }
-    /* The whole exchange is one short line each way — never hang the CLI
-     * on a wedged server.                                                  */
-    g_socket_set_timeout(sock, IPC_TIMEOUT_S);
-
-    GSocketAddress *addr = g_unix_socket_address_new(path);
-    gboolean connected = g_socket_connect(sock, addr, NULL, NULL);
-    g_object_unref(addr);
-    g_free(path);
-    if (!connected) {                /* nobody home — caller starts the GUI  */
-        g_object_unref(sock);
-        return ON_IPC_NO_SERVER;
-    }
 
     /* Send the command, then read the single reply line.                    */
     gchar *wire = g_strconcat(command, "\n", NULL);
@@ -629,24 +639,13 @@ on_ipc_try_remote_run(int argc, char **argv, gboolean *ran)
 {
     *ran = FALSE;
 
-    gchar   *path = ipc_socket_path();
-    GSocket *sock = g_socket_new(G_SOCKET_FAMILY_UNIX, G_SOCKET_TYPE_STREAM,
-                                 G_SOCKET_PROTOCOL_DEFAULT, NULL);
-    if (sock == NULL) {
-        g_free(path);
+    /* ipc_connect's timeout bounds the connect + request send; the
+     * response wait is made unbounded again below — the server may
+     * legitimately run a long command.  On connect failure the caller
+     * runs headless instead.                                               */
+    GSocket *sock = ipc_connect();
+    if (sock == NULL)
         return 0;
-    }
-    /* Bound the connect + request send; the response wait is unbounded
-     * again below — the server may legitimately run a long command.        */
-    g_socket_set_timeout(sock, IPC_TIMEOUT_S);
-    GSocketAddress *addr = g_unix_socket_address_new(path);
-    gboolean connected = g_socket_connect(sock, addr, NULL, NULL);
-    g_object_unref(addr);
-    g_free(path);
-    if (!connected) {                /* nobody home — run headless instead   */
-        g_object_unref(sock);
-        return 0;
-    }
 
     GSocketConnection *conn = g_socket_connection_factory_create_connection(sock);
     GInputStream  *in  = g_io_stream_get_input_stream(G_IO_STREAM(conn));

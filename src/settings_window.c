@@ -10,6 +10,7 @@
 #include "editor_window.h"
 #include "library_window.h"
 
+#include <stddef.h>
 #include <string.h>
 
 /* ---------------------------------------------------------------------------
@@ -80,29 +81,102 @@ style_combo_new(OnApp *app, OnToolbarKind kind)
     return combo;
 }
 
-/* on_code_copy_toggled() — enable/disable the code-block copy buttons in
- * every open editor, live.                                                  */
+/* apply_notes_changed() — fire the library's full refresh, if installed.    */
 static void
-on_code_copy_toggled(GtkToggleButton *check, gpointer user_data)
+apply_notes_changed(OnApp *app)
 {
-    OnApp *app = user_data;          /* application context                 */
-    app->code_copy_buttons = gtk_toggle_button_get_active(check);
-    on_app_config_set("code_copy_button",
-                      app->code_copy_buttons ? "1" : "0");
-    on_editor_rebuild_code_buttons_all(app);
+    if (app->notify_notes_changed != NULL)
+        app->notify_notes_changed(app);
 }
 
-/* on_sidebar_counts_toggled() — show/hide the note counts next to
- * folders and tags in the library sidebar, live.                            */
+/* apply_statusbar_db_path() — re-render every window's status-bar path.     */
 static void
-on_sidebar_counts_toggled(GtkToggleButton *check, gpointer user_data)
+apply_statusbar_db_path(OnApp *app)
+{
+    apply_notes_changed(app);        /* the library's path label            */
+    on_editor_status_refresh_all(app);
+}
+
+/* ---------------------------------------------------------------------------
+ * BOOL_SETTINGS — the simple on/off preferences: one checkbox each, one
+ * OnApp gboolean field each, persisted under `key`, with an optional
+ * live-apply hook.  bool_check_new() builds the checkbox; on_bool_toggled
+ * (shared by all of them) reads the spec back off the widget.  Settings
+ * with extra behavior (touch assist's inverted sense, the gtkosx native
+ * menubar) stay hand-written below.
+ * ------------------------------------------------------------------------- */
+typedef enum {
+    BS_SIDEBAR_COUNTS,               /* Appearance                          */
+    BS_CODE_COPY,                    /* Editor                              */
+    BS_CODE_LINES,
+    BS_FIRST_LINE_H1,
+    BS_COMPACT_TOOLBAR,
+    BS_DB_INTEGRITY,                 /* Database                            */
+    BS_STATUSBAR_DB_PATH,
+} BoolSettingId;
+
+typedef struct {
+    const gchar *label;              /* checkbox text                       */
+    const gchar *key;                /* ini key                             */
+    gsize        field_off;          /* offsetof(OnApp, <field>)            */
+    void       (*apply)(OnApp *app); /* live-apply hook, or NULL            */
+} BoolSetting;
+
+static const BoolSetting BOOL_SETTINGS[] = {
+    [BS_SIDEBAR_COUNTS] = {
+        "Show note counts next to folders and tags",
+        "sidebar_counts", offsetof(OnApp, sidebar_counts),
+        apply_notes_changed },
+    [BS_CODE_COPY] = {
+        "Show copy button on code blocks",
+        "code_copy_button", offsetof(OnApp, code_copy_buttons),
+        on_editor_rebuild_code_buttons_all },
+    [BS_CODE_LINES] = {
+        "Show line numbers in code blocks",
+        "code_line_numbers", offsetof(OnApp, code_line_numbers),
+        on_editor_apply_line_numbers_all },
+    [BS_FIRST_LINE_H1] = {
+        "Format the first line of a new note as Heading 1",
+        "first_line_h1", offsetof(OnApp, first_line_h1), NULL },
+    [BS_COMPACT_TOOLBAR] = {
+        "Compact toolbar (group paragraph styles and lists into menus)",
+        "compact_editor_toolbar", offsetof(OnApp, compact_editor_toolbar),
+        on_editor_rebuild_toolbars_all },
+    [BS_DB_INTEGRITY] = {
+        "Check database integrity on startup (detect external changes)",
+        "db_integrity_check", offsetof(OnApp, db_integrity_check), NULL },
+    [BS_STATUSBAR_DB_PATH] = {
+        "Show database path in the status bar",
+        "statusbar_db_path", offsetof(OnApp, statusbar_db_path),
+        apply_statusbar_db_path },
+};
+
+/* on_bool_toggled() — shared handler: flip the field, persist, apply.       */
+static void
+on_bool_toggled(GtkToggleButton *check, gpointer user_data)
 {
     OnApp *app = user_data;          /* application context                 */
-    app->sidebar_counts = gtk_toggle_button_get_active(check);
-    on_app_config_set("sidebar_counts",
-                      app->sidebar_counts ? "1" : "0");
-    if (app->notify_notes_changed != NULL)
-        app->notify_notes_changed(app);  /* rebuild the sidebar labels      */
+    const BoolSetting *bs = g_object_get_data(G_OBJECT(check), "on-spec");
+    gboolean *field = (gboolean *)((gchar *)app + bs->field_off);
+    *field = gtk_toggle_button_get_active(check);
+    on_app_config_set(bs->key, *field ? "1" : "0");
+    if (bs->apply != NULL)
+        bs->apply(app);
+}
+
+/* bool_check_new() — build the checkbox for one BOOL_SETTINGS entry.        */
+static GtkWidget *
+bool_check_new(OnApp *app, BoolSettingId id)
+{
+    const BoolSetting *bs = &BOOL_SETTINGS[id];
+    GtkWidget *check = gtk_check_button_new_with_label(bs->label);
+    gtk_widget_set_margin_start(check, 12);
+    gtk_toggle_button_set_active(
+        GTK_TOGGLE_BUTTON(check),
+        *(gboolean *)((gchar *)app + bs->field_off));
+    g_object_set_data(G_OBJECT(check), "on-spec", (gpointer)bs);
+    g_signal_connect(check, "toggled", G_CALLBACK(on_bool_toggled), app);
+    return check;
 }
 
 #ifdef HAVE_GTKOSX
@@ -246,55 +320,14 @@ static void
 on_viewer_browse_clicked(GtkButton *btn, gpointer user_data)
 {
     GtkWidget *entry = user_data;    /* the viewer-path entry               */
-    GtkWidget *chooser = gtk_file_chooser_dialog_new(
-        "Choose Image Viewer",
+    gchar *file = on_app_pick_path(
         GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(btn))),
-        GTK_FILE_CHOOSER_ACTION_OPEN,
-        "_Cancel", GTK_RESPONSE_CANCEL,
-        "_Select", GTK_RESPONSE_ACCEPT,
-        NULL);
-    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT) {
-        gchar *file = gtk_file_chooser_get_filename(
-            GTK_FILE_CHOOSER(chooser));
+        "Choose Image Viewer", GTK_FILE_CHOOSER_ACTION_OPEN, "_Select",
+        NULL, NULL);
+    if (file != NULL) {
         gtk_entry_set_text(GTK_ENTRY(entry), file);
         g_free(file);
     }
-    gtk_widget_destroy(chooser);
-}
-
-/* on_line_numbers_toggled() — show/hide code-block line numbers in every
- * open editor, live.                                                        */
-static void
-on_line_numbers_toggled(GtkToggleButton *check, gpointer user_data)
-{
-    OnApp *app = user_data;          /* application context                 */
-    app->code_line_numbers = gtk_toggle_button_get_active(check);
-    on_app_config_set("code_line_numbers",
-                      app->code_line_numbers ? "1" : "0");
-    on_editor_apply_line_numbers_all(app);
-}
-
-/* on_first_line_h1_toggled() — auto-style the first line of new notes
- * as Heading 1 (affects notes created from now on).                         */
-static void
-on_first_line_h1_toggled(GtkToggleButton *check, gpointer user_data)
-{
-    OnApp *app = user_data;          /* application context                 */
-    app->first_line_h1 = gtk_toggle_button_get_active(check);
-    on_app_config_set("first_line_h1",
-                      app->first_line_h1 ? "1" : "0");
-}
-
-/* on_compact_toolbar_toggled() — collapse/expand the editor toolbar's
- * paragraph-style and list buttons into "Styles"/"Lists" menus, live.       */
-static void
-on_compact_toolbar_toggled(GtkToggleButton *check, gpointer user_data)
-{
-    OnApp *app = user_data;          /* application context                 */
-    app->compact_editor_toolbar = gtk_toggle_button_get_active(check);
-    on_app_config_set("compact_editor_toolbar",
-                      app->compact_editor_toolbar ? "1" : "0");
-    on_editor_rebuild_toolbars_all(app);
 }
 
 /* on_touch_assist_toggled() — the checkbox DISABLES the touch aids, so
@@ -309,30 +342,6 @@ on_touch_assist_toggled(GtkToggleButton *check, gpointer user_data)
                       gtk_toggle_button_get_active(check) ? "0" : "1");
     on_app_apply_touch_assist(app);
     on_app_status(app, "Touch assistance fully applies after a restart");
-}
-
-/* on_statusbar_db_path_toggled() — show/hide the database file's path in
- * front of the folder path in every status bar, live.                       */
-static void
-on_statusbar_db_path_toggled(GtkToggleButton *check, gpointer user_data)
-{
-    OnApp *app = user_data;          /* application context                 */
-    app->statusbar_db_path = gtk_toggle_button_get_active(check);
-    on_app_config_set("statusbar_db_path",
-                      app->statusbar_db_path ? "1" : "0");
-    if (app->notify_notes_changed != NULL)
-        app->notify_notes_changed(app);  /* re-renders the library's path   */
-    on_editor_status_refresh_all(app);
-}
-
-/* on_db_integrity_check_toggled() — enable/disable the startup hash check.  */
-static void
-on_db_integrity_check_toggled(GtkToggleButton *check, gpointer user_data)
-{
-    OnApp *app = user_data;
-    app->db_integrity_check = gtk_toggle_button_get_active(check);
-    on_app_config_set("db_integrity_check",
-                      app->db_integrity_check ? "1" : "0");
 }
 
 /* ---------------------------------------------------------------------------
@@ -386,14 +395,9 @@ on_settings_window_open(OnApp *app)
 
     gtk_box_pack_start(GTK_BOX(vbox), grid, FALSE, FALSE, 0);
 
-    GtkWidget *counts_check = gtk_check_button_new_with_label(
-        "Show note counts next to folders and tags");
-    gtk_widget_set_margin_start(counts_check, 12);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(counts_check),
-                                 app->sidebar_counts);
-    g_signal_connect(counts_check, "toggled",
-                     G_CALLBACK(on_sidebar_counts_toggled), app);
-    gtk_box_pack_start(GTK_BOX(vbox), counts_check, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox),
+                       bool_check_new(app, BS_SIDEBAR_COUNTS),
+                       FALSE, FALSE, 0);
 
 #ifdef __APPLE__
     /* Native macOS menu bar belongs with the other appearance choices.     */
@@ -401,12 +405,9 @@ on_settings_window_open(OnApp *app)
         "Use the native macOS menu bar (hide the in-window menu)");
     gtk_widget_set_margin_start(mac_check, 12);
 #ifdef HAVE_GTKOSX
-    {
-        gchar *native = on_app_config_get("native_menubar");
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mac_check),
-                                     g_strcmp0(native, "1") == 0);
-        g_free(native);
-    }
+    gtk_toggle_button_set_active(
+        GTK_TOGGLE_BUTTON(mac_check),
+        on_app_config_get_bool("native_menubar", FALSE));
     g_signal_connect(mac_check, "toggled",
                      G_CALLBACK(on_native_menubar_toggled), app);
 #else
@@ -441,41 +442,14 @@ on_settings_window_open(OnApp *app)
     gtk_box_pack_start(GTK_BOX(vbox), section_label("Editor"),
                        FALSE, FALSE, 0);
 
-    GtkWidget *code_check = gtk_check_button_new_with_label(
-        "Show copy button on code blocks");
-    gtk_widget_set_margin_start(code_check, 12);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(code_check),
-                                 app->code_copy_buttons);
-    g_signal_connect(code_check, "toggled",
-                     G_CALLBACK(on_code_copy_toggled), app);
-    gtk_box_pack_start(GTK_BOX(vbox), code_check, FALSE, FALSE, 0);
-
-    GtkWidget *lines_check = gtk_check_button_new_with_label(
-        "Show line numbers in code blocks");
-    gtk_widget_set_margin_start(lines_check, 12);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(lines_check),
-                                 app->code_line_numbers);
-    g_signal_connect(lines_check, "toggled",
-                     G_CALLBACK(on_line_numbers_toggled), app);
-    gtk_box_pack_start(GTK_BOX(vbox), lines_check, FALSE, FALSE, 0);
-
-    GtkWidget *h1_check = gtk_check_button_new_with_label(
-        "Format the first line of a new note as Heading 1");
-    gtk_widget_set_margin_start(h1_check, 12);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(h1_check),
-                                 app->first_line_h1);
-    g_signal_connect(h1_check, "toggled",
-                     G_CALLBACK(on_first_line_h1_toggled), app);
-    gtk_box_pack_start(GTK_BOX(vbox), h1_check, FALSE, FALSE, 0);
-
-    GtkWidget *compact_check = gtk_check_button_new_with_label(
-        "Compact toolbar (group paragraph styles and lists into menus)");
-    gtk_widget_set_margin_start(compact_check, 12);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(compact_check),
-                                 app->compact_editor_toolbar);
-    g_signal_connect(compact_check, "toggled",
-                     G_CALLBACK(on_compact_toolbar_toggled), app);
-    gtk_box_pack_start(GTK_BOX(vbox), compact_check, FALSE, FALSE, 0);
+    /* The four table-driven editor checkboxes, in display order.           */
+    static const BoolSettingId EDITOR_CHECKS[] = {
+        BS_CODE_COPY, BS_CODE_LINES, BS_FIRST_LINE_H1, BS_COMPACT_TOOLBAR,
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(EDITOR_CHECKS); i++)
+        gtk_box_pack_start(GTK_BOX(vbox),
+                           bool_check_new(app, EDITOR_CHECKS[i]),
+                           FALSE, FALSE, 0);
 
     GtkWidget *touch_check = gtk_check_button_new_with_label(
         "Disable touch assistance (selection handles, magnifier, "
@@ -484,12 +458,9 @@ on_settings_window_open(OnApp *app)
         "Hides the touch aids GTK pops up under text selections.\n"
         "The tap cut/copy/paste popup needs a restart to change.");
     gtk_widget_set_margin_start(touch_check, 12);
-    {
-        gchar *ta = on_app_config_get("touch_assist");
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(touch_check),
-                                     g_strcmp0(ta, "1") != 0);
-        g_free(ta);
-    }
+    gtk_toggle_button_set_active(
+        GTK_TOGGLE_BUTTON(touch_check),
+        on_app_config_get_bool("touch_assist", FALSE));
     g_signal_connect(touch_check, "toggled",
                      G_CALLBACK(on_touch_assist_toggled), app);
     gtk_box_pack_start(GTK_BOX(vbox), touch_check, FALSE, FALSE, 0);
@@ -560,23 +531,11 @@ on_settings_window_open(OnApp *app)
     g_signal_connect(dbs->choose_btn, "clicked",
                      G_CALLBACK(on_db_choose_clicked), dbs);
 
-    GtkWidget *hash_check = gtk_check_button_new_with_label(
-        "Check database integrity on startup (detect external changes)");
-    gtk_widget_set_margin_start(hash_check, 12);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(hash_check),
-                                 app->db_integrity_check);
-    g_signal_connect(hash_check, "toggled",
-                     G_CALLBACK(on_db_integrity_check_toggled), app);
-    gtk_box_pack_start(GTK_BOX(vbox), hash_check, FALSE, FALSE, 0);
-
-    GtkWidget *sdp_check = gtk_check_button_new_with_label(
-        "Show database path in the status bar");
-    gtk_widget_set_margin_start(sdp_check, 12);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sdp_check),
-                                 app->statusbar_db_path);
-    g_signal_connect(sdp_check, "toggled",
-                     G_CALLBACK(on_statusbar_db_path_toggled), app);
-    gtk_box_pack_start(GTK_BOX(vbox), sdp_check, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), bool_check_new(app, BS_DB_INTEGRITY),
+                       FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox),
+                       bool_check_new(app, BS_STATUSBAR_DB_PATH),
+                       FALSE, FALSE, 0);
 
     /* --- close button ---------------------------------------------------------*/
     GtkWidget *close_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);

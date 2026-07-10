@@ -39,53 +39,6 @@ typedef struct {
                             ON_FMT_UNDERLINE | ON_FMT_STRIKE | ON_FMT_TAG)
 
 /* ---------------------------------------------------------------------------
- * inline_flags_at() — the EXPORT_INLINE_MASK bits in effect at `iter`.
- * ------------------------------------------------------------------------- */
-static guint32
-inline_flags_at(GtkTextBuffer *buffer, const GtkTextIter *iter)
-{
-    static const struct { OnFormatFlags f; const gchar *name; } TAGS[] = {
-        { ON_FMT_BOLD,      ON_TAGNAME_BOLD      },
-        { ON_FMT_ITALIC,    ON_TAGNAME_ITALIC    },
-        { ON_FMT_UNDERLINE, ON_TAGNAME_UNDERLINE },
-        { ON_FMT_STRIKE,    ON_TAGNAME_STRIKE    },
-        { ON_FMT_TAG,       ON_TAGNAME_TAG       },
-    };
-    GtkTextTagTable *table = gtk_text_buffer_get_tag_table(buffer);
-    guint32 flags = 0;               /* accumulated bits                    */
-    for (gsize i = 0; i < G_N_ELEMENTS(TAGS); i++) {
-        GtkTextTag *tag = gtk_text_tag_table_lookup(table, TAGS[i].name);
-        if (tag != NULL && gtk_text_iter_has_tag(iter, tag))
-            flags |= TAGS[i].f;
-    }
-    return flags;
-}
-
-/* ---------------------------------------------------------------------------
- * line_para_flag() — the paragraph style of the line starting at `ls`
- * (0 = plain body text).
- * ------------------------------------------------------------------------- */
-static guint32
-line_para_flag(GtkTextBuffer *buffer, const GtkTextIter *ls)
-{
-    static const struct { OnFormatFlags f; const gchar *name; } TAGS[] = {
-        { ON_FMT_H1,          ON_TAGNAME_H1          },
-        { ON_FMT_H2,          ON_TAGNAME_H2          },
-        { ON_FMT_CODEBLOCK,   ON_TAGNAME_CODEBLOCK   },
-        { ON_FMT_LIST_BULLET, ON_TAGNAME_LIST_BULLET },
-        { ON_FMT_LIST_NUMBER, ON_TAGNAME_LIST_NUMBER },
-        { ON_FMT_LIST_CHECK,  ON_TAGNAME_LIST_CHECK  },
-    };
-    GtkTextTagTable *table = gtk_text_buffer_get_tag_table(buffer);
-    for (gsize i = 0; i < G_N_ELEMENTS(TAGS); i++) {
-        GtkTextTag *tag = gtk_text_tag_table_lookup(table, TAGS[i].name);
-        if (tag != NULL && gtk_text_iter_has_tag(ls, tag))
-            return TAGS[i].f;
-    }
-    return 0;
-}
-
-/* ---------------------------------------------------------------------------
  * line_is_checked() — for a task-list line, whether its leading glyph is
  * the checked one (☑).
  * ------------------------------------------------------------------------- */
@@ -302,7 +255,8 @@ render_line_inline(OnExportCtx *ctx, GtkTextBuffer *buffer,
             continue;
         }
 
-        guint32 flags = raw ? 0 : inline_flags_at(buffer, &it);
+        guint32 flags =
+            raw ? 0 : on_flags_at_iter(buffer, &it, EXPORT_INLINE_MASK);
         if (flags != run_flags && run->len > 0) {
             emit_text_run(ctx, run->str, run_flags, raw);
             g_string_truncate(run, 0);
@@ -343,18 +297,7 @@ strip_list_prefix_iter(GtkTextBuffer *buffer, GtkTextIter *start,
 
     gchar *head = gtk_text_buffer_get_text(buffer, start, &probe_end,
                                            FALSE);
-    glong skip = 0;                  /* characters to skip                  */
-    if (g_str_has_prefix(head, "\xe2\x80\xa2 ") ||
-        (on_char_is_checkbox(g_utf8_get_char(head), NULL) &&
-         g_utf8_get_char(g_utf8_next_char(head)) == ' ')) {
-        skip = 2;
-    } else {
-        glong d = 0;                 /* leading digits                      */
-        while (g_ascii_isdigit(head[d]))
-            d++;
-        if (d > 0 && head[d] == '.' && head[d + 1] == ' ')
-            skip = d + 2;
-    }
+    glong skip = on_list_prefix_chars(head);
     g_free(head);
     gtk_text_iter_forward_chars(start, (gint)skip);
 }
@@ -420,7 +363,7 @@ render_note_body(OnExportCtx *ctx, GtkTextBuffer *buffer)
         if (!gtk_text_iter_ends_line(&le))
             gtk_text_iter_forward_to_line_end(&le);
 
-        guint32 para = line_para_flag(buffer, &ls);
+        guint32 para = on_flags_at_iter(buffer, &ls, ON_FMT_PARA_MASK);
 
         /* Blocks (lists, code) persist across lines; close the open one
          * when the style changes.                                          */

@@ -54,15 +54,6 @@
 #define CODEBLOCK_LEFT_MARGIN        24
 #define CODEBLOCK_LEFT_MARGIN_NUMS   36
 
-/* The inline (character-level) formatting bits.                            */
-#define INLINE_MASK (ON_FMT_BOLD | ON_FMT_ITALIC | \
-                     ON_FMT_UNDERLINE | ON_FMT_STRIKE)
-
-/* The paragraph (line-level) formatting bits.                              */
-#define PARA_MASK (ON_FMT_H1 | ON_FMT_H2 | ON_FMT_CODEBLOCK | \
-                   ON_FMT_LIST_BULLET | ON_FMT_LIST_NUMBER | \
-                   ON_FMT_LIST_CHECK)
-
 /* ---------------------------------------------------------------------------
  * OnEditor — all state for one open editor window.
  *
@@ -210,7 +201,8 @@ static void     attach_table_widget(OnEditor *ed,
 static void     attach_checkbox_widget(OnEditor *ed,
                                        GtkTextChildAnchor *anchor);
 static void     insert_checkbox_at(OnEditor *ed, gint at);
-static void     editor_search_next(OnEditor *ed);
+static void     editor_search_move(OnEditor *ed,
+                                   gboolean forward);
 static void     undo_notify_change(OnEditor *ed);
 
 /* ===========================================================================
@@ -226,58 +218,17 @@ lookup_tag(GtkTextBuffer *buffer, const gchar *name)
 }
 
 /* ---------------------------------------------------------------------------
- * iter_inline_flags() — the INLINE_MASK bits in effect at `iter`, derived
- * by checking each inline tag.
- * ------------------------------------------------------------------------- */
-static guint32
-iter_inline_flags(GtkTextBuffer *buffer, const GtkTextIter *iter)
-{
-    guint32 flags = 0;               /* accumulated bits                    */
-    for (gsize i = 0; i < G_N_ELEMENTS(INLINE_TOGGLES); i++) {
-        GtkTextTag *tag = lookup_tag(buffer, INLINE_TOGGLES[i].tag_name);
-        if (tag != NULL && gtk_text_iter_has_tag(iter, tag))
-            flags |= INLINE_TOGGLES[i].flag;
-    }
-    return flags;
-}
-
-/* ---------------------------------------------------------------------------
- * iter_para_flags() — which PARA_MASK style the character at `iter`
- * itself carries (0 if none).  Unlike line_para_flags() it does NOT snap
- * to the line start — used to probe a specific position, e.g. a line's
- * trailing newline (the one character an empty styled line owns).
- * ------------------------------------------------------------------------- */
-static guint32
-iter_para_flags(GtkTextBuffer *buffer, const GtkTextIter *iter)
-{
-    static const struct { OnFormatFlags flag; const gchar *name; } PARA[] = {
-        { ON_FMT_H1,          ON_TAGNAME_H1          },
-        { ON_FMT_H2,          ON_TAGNAME_H2          },
-        { ON_FMT_CODEBLOCK,   ON_TAGNAME_CODEBLOCK   },
-        { ON_FMT_LIST_BULLET, ON_TAGNAME_LIST_BULLET },
-        { ON_FMT_LIST_NUMBER, ON_TAGNAME_LIST_NUMBER },
-        { ON_FMT_LIST_CHECK,  ON_TAGNAME_LIST_CHECK  },
-    };
-    for (gsize i = 0; i < G_N_ELEMENTS(PARA); i++) {
-        GtkTextTag *tag = lookup_tag(buffer, PARA[i].name);
-        if (tag != NULL && gtk_text_iter_has_tag(iter, tag))
-            return PARA[i].flag;
-    }
-    return 0;
-}
-
-/* ---------------------------------------------------------------------------
- * line_para_flags() — which PARA_MASK style the line containing `iter`
- * carries (0 if plain body text).  Paragraph tags are applied to whole
- * lines, so testing the first character is sufficient; for an empty line
- * the newline position itself is tested.
+ * line_para_flags() — which ON_FMT_PARA_MASK style the line containing
+ * `iter` carries (0 if plain body text).  Paragraph tags are applied to
+ * whole lines, so testing the first character is sufficient; for an
+ * empty line the newline position itself is tested.
  * ------------------------------------------------------------------------- */
 static guint32
 line_para_flags(GtkTextBuffer *buffer, const GtkTextIter *iter)
 {
     GtkTextIter ls = *iter;          /* start of the line                   */
     gtk_text_iter_set_line_offset(&ls, 0);
-    return iter_para_flags(buffer, &ls);
+    return on_flags_at_iter(buffer, &ls, ON_FMT_PARA_MASK);
 }
 
 /* ---------------------------------------------------------------------------
@@ -336,11 +287,7 @@ update_toggle_buttons(OnEditor *ed)
 static void
 toggle_inline_format(OnEditor *ed, OnFormatFlags flag)
 {
-    /* Find this flag's tag name in the toggle table.                       */
-    const gchar *tag_name = NULL;    /* tag name matching `flag`            */
-    for (gsize i = 0; i < G_N_ELEMENTS(INLINE_TOGGLES); i++)
-        if (INLINE_TOGGLES[i].flag == flag)
-            tag_name = INLINE_TOGGLES[i].tag_name;
+    const gchar *tag_name = on_tag_name_for_flag(flag);
     if (tag_name == NULL)
         return;
 
@@ -417,20 +364,7 @@ line_strip_list_prefix(OnEditor *ed, GtkTextIter *line_start)
 
     gchar *head = gtk_text_buffer_get_text(ed->buffer, line_start,
                                            &probe_end, FALSE);
-    glong strip_chars = 0;           /* how many characters to delete       */
-
-    if (g_str_has_prefix(head, "\xe2\x80\xa2 ") ||
-        (on_char_is_checkbox(g_utf8_get_char(head), NULL) &&
-         g_utf8_get_char(g_utf8_next_char(head)) == ' ')) {
-        strip_chars = 2;             /* glyph + one space                   */
-    } else {
-        /* Try "<digits>. " — count digits then require ". ".               */
-        glong d = 0;                 /* number of leading digit chars       */
-        while (g_ascii_isdigit(head[d]))
-            d++;
-        if (d > 0 && head[d] == '.' && head[d + 1] == ' ')
-            strip_chars = d + 2;
-    }
+    glong strip_chars = on_list_prefix_chars(head);
     g_free(head);
 
     if (strip_chars == 0)
@@ -497,6 +431,23 @@ renumber_list_block(OnEditor *ed, gint line)
     ed->internal_change--;
 }
 
+/* selection_line_range() — the inclusive line range covered by the
+ * selection, or the cursor's line twice when nothing is selected.  The
+ * rule every paragraph-style operation uses.                                */
+static void
+selection_line_range(OnEditor *ed, gint *first_line, gint *last_line)
+{
+    GtkTextIter start, end;          /* selection (or cursor twice)         */
+    if (!gtk_text_buffer_get_selection_bounds(ed->buffer, &start, &end)) {
+        gtk_text_buffer_get_iter_at_mark(
+            ed->buffer, &start,
+            gtk_text_buffer_get_insert(ed->buffer));
+        end = start;
+    }
+    *first_line = gtk_text_iter_get_line(&start);
+    *last_line  = gtk_text_iter_get_line(&end);
+}
+
 /* ---------------------------------------------------------------------------
  * apply_paragraph_format() — set the paragraph style of every line touched
  * by the selection (or the cursor line) to `flag`.
@@ -507,24 +458,8 @@ renumber_list_block(OnEditor *ed, gint line)
 static void
 apply_paragraph_format(OnEditor *ed, guint32 flag)
 {
-    /* Determine the affected line range from selection or cursor.          */
-    GtkTextIter start, end;          /* selection (or cursor twice)         */
-    if (!gtk_text_buffer_get_selection_bounds(ed->buffer, &start, &end))
-        gtk_text_buffer_get_iter_at_mark(
-            ed->buffer, &start,
-            gtk_text_buffer_get_insert(ed->buffer)), end = start;
-
-    gint first_line = gtk_text_iter_get_line(&start);
-    gint last_line  = gtk_text_iter_get_line(&end);
-
-    static const struct { OnFormatFlags f; const gchar *name; } PARA[] = {
-        { ON_FMT_H1,          ON_TAGNAME_H1          },
-        { ON_FMT_H2,          ON_TAGNAME_H2          },
-        { ON_FMT_CODEBLOCK,   ON_TAGNAME_CODEBLOCK   },
-        { ON_FMT_LIST_BULLET, ON_TAGNAME_LIST_BULLET },
-        { ON_FMT_LIST_NUMBER, ON_TAGNAME_LIST_NUMBER },
-        { ON_FMT_LIST_CHECK,  ON_TAGNAME_LIST_CHECK  },
-    };
+    gint first_line, last_line;      /* affected line range                 */
+    selection_line_range(ed, &first_line, &last_line);
 
     ed->internal_change++;
     for (gint l = first_line; l <= last_line; l++) {
@@ -532,9 +467,10 @@ apply_paragraph_format(OnEditor *ed, guint32 flag)
         line_span(ed->buffer, l, &ls, &le);
 
         /* Clear every existing paragraph tag and any list prefix.          */
-        for (gsize i = 0; i < G_N_ELEMENTS(PARA); i++)
-            gtk_text_buffer_remove_tag_by_name(ed->buffer, PARA[i].name,
-                                               &ls, &le);
+        for (gsize i = 0; i < on_n_flag_tags; i++)
+            if (on_flag_tags[i].flag & ON_FMT_PARA_MASK)
+                gtk_text_buffer_remove_tag_by_name(
+                    ed->buffer, on_flag_tags[i].tag_name, &ls, &le);
         if (line_strip_list_prefix(ed, &ls))
             line_span(ed->buffer, l, &ls, &le);
 
@@ -567,10 +503,8 @@ apply_paragraph_format(OnEditor *ed, guint32 flag)
         }
 
         /* Apply the requested tag over the whole line.                     */
-        for (gsize i = 0; i < G_N_ELEMENTS(PARA); i++)
-            if (PARA[i].f == (OnFormatFlags)flag)
-                gtk_text_buffer_apply_tag_by_name(ed->buffer, PARA[i].name,
-                                                  &ls, &le);
+        gtk_text_buffer_apply_tag_by_name(
+            ed->buffer, on_tag_name_for_flag(flag), &ls, &le);
     }
     ed->internal_change--;
 
@@ -594,18 +528,10 @@ static void
 toggle_paragraph_format(OnEditor *ed, guint32 flag)
 {
     if (flag != 0) {
-        /* Determine the affected line range (same rule as apply).          */
-        GtkTextIter start, end;      /* selection (or cursor twice)         */
-        if (!gtk_text_buffer_get_selection_bounds(ed->buffer,
-                                                  &start, &end)) {
-            gtk_text_buffer_get_iter_at_mark(
-                ed->buffer, &start,
-                gtk_text_buffer_get_insert(ed->buffer));
-            end = start;
-        }
+        gint first_line, last_line;  /* affected line range                 */
+        selection_line_range(ed, &first_line, &last_line);
         gboolean all_have = TRUE;    /* every line already this style?      */
-        for (gint l = gtk_text_iter_get_line(&start);
-             l <= gtk_text_iter_get_line(&end); l++) {
+        for (gint l = first_line; l <= last_line; l++) {
             GtkTextIter it;
             gtk_text_buffer_get_iter_at_line(ed->buffer, &it, l);
             if (line_para_flags(ed->buffer, &it) != flag) {
@@ -937,7 +863,6 @@ code_buttons_rebuild(OnEditor *ed)
         gtk_widget_set_tooltip_text(btn, "Copy code block");
         gtk_widget_set_size_request(btn, CODE_BTN_SIZE, CODE_BTN_SIZE);
 
-        GtkCssProvider *css = gtk_css_provider_new();
         gchar *css_text = g_strdup_printf(
             "button, button:hover, button:active {"
             "  padding: 0;"
@@ -952,13 +877,8 @@ code_buttons_rebuild(OnEditor *ed)
             "button:hover  { background-color: #f2f2f2; }"
             "button:active { background-color: #e2e2e2; }",
             CODE_BTN_SIZE - 2, CODE_BTN_SIZE - 2);
-        gtk_css_provider_load_from_data(css, css_text, -1, NULL);
+        on_app_widget_add_css(btn, css_text);
         g_free(css_text);
-        gtk_style_context_add_provider(
-            gtk_widget_get_style_context(btn),
-            GTK_STYLE_PROVIDER(css),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(css);
 
         GtkTextMark *mark = gtk_text_buffer_create_mark(ed->buffer, NULL,
                                                         &it, TRUE);
@@ -1111,8 +1031,12 @@ editor_apply_line_numbers(OnEditor *ed)
     gtk_widget_queue_draw(GTK_WIDGET(ed->view));
 }
 
-void
-on_editor_apply_line_numbers_all(OnApp *app)
+/* ---------------------------------------------------------------------------
+ * editors_foreach() — run `fn` on every open editor.  The one walk of the
+ * open-editors table; all the public *_all entry points go through it.
+ * ------------------------------------------------------------------------- */
+static void
+editors_foreach(OnApp *app, void (*fn)(OnEditor *ed))
 {
     GHashTableIter iter;             /* walk of the open-editors table      */
     gpointer key, value;
@@ -1121,22 +1045,20 @@ on_editor_apply_line_numbers_all(OnApp *app)
         OnEditor *ed =               /* editor state stashed on its window  */
             g_object_get_data(G_OBJECT(value), "on-editor");
         if (ed != NULL)
-            editor_apply_line_numbers(ed);
+            fn(ed);
     }
+}
+
+void
+on_editor_apply_line_numbers_all(OnApp *app)
+{
+    editors_foreach(app, editor_apply_line_numbers);
 }
 
 void
 on_editor_rebuild_code_buttons_all(OnApp *app)
 {
-    GHashTableIter iter;             /* walk of the open-editors table      */
-    gpointer key, value;
-    g_hash_table_iter_init(&iter, app->editors);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        OnEditor *ed =               /* editor state stashed on its window  */
-            g_object_get_data(G_OBJECT(value), "on-editor");
-        if (ed != NULL)
-            code_buttons_queue_rebuild(ed);
-    }
+    editors_foreach(app, code_buttons_queue_rebuild);
 }
 
 /* on_view_size_allocate() — re-anchor buttons when the view's geometry
@@ -1208,6 +1130,17 @@ image_widget_new(OnEditor *ed, GdkPixbuf *orig, gint display_width)
     return image;
 }
 
+/* anchor_clear_widgets() — destroy every widget attached at `anchor`
+ * (before attaching a replacement).                                         */
+static void
+anchor_clear_widgets(GtkTextChildAnchor *anchor)
+{
+    GList *widgets = gtk_text_child_anchor_get_widgets(anchor);
+    for (GList *l = widgets; l != NULL; l = l->next)
+        gtk_widget_destroy(GTK_WIDGET(l->data));
+    g_list_free(widgets);
+}
+
 /* ---------------------------------------------------------------------------
  * attach_image_widget() — (re)create the display widget for an
  * image-carrying anchor, destroying any widget it already had.
@@ -1221,10 +1154,7 @@ attach_image_widget(OnEditor *ed, GtkTextChildAnchor *anchor)
         return;
 
     /* Drop any existing display widget.                                    */
-    GList *widgets = gtk_text_child_anchor_get_widgets(anchor);
-    for (GList *l = widgets; l != NULL; l = l->next)
-        gtk_widget_destroy(GTK_WIDGET(l->data));
-    g_list_free(widgets);
+    anchor_clear_widgets(anchor);
 
     GtkWidget *image = image_widget_new(ed, orig, dw);
     gtk_text_view_add_child_at_anchor(ed->view, image, anchor);
@@ -1306,17 +1236,28 @@ replace_image_display(OnEditor *ed, gint offset, gint display_width)
     code_buttons_queue_rebuild(ed);
 }
 
+/* image_from_menu_item() — resolve an image context-menu item back to
+ * its full-resolution pixbuf via the "on-offset" it was built with.
+ * Returns the pixbuf (anchor-owned, do not unref) or NULL; the offset is
+ * stored through `offset_out` when non-NULL.                                */
+static GdkPixbuf *
+image_from_menu_item(OnEditor *ed, GtkMenuItem *item, gint *offset_out)
+{
+    gint offset = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item),
+                                                    "on-offset"));
+    if (offset_out != NULL)
+        *offset_out = offset;
+    GtkTextChildAnchor *anchor = anchor_at_offset(ed, offset);
+    return anchor != NULL ? on_anchor_get_image(anchor, NULL) : NULL;
+}
+
 /* on_img_copy() — "Copy Image": put the full-resolution image on the
  * clipboard so it can be pasted outside the note.                           */
 static void
 on_img_copy(GtkMenuItem *item, gpointer user_data)
 {
     OnEditor *ed = user_data;        /* owning editor                       */
-    GtkTextChildAnchor *anchor = anchor_at_offset(
-        ed, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item),
-                                              "on-offset")));
-    GdkPixbuf *orig = anchor != NULL
-                      ? on_anchor_get_image(anchor, NULL) : NULL;
+    GdkPixbuf *orig = image_from_menu_item(ed, item, NULL);
     if (orig != NULL)
         gtk_clipboard_set_image(
             gtk_widget_get_clipboard(GTK_WIDGET(ed->view),
@@ -1333,11 +1274,7 @@ static void
 on_img_open(GtkMenuItem *item, gpointer user_data)
 {
     OnEditor *ed = user_data;        /* owning editor                       */
-    GtkTextChildAnchor *anchor = anchor_at_offset(
-        ed, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item),
-                                              "on-offset")));
-    GdkPixbuf *orig = anchor != NULL
-                      ? on_anchor_get_image(anchor, NULL) : NULL;
+    GdkPixbuf *orig = image_from_menu_item(ed, item, NULL);
     if (orig == NULL)
         return;
 
@@ -1381,11 +1318,8 @@ static void
 on_img_display_full(GtkMenuItem *item, gpointer user_data)
 {
     OnEditor *ed = user_data;        /* owning editor                       */
-    gint offset = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item),
-                                                    "on-offset"));
-    GtkTextChildAnchor *anchor = anchor_at_offset(ed, offset);
-    GdkPixbuf *orig = anchor != NULL
-                      ? on_anchor_get_image(anchor, NULL) : NULL;
+    gint offset;                     /* the image's buffer offset           */
+    GdkPixbuf *orig = image_from_menu_item(ed, item, &offset);
     if (orig != NULL)
         replace_image_display(ed, offset, gdk_pixbuf_get_width(orig));
 }
@@ -1635,10 +1569,7 @@ attach_checkbox_widget(OnEditor *ed, GtkTextChildAnchor *anchor)
     if (!on_anchor_is_checkbox(anchor, &checked))
         return;
 
-    GList *widgets = gtk_text_child_anchor_get_widgets(anchor);
-    for (GList *l = widgets; l != NULL; l = l->next)
-        gtk_widget_destroy(GTK_WIDGET(l->data));
-    g_list_free(widgets);
+    anchor_clear_widgets(anchor);
 
     GtkWidget *btn = gtk_check_button_new();
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), checked);
@@ -1684,7 +1615,6 @@ insert_checkbox_at(OnEditor *ed, gint at)
  * which rebuild the widget from the updated data.
  * =========================================================================== */
 
-static void attach_table_widget(OnEditor *ed, GtkTextChildAnchor *anchor);
 
 /* on_table_cell_changed() — a cell buffer edited: write through to the
  * data (cells are small GtkTextViews so content can be multiline; a bare
@@ -1832,10 +1762,7 @@ attach_table_widget(OnEditor *ed, GtkTextChildAnchor *anchor)
         return;
 
     /* Drop the previous widget (after a structural change).                */
-    GList *widgets = gtk_text_child_anchor_get_widgets(anchor);
-    for (GList *l = widgets; l != NULL; l = l->next)
-        gtk_widget_destroy(GTK_WIDGET(l->data));
-    g_list_free(widgets);
+    anchor_clear_widgets(anchor);
 
     GtkWidget *grid = gtk_grid_new();
     for (gint r = 0; r < table->rows; r++) {
@@ -1855,19 +1782,12 @@ attach_table_widget(OnEditor *ed, GtkTextChildAnchor *anchor)
             gtk_widget_set_size_request(cell, 64, -1);
 
             /* Header row: bold on a light grey fill.                       */
-            if (table->header && r == 0) {
-                GtkCssProvider *css = gtk_css_provider_new();
-                gtk_css_provider_load_from_data(css,
+            if (table->header && r == 0)
+                on_app_widget_add_css(cell,
                     "textview, textview text {"
                     "  background-color: #ececec;"
                     "  font-weight: bold;"
-                    "}", -1, NULL);
-                gtk_style_context_add_provider(
-                    gtk_widget_get_style_context(cell),
-                    GTK_STYLE_PROVIDER(css),
-                    GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-                g_object_unref(css);
-            }
+                    "}");
 
             g_object_set_data(G_OBJECT(cell_buf), "on-anchor", anchor);
             g_object_set_data(G_OBJECT(cell_buf), "on-row",
@@ -2339,25 +2259,6 @@ struct UndoSnap {
                                       * set tags_modified on restore)       */
 };
 
-/* Full flag ⇄ tag map, same set the serializer uses (its copy is static
- * to serialize.c).  INLINE_TOGGLES only covers the four inline styles.     */
-static const struct {
-    OnFormatFlags flag;              /* format bit                          */
-    const gchar  *tag_name;          /* matching GtkTextTag name            */
-} UNDO_FLAG_TAGS[] = {
-    { ON_FMT_BOLD,        ON_TAGNAME_BOLD        },
-    { ON_FMT_ITALIC,      ON_TAGNAME_ITALIC      },
-    { ON_FMT_UNDERLINE,   ON_TAGNAME_UNDERLINE   },
-    { ON_FMT_STRIKE,      ON_TAGNAME_STRIKE      },
-    { ON_FMT_H1,          ON_TAGNAME_H1          },
-    { ON_FMT_H2,          ON_TAGNAME_H2          },
-    { ON_FMT_CODEBLOCK,   ON_TAGNAME_CODEBLOCK   },
-    { ON_FMT_LIST_BULLET, ON_TAGNAME_LIST_BULLET },
-    { ON_FMT_LIST_NUMBER, ON_TAGNAME_LIST_NUMBER },
-    { ON_FMT_LIST_CHECK,  ON_TAGNAME_LIST_CHECK  },
-    { ON_FMT_TAG,         ON_TAGNAME_TAG         },
-};
-
 /* undo_seg_free() — release one segment and whatever it owns.               */
 static void
 undo_seg_free(UndoSeg *seg)
@@ -2390,20 +2291,6 @@ undo_table_copy(OnTable *src)
         for (gint c = 0; c < src->cols; c++)
             on_table_set(copy, r, c, on_table_get(src, r, c));
     return copy;
-}
-
-/* undo_flags_at_iter() — ALL format bits in effect at `iter` (inline +
- * paragraph + #tag), unlike iter_inline_flags() which is inline-only.       */
-static guint32
-undo_flags_at_iter(GtkTextBuffer *buffer, const GtkTextIter *iter)
-{
-    guint32 flags = 0;               /* accumulated bits                    */
-    for (gsize i = 0; i < G_N_ELEMENTS(UNDO_FLAG_TAGS); i++) {
-        GtkTextTag *tag = lookup_tag(buffer, UNDO_FLAG_TAGS[i].tag_name);
-        if (tag != NULL && gtk_text_iter_has_tag(iter, tag))
-            flags |= UNDO_FLAG_TAGS[i].flag;
-    }
-    return flags;
 }
 
 /* undo_flush_run() — append the pending text run (if any) as a segment.     */
@@ -2470,14 +2357,14 @@ undo_snapshot_capture(OnEditor *ed)
             }
             if (seg != NULL) {       /* payloadless anchors are dropped     */
                 undo_flush_run(snap, run, run_flags);
-                seg->flags = undo_flags_at_iter(ed->buffer, &iter);
+                seg->flags = on_flags_at_iter(ed->buffer, &iter, ~0u);
                 g_ptr_array_add(snap->segs, seg);
             }
             gtk_text_iter_forward_char(&iter);
             continue;
         }
 
-        guint32 flags = undo_flags_at_iter(ed->buffer, &iter);
+        guint32 flags = on_flags_at_iter(ed->buffer, &iter, ~0u);
         if (flags != run_flags) {
             undo_flush_run(snap, run, run_flags);
             run_flags = flags;
@@ -2726,13 +2613,13 @@ undo_insert_seg_slice(OnEditor *ed, const UndoSeg *seg, gint s, gint n,
     GtkTextIter ss, se;              /* the span just inserted              */
     gtk_text_buffer_get_iter_at_offset(ed->buffer, &ss, at);
     gtk_text_buffer_get_iter_at_offset(ed->buffer, &se, at + n);
-    for (gsize t = 0; t < G_N_ELEMENTS(UNDO_FLAG_TAGS); t++) {
-        if (seg->flags & UNDO_FLAG_TAGS[t].flag)
+    for (gsize t = 0; t < on_n_flag_tags; t++) {
+        if (seg->flags & on_flag_tags[t].flag)
             gtk_text_buffer_apply_tag_by_name(
-                ed->buffer, UNDO_FLAG_TAGS[t].tag_name, &ss, &se);
+                ed->buffer, on_flag_tags[t].tag_name, &ss, &se);
         else
             gtk_text_buffer_remove_tag_by_name(
-                ed->buffer, UNDO_FLAG_TAGS[t].tag_name, &ss, &se);
+                ed->buffer, on_flag_tags[t].tag_name, &ss, &se);
     }
     gtk_text_buffer_remove_tag_by_name(ed->buffer, "on-search-hit",
                                        &ss, &se);
@@ -2813,7 +2700,7 @@ undo_restore(OnEditor *ed, const UndoSnap *from, const UndoSnap *to)
     /* Re-adopt the inline style at the restored cursor (the guarded
      * cursor-position notify never saw the move).                          */
     ed->inline_flags = gtk_text_iter_backward_char(&cur)
-                       ? iter_inline_flags(ed->buffer, &cur) : 0;
+                       ? on_flags_at_iter(ed->buffer, &cur, ON_FMT_INLINE_MASK) : 0;
     update_toggle_buttons(ed);
 
     editor_queue_autosave(ed);       /* undo_restoring suppresses grouping  */
@@ -2967,8 +2854,7 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
         GtkTextIter ins_s;           /* first inserted character            */
         gtk_text_buffer_get_iter_at_offset(buffer, &ins_s,
                                            end_off - (gint)n_chars);
-        GtkTextTag *ttag = gtk_text_tag_table_lookup(
-            gtk_text_buffer_get_tag_table(buffer), ON_TAGNAME_TAG);
+        GtkTextTag *ttag = lookup_tag(buffer, ON_TAGNAME_TAG);
         if (ttag != NULL && gtk_text_iter_has_tag(&ins_s, ttag))
             ed->tags_modified = TRUE;
     }
@@ -3010,7 +2896,7 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
         if (para == 0 && !gtk_text_iter_equal(&ls, &le)) {
             GtkTextIter nl = le;     /* last char of the span (the newline) */
             gtk_text_iter_backward_char(&nl);
-            para = iter_para_flags(buffer, &nl);
+            para = on_flags_at_iter(buffer, &nl, ON_FMT_PARA_MASK);
         }
         if (para != 0) {
             ed->internal_change++;
@@ -3022,10 +2908,8 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
                 gtk_text_buffer_remove_tag_by_name(buffer, ON_TAGNAME_H2,
                                                    &ls, &le);
             } else {
-                for (gsize i = 0; i < G_N_ELEMENTS(UNDO_FLAG_TAGS); i++)
-                    if (UNDO_FLAG_TAGS[i].flag == (OnFormatFlags)para)
-                        gtk_text_buffer_apply_tag_by_name(
-                            buffer, UNDO_FLAG_TAGS[i].tag_name, &ls, &le);
+                gtk_text_buffer_apply_tag_by_name(
+                    buffer, on_tag_name_for_flag(para), &ls, &le);
             }
             ed->internal_change--;
             gtk_text_buffer_get_iter_at_offset(buffer, location, end_off);
@@ -3107,8 +2991,7 @@ on_buffer_delete_range_before(GtkTextBuffer *buffer, GtkTextIter *start,
     if (ed->internal_change > 0 || ed->tags_modified)
         return;
 
-    GtkTextTag *tag = gtk_text_tag_table_lookup(
-        gtk_text_buffer_get_tag_table(buffer), ON_TAGNAME_TAG);
+    GtkTextTag *tag = lookup_tag(buffer, ON_TAGNAME_TAG);
     if (tag == NULL)
         return;
 
@@ -3214,7 +3097,8 @@ on_cursor_moved(GObject *object, GParamSpec *pspec, gpointer user_data)
         return;
     GtkTextIter probe = cursor;      /* the char whose style we adopt       */
     if (gtk_text_iter_backward_char(&probe))
-        ed->inline_flags = iter_inline_flags(ed->buffer, &probe);
+        ed->inline_flags =
+            on_flags_at_iter(ed->buffer, &probe, ON_FMT_INLINE_MASK);
     else
         ed->inline_flags = 0;
     update_toggle_buttons(ed);
@@ -3381,34 +3265,48 @@ on_search_changed(GtkSearchEntry *entry, gpointer user_data)
     }
 }
 
+/* Flags shared by every in-note text search.                                */
+#define EDITOR_SEARCH_FLAGS (GTK_TEXT_SEARCH_CASE_INSENSITIVE | \
+                             GTK_TEXT_SEARCH_TEXT_ONLY)
+
 /* ---------------------------------------------------------------------------
- * editor_search_next() — select and scroll to the next match after the
- * cursor, wrapping to the top when none remains below.
+ * editor_search_move() — select and scroll to the next match after the
+ * cursor (forward) or the previous one before it (backward), wrapping
+ * around the buffer when none remains in that direction.
  * ------------------------------------------------------------------------- */
 static void
-editor_search_next(OnEditor *ed)
+editor_search_move(OnEditor *ed, gboolean forward)
 {
     const gchar *query =
         gtk_entry_get_text(GTK_ENTRY(ed->search_entry));
     if (query == NULL || *query == '\0')
         return;
 
-    GtkTextIter from;                /* search start (after the cursor)     */
+    /* Start just past the current selection in the travel direction.       */
+    GtkTextIter from;                /* search start                        */
     gtk_text_buffer_get_iter_at_mark(
         ed->buffer, &from,
-        gtk_text_buffer_get_selection_bound(ed->buffer));
+        forward ? gtk_text_buffer_get_selection_bound(ed->buffer)
+                : gtk_text_buffer_get_insert(ed->buffer));
 
     GtkTextIter match_s, match_e;    /* bounds of the found match           */
-    gboolean found = gtk_text_iter_forward_search(
-        &from, query,
-        GTK_TEXT_SEARCH_CASE_INSENSITIVE | GTK_TEXT_SEARCH_TEXT_ONLY,
-        &match_s, &match_e, NULL);
-    if (!found) {                    /* wrap around to the top              */
-        gtk_text_buffer_get_start_iter(ed->buffer, &from);
-        found = gtk_text_iter_forward_search(
-            &from, query,
-            GTK_TEXT_SEARCH_CASE_INSENSITIVE | GTK_TEXT_SEARCH_TEXT_ONLY,
-            &match_s, &match_e, NULL);
+    gboolean found = forward
+        ? gtk_text_iter_forward_search(&from, query, EDITOR_SEARCH_FLAGS,
+                                       &match_s, &match_e, NULL)
+        : gtk_text_iter_backward_search(&from, query, EDITOR_SEARCH_FLAGS,
+                                        &match_s, &match_e, NULL);
+    if (!found) {                    /* wrap around                         */
+        if (forward)
+            gtk_text_buffer_get_start_iter(ed->buffer, &from);
+        else
+            gtk_text_buffer_get_end_iter(ed->buffer, &from);
+        found = forward
+            ? gtk_text_iter_forward_search(&from, query,
+                                           EDITOR_SEARCH_FLAGS,
+                                           &match_s, &match_e, NULL)
+            : gtk_text_iter_backward_search(&from, query,
+                                            EDITOR_SEARCH_FLAGS,
+                                            &match_s, &match_e, NULL);
     }
     if (!found)
         return;
@@ -3418,63 +3316,21 @@ editor_search_next(OnEditor *ed)
                                  FALSE, 0.0, 0.0);
 }
 
-/* ---------------------------------------------------------------------------
- * editor_search_prev() — select and scroll to the previous match before
- * the cursor, wrapping to the bottom when none remains above.
- * ------------------------------------------------------------------------- */
+/* on_search_next() / on_search_prev() — Enter in the entry and the two
+ * arrow buttons (first argument ignored, so one handler serves both the
+ * entry's "activate" and the buttons' "clicked").                           */
 static void
-editor_search_prev(OnEditor *ed)
+on_search_next(GtkWidget *widget, gpointer user_data)
 {
-    const gchar *query =
-        gtk_entry_get_text(GTK_ENTRY(ed->search_entry));
-    if (query == NULL || *query == '\0')
-        return;
-
-    GtkTextIter from;                /* search start (before the cursor)    */
-    gtk_text_buffer_get_iter_at_mark(
-        ed->buffer, &from, gtk_text_buffer_get_insert(ed->buffer));
-
-    GtkTextIter match_s, match_e;    /* bounds of the found match           */
-    gboolean found = gtk_text_iter_backward_search(
-        &from, query,
-        GTK_TEXT_SEARCH_CASE_INSENSITIVE | GTK_TEXT_SEARCH_TEXT_ONLY,
-        &match_s, &match_e, NULL);
-    if (!found) {                    /* wrap around to the bottom           */
-        gtk_text_buffer_get_end_iter(ed->buffer, &from);
-        found = gtk_text_iter_backward_search(
-            &from, query,
-            GTK_TEXT_SEARCH_CASE_INSENSITIVE | GTK_TEXT_SEARCH_TEXT_ONLY,
-            &match_s, &match_e, NULL);
-    }
-    if (!found)
-        return;
-
-    gtk_text_buffer_select_range(ed->buffer, &match_s, &match_e);
-    gtk_text_view_scroll_to_iter(ed->view, &match_s, 0.1,
-                                 FALSE, 0.0, 0.0);
-}
-
-/* on_search_activate() — Enter in the entry: jump to the next match.        */
-static void
-on_search_activate(GtkEntry *entry, gpointer user_data)
-{
-    (void)entry;
-    editor_search_next((OnEditor *)user_data);
-}
-
-/* on_search_next_clicked()/on_search_prev_clicked() — the arrow buttons.    */
-static void
-on_search_next_clicked(GtkButton *btn, gpointer user_data)
-{
-    (void)btn;
-    editor_search_next((OnEditor *)user_data);
+    (void)widget;
+    editor_search_move((OnEditor *)user_data, TRUE);
 }
 
 static void
-on_search_prev_clicked(GtkButton *btn, gpointer user_data)
+on_search_prev(GtkWidget *widget, gpointer user_data)
 {
-    (void)btn;
-    editor_search_prev((OnEditor *)user_data);
+    (void)widget;
+    editor_search_move((OnEditor *)user_data, FALSE);
 }
 
 /* on_search_stop() — Escape in the entry: back to the text view.            */
@@ -3500,11 +3356,11 @@ editor_apply_search_term(OnEditor *ed, const gchar *term)
         return;
     gtk_entry_set_text(GTK_ENTRY(ed->search_entry), term);
     on_search_changed(GTK_SEARCH_ENTRY(ed->search_entry), ed);
-    editor_search_next(ed);
+    editor_search_move(ed, TRUE);
 }
 
 /* on_initial_search_idle() — apply ed->pending_search once the freshly
- * opened window is realized and allocated (so editor_search_next's
+ * opened window is realized and allocated (so editor_search_move's
  * scroll-to-match lands, mirroring on_scroll_idle's deferral).               */
 static gboolean
 on_initial_search_idle(gpointer user_data)
@@ -3683,15 +3539,7 @@ editor_status_path_update(OnEditor *ed)
 void
 on_editor_status_refresh_all(OnApp *app)
 {
-    GHashTableIter iter;             /* walk of the open-editors table      */
-    gpointer key, value;
-    g_hash_table_iter_init(&iter, app->editors);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        OnEditor *ed =               /* editor state stashed on its window  */
-            g_object_get_data(G_OBJECT(value), "on-editor");
-        if (ed != NULL)
-            editor_status_path_update(ed);
-    }
+    editors_foreach(app, editor_status_path_update);
 }
 
 /* on_editor_focus_in() — the window regained focus: re-read the note's
@@ -3904,7 +3752,7 @@ build_toolbar(OnEditor *ed)
     g_signal_connect(ed->search_entry, "search-changed",
                      G_CALLBACK(on_search_changed), ed);
     g_signal_connect(ed->search_entry, "activate",
-                     G_CALLBACK(on_search_activate), ed);
+                     G_CALLBACK(on_search_next), ed);
     g_signal_connect(ed->search_entry, "stop-search",
                      G_CALLBACK(on_search_stop), ed);
 
@@ -3918,7 +3766,7 @@ build_toolbar(OnEditor *ed)
     gtk_button_set_relief(GTK_BUTTON(prev_btn), GTK_RELIEF_NONE);
     gtk_widget_set_tooltip_text(prev_btn, "Previous match");
     g_signal_connect(prev_btn, "clicked",
-                     G_CALLBACK(on_search_prev_clicked), ed);
+                     G_CALLBACK(on_search_prev), ed);
     gtk_box_pack_start(GTK_BOX(search_box), prev_btn, FALSE, FALSE, 0);
 
     GtkWidget *next_btn = gtk_button_new_from_icon_name(
@@ -3926,7 +3774,7 @@ build_toolbar(OnEditor *ed)
     gtk_button_set_relief(GTK_BUTTON(next_btn), GTK_RELIEF_NONE);
     gtk_widget_set_tooltip_text(next_btn, "Next match (Enter)");
     g_signal_connect(next_btn, "clicked",
-                     G_CALLBACK(on_search_next_clicked), ed);
+                     G_CALLBACK(on_search_next), ed);
     gtk_box_pack_start(GTK_BOX(search_box), next_btn, FALSE, FALSE, 0);
 
     GtkToolItem *search_item = gtk_tool_item_new();
@@ -3937,34 +3785,33 @@ build_toolbar(OnEditor *ed)
     return toolbar;
 }
 
+/* editor_rebuild_toolbar() — swap one editor's formatting toolbar for a
+ * freshly built one.  Destroying the old toolbar unregisters it from the
+ * style registry; the rebuild registers the new one and refreshes the
+ * ed-> widget pointers (toggle_buttons, search_entry).                      */
+static void
+editor_rebuild_toolbar(OnEditor *ed)
+{
+    if (ed->toolbar_box == NULL)
+        return;
+    gchar *query =                   /* in-note search survives the rebuild */
+        g_strdup(gtk_entry_get_text(GTK_ENTRY(ed->search_entry)));
+    gtk_widget_destroy(ed->toolbar);
+    ed->toolbar = build_toolbar(ed);
+    gtk_box_pack_start(GTK_BOX(ed->toolbar_box), ed->toolbar,
+                       FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(ed->toolbar_box), ed->toolbar, 0);
+    gtk_widget_show_all(ed->toolbar);
+    update_toggle_buttons(ed);       /* fresh toggles: mirror inline_flags  */
+    if (*query != '\0')              /* re-runs the search + highlights     */
+        gtk_entry_set_text(GTK_ENTRY(ed->search_entry), query);
+    g_free(query);
+}
+
 void
 on_editor_rebuild_toolbars_all(OnApp *app)
 {
-    GHashTableIter iter;             /* walk of the open-editors table      */
-    gpointer key, value;
-    g_hash_table_iter_init(&iter, app->editors);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        OnEditor *ed =               /* editor state stashed on its window  */
-            g_object_get_data(G_OBJECT(value), "on-editor");
-        if (ed == NULL || ed->toolbar_box == NULL)
-            continue;
-
-        /* Destroying the old toolbar unregisters it from the style
-         * registry; the rebuild registers the new one and refreshes the
-         * ed-> widget pointers (toggle_buttons, search_entry).             */
-        gchar *query =               /* in-note search survives the rebuild */
-            g_strdup(gtk_entry_get_text(GTK_ENTRY(ed->search_entry)));
-        gtk_widget_destroy(ed->toolbar);
-        ed->toolbar = build_toolbar(ed);
-        gtk_box_pack_start(GTK_BOX(ed->toolbar_box), ed->toolbar,
-                           FALSE, FALSE, 0);
-        gtk_box_reorder_child(GTK_BOX(ed->toolbar_box), ed->toolbar, 0);
-        gtk_widget_show_all(ed->toolbar);
-        update_toggle_buttons(ed);   /* fresh toggles: mirror inline_flags  */
-        if (*query != '\0')          /* re-runs the search + highlights     */
-            gtk_entry_set_text(GTK_ENTRY(ed->search_entry), query);
-        g_free(query);
-    }
+    editors_foreach(app, editor_rebuild_toolbar);
 }
 
 /* ---------------------------------------------------------------------------
@@ -4084,16 +3931,7 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
                             PANGO_ELLIPSIZE_MIDDLE);
 
     /* A step smaller than the UI font, like the library's labels.          */
-    {
-        GtkCssProvider *css = gtk_css_provider_new();
-        gtk_css_provider_load_from_data(css, "label { font-size: 85%; }",
-                                        -1, NULL);
-        gtk_style_context_add_provider(
-            gtk_widget_get_style_context(ed->status_path),
-            GTK_STYLE_PROVIDER(css),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(css);
-    }
+    on_app_widget_add_css(ed->status_path, "label { font-size: 85%; }");
 
     GtkWidget *status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_widget_set_margin_start(status_bar, 8);

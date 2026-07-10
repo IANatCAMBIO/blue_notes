@@ -165,23 +165,15 @@ void on_db_folder_list_free(GList *folders);
  * Returns the new note's id, or 0 on failure.                               */
 gint64 on_db_note_create(OnDatabase *db, gint64 folder_id);
 
-/* Permanently delete note `id`. Returns TRUE on success.                    */
-gboolean on_db_note_delete(OnDatabase *db, gint64 id);
-
 /* Permanently delete `n` notes in ONE transaction, pruning orphaned tags
- * once at the end (on_db_note_delete does both per note — this is the
- * bulk variant for multi-selection deletes). Returns TRUE on success.       */
+ * once at the end. Returns TRUE on success.                                 */
 gboolean on_db_notes_delete(OnDatabase *db, const gint64 *ids, gsize n);
 
-/* Move note `id` into folder `folder_id` (0 = top level), appending it at
- * the end of that folder. Returns TRUE on success.                          */
-gboolean on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id);
-
-/* Move `n` notes into folder `folder_id` in ONE transaction (per-note
- * moves fsync per call — a big multi-selection drop froze the GUI),
- * appended in array order.  Like on_db_note_move, clears each note's
- * trashed flag (drag out of Trash = restore).  Returns TRUE if every
- * move succeeded (all-or-nothing: failure rolls the batch back).            */
+/* Move `n` notes into folder `folder_id` (0 = top level) in ONE
+ * transaction (per-note moves would fsync per call — a big
+ * multi-selection drop froze the GUI), appended in array order.  Clears
+ * each note's trashed flag (drag out of Trash = restore).  Returns TRUE
+ * if every move succeeded (all-or-nothing: failure rolls the batch back).   */
 gboolean on_db_notes_move(OnDatabase *db, const gint64 *note_ids, gsize n,
                           gint64 folder_id);
 
@@ -337,12 +329,6 @@ gboolean on_db_trash_empty(OnDatabase *db);
 /* Number of visible (non-trashed) notes in the whole database — the
  * count shown on the "All Notes" sidebar row.                               */
 gint on_db_note_count_visible(OnDatabase *db);
-
-/* Number of notes directly inside folder `folder_id` (0 = top level).      */
-gint on_db_note_count_for_folder(OnDatabase *db, gint64 folder_id);
-
-/* Number of notes labeled with tag `tag_id`.                               */
-gint on_db_note_count_for_tag(OnDatabase *db, gint64 tag_id);
 
 /* Total row counts across the whole database (any out-param may be NULL). */
 void on_db_totals(OnDatabase *db, gint *notes, gint *folders, gint *tags);
