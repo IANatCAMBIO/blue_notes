@@ -48,7 +48,7 @@
  *   toolbar_style  — how toolbar buttons render (text only, icons only,
  *                    or icons above text), kept separately for library
  *                    toolbars and editor toolbars.  Indexed by
- *                    OnToolbarKind; persisted in the settings table.
+ *                    OnToolbarKind; persisted in the ini.
  *   toolbars       — every live toolbar per kind, so a style change can
  *                    be applied to all open windows at once.  Entries
  *                    remove themselves on destroy.
@@ -136,6 +136,43 @@ void on_app_status(OnApp *app, const gchar *fmt, ...) G_GNUC_PRINTF(2, 3);
  * Returns a newly allocated string; free with g_free().
  * ------------------------------------------------------------------------- */
 gchar *on_app_location_text(OnApp *app, const gchar *location);
+
+/* ---------------------------------------------------------------------------
+ * on_app_widget_add_css() — attach a one-off CSS snippet to a single
+ * widget's style context (application priority).  The provider is owned
+ * by the style context after this call.
+ *   widget   — the widget to style.
+ *   css_text — the CSS.
+ * ------------------------------------------------------------------------- */
+void on_app_widget_add_css(GtkWidget *widget, const gchar *css_text);
+
+/* ---------------------------------------------------------------------------
+ * on_app_notice() — run a modal OK message dialog and destroy it.
+ *   parent — transient parent window, or NULL.
+ *   type   — GTK_MESSAGE_INFO/WARNING/ERROR.
+ *   title  — window title, or NULL for the GTK default.
+ *   fmt    — printf-style message.
+ * ------------------------------------------------------------------------- */
+void on_app_notice(GtkWindow *parent, GtkMessageType type,
+                   const gchar *title, const gchar *fmt, ...)
+                   G_GNUC_PRINTF(4, 5);
+
+/* ---------------------------------------------------------------------------
+ * on_app_pick_path() — run a modal file chooser and return the selection.
+ *   parent         — transient parent window, or NULL.
+ *   title          — dialog title.
+ *   action         — GTK_FILE_CHOOSER_ACTION_OPEN/SELECT_FOLDER/….
+ *   accept_label   — accept-button label (e.g. "_Open").
+ *   filter_name    — display name of a single file filter, or NULL for
+ *                    no filter (filter_pattern is ignored when NULL).
+ *   filter_pattern — glob the filter matches (e.g. "*.db").
+ * Returns the chosen path (g_free), or NULL if cancelled.
+ * ------------------------------------------------------------------------- */
+gchar *on_app_pick_path(GtkWindow *parent, const gchar *title,
+                        GtkFileChooserAction action,
+                        const gchar *accept_label,
+                        const gchar *filter_name,
+                        const gchar *filter_pattern);
 
 /* ---------------------------------------------------------------------------
  * on_app_init_icons_dir() — locate the icons/ folder next to the
@@ -228,6 +265,12 @@ void on_app_config_init(const gchar *argv0);
  * Returns a new string (g_free() it), or NULL when unset/empty.
  * ------------------------------------------------------------------------- */
 gchar *on_app_config_get(const gchar *key);
+
+/* ---------------------------------------------------------------------------
+ * on_app_config_get_bool() — read a 0/1 setting; `def` when unset.  The
+ * app only ever writes "0"/"1", so any other stored value reads as "1".
+ * ------------------------------------------------------------------------- */
+gboolean on_app_config_get_bool(const gchar *key, gboolean def);
 
 /* ---------------------------------------------------------------------------
  * on_app_apply_touch_assist() — honor the "touch_assist" setting (`1|0`,

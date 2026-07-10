@@ -6,8 +6,7 @@
  *
  * BNBF layout (all integers little-endian):
  *
- *   [4 bytes]  magic "BNBF" ("ONBF" from before the rename is
- *              accepted by all readers forever)
+ *   [4 bytes]  magic "BNBF"
  *   [u32]      format version (currently 5; 1–4 are still readable)
  *   ...records...
  *   [u8 0x00]  end marker
@@ -60,9 +59,7 @@ typedef enum {
 } OnFormatFlags;
 
 /* Task checkboxes are child anchors carrying their state as object data;
- * the editor attaches a native GtkCheckButton at each.  Notes saved by
- * older builds used literal glyphs instead — those are migrated to
- * anchors while loading (see on_note_deserialize).                          */
+ * the editor attaches a native GtkCheckButton at each.                      */
 
 /* on_anchor_set_checkbox() — mark an anchor as a task checkbox with the
  * given state.  on_anchor_is_checkbox() reads it back (returns FALSE for
@@ -71,9 +68,12 @@ void on_anchor_set_checkbox(GtkTextChildAnchor *anchor, gboolean checked);
 gboolean on_anchor_is_checkbox(GtkTextChildAnchor *anchor,
                                gboolean *out_checked);
 
-/* on_char_is_checkbox() — is `c` one of the legacy checkbox glyphs
- * (⬜/✅/☐/☑)?  Used by the load-time migration.                            */
-gboolean on_char_is_checkbox(gunichar c, gboolean *out_checked);
+/* on_list_prefix_chars() — length in CHARACTERS of the literal list
+ * prefix at the start of `head` ("\xe2\x80\xa2 " bullet or "12. "), or 0
+ * if none.  `head` is a short UTF-8 probe
+ * of the line start (callers pass ~7 chars).  The one parser both the
+ * editor (prefix stripping) and the exporters use.                          */
+glong on_list_prefix_chars(const gchar *head);
 
 /* Names of the GtkTextTags the editor registers on every note buffer.
  * serialize.c maps between these tags and the ON_FMT_* bits.               */
@@ -88,6 +88,45 @@ gboolean on_char_is_checkbox(gunichar c, gboolean *out_checked);
 #define ON_TAGNAME_LIST_NUMBER "on-list-number"
 #define ON_TAGNAME_LIST_CHECK  "on-list-check"
 #define ON_TAGNAME_TAG         "on-tag"
+
+/* Format-bit groups: the four inline (character) styles, and the six
+ * mutually exclusive paragraph styles (applied to whole lines only —
+ * apply_paragraph_format clears the others first, and loading heals any
+ * stragglers, so at most one PARA bit is ever set on a character).          */
+#define ON_FMT_INLINE_MASK (ON_FMT_BOLD | ON_FMT_ITALIC | \
+                            ON_FMT_UNDERLINE | ON_FMT_STRIKE)
+#define ON_FMT_PARA_MASK   (ON_FMT_H1 | ON_FMT_H2 | ON_FMT_CODEBLOCK | \
+                            ON_FMT_LIST_BULLET | ON_FMT_LIST_NUMBER | \
+                            ON_FMT_LIST_CHECK)
+
+/* ---------------------------------------------------------------------------
+ * The canonical flag ⇄ tag-name table.  THE single copy in the program —
+ * serializer, editor, undo and export all iterate it, so the mapping can
+ * never fall out of sync.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    OnFormatFlags flag;              /* the bitmask bit                     */
+    const gchar  *tag_name;          /* the GtkTextTag name it maps to      */
+} OnFlagTag;
+extern const OnFlagTag on_flag_tags[];
+extern const gsize     on_n_flag_tags;
+
+/* ---------------------------------------------------------------------------
+ * on_flags_at_iter() — the ON_FMT_* bits (restricted to `mask`) whose
+ * tags cover the character at `iter`.
+ *   buffer — buffer owning the tag table.
+ *   iter   — position to inspect.
+ *   mask   — which bits to test (ON_FMT_INLINE_MASK, ON_FMT_PARA_MASK,
+ *            or ~0u for all).
+ * ------------------------------------------------------------------------- */
+guint32 on_flags_at_iter(GtkTextBuffer *buffer, const GtkTextIter *iter,
+                         guint32 mask);
+
+/* ---------------------------------------------------------------------------
+ * on_tag_name_for_flag() — the GtkTextTag name for one ON_FMT_* bit, or
+ * NULL if the bit is unknown.
+ * ------------------------------------------------------------------------- */
+const gchar *on_tag_name_for_flag(guint32 flag);
 
 /* ---------------------------------------------------------------------------
  * on_buffer_ensure_tags() — create the standard Blue Notes tag set on

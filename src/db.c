@@ -42,10 +42,6 @@ static const char *SCHEMA_SQL =
     "  tag_id  INTEGER NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,"
     "  PRIMARY KEY (note_id, tag_id)"
     ");"
-    "CREATE TABLE IF NOT EXISTS settings ("
-    "  key   TEXT PRIMARY KEY,"
-    "  value TEXT NOT NULL"
-    ");"
     "CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id);"
     "CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);"
     "CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);";
@@ -70,6 +66,12 @@ static const char *TRASH_VIEW_SQL =
 #define NOTE_VISIBLE_SQL \
     "trashed=0 AND (folder_id IS NULL OR " \
     "folder_id NOT IN (SELECT id FROM trash_folder_ids))"
+
+/* Remove tags that no longer label any note; run (via exec_simple) after
+ * anything that can delete note_tags rows, so the library's tag list
+ * stays tidy.                                                                */
+#define PRUNE_ORPHAN_TAGS_SQL \
+    "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)"
 
 /* ---------------------------------------------------------------------------
  * exec_simple() — run a parameterless SQL string, logging any error.
@@ -125,6 +127,48 @@ bind_id_or_null(sqlite3_stmt *stmt, int idx, gint64 id)
         sqlite3_bind_null(stmt, idx);
 }
 
+/* ---------------------------------------------------------------------------
+ * stmt_done() — run a fully-bound single DML statement to completion.
+ *   db   — open database (for the error message).
+ *   stmt — prepared and bound statement, or NULL (a failed prepare);
+ *          consumed (finalized) in every case.
+ * Steps once and logs a g_warning() on anything but SQLITE_DONE.
+ * Returns TRUE when the statement completed.
+ * ------------------------------------------------------------------------- */
+static gboolean
+stmt_done(OnDatabase *db, sqlite3_stmt *stmt)
+{
+    if (stmt == NULL)
+        return FALSE;
+    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+        g_warning("db: statement failed: %s", sqlite3_errmsg(db->handle));
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+/* ---------------------------------------------------------------------------
+ * query_int64() — first column of the first row of a scalar SELECT.
+ *   db      — open database.
+ *   sql     — single SELECT with at most one integer '?' placeholder.
+ *   bind_id — value for that placeholder, or a negative value for none.
+ * Returns the value, or 0 when the query fails or returns no row.
+ * ------------------------------------------------------------------------- */
+static gint64
+query_int64(OnDatabase *db, const char *sql, gint64 bind_id)
+{
+    sqlite3_stmt *stmt = prepare(db, sql);
+    if (stmt == NULL)
+        return 0;
+    if (bind_id >= 0)
+        sqlite3_bind_int64(stmt, 1, bind_id);
+    gint64 value = 0;                    /* result, 0 when no row           */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        value = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return value;
+}
+
 /* =========================================================================
  * lifecycle
  * ========================================================================= */
@@ -138,25 +182,6 @@ on_db_default_path(void)
     gchar *path = g_build_filename(dir, ON_DB_FILENAME, NULL);
     g_free(dir);
     return path;
-}
-
-void
-on_db_migrate_legacy_name(const gchar *dir)
-{
-    gchar *d = (dir != NULL)         /* directory holding the database      */
-               ? g_strdup(dir)
-               : g_build_filename(g_get_user_data_dir(), "blue_notes",
-                                  NULL);
-    gchar *old_path = g_build_filename(d, "notes.db", NULL);
-    gchar *new_path = g_build_filename(d, ON_DB_FILENAME, NULL);
-    if (!g_file_test(new_path, G_FILE_TEST_EXISTS) &&
-        g_file_test(old_path, G_FILE_TEST_EXISTS) &&
-        g_rename(old_path, new_path) != 0)
-        g_warning("db: cannot rename legacy %s: %s", old_path,
-                  g_strerror(errno));
-    g_free(old_path);
-    g_free(new_path);
-    g_free(d);
 }
 
 OnDatabase *
@@ -282,13 +307,11 @@ gboolean
 on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name)
 {
     sqlite3_stmt *stmt = prepare(db, "UPDATE folders SET name=? WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 2, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL) {
+        sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, id);
+    }
+    return stmt_done(db, stmt);
 }
 
 /* folder_parent_of() — COALESCE(parent_id,0) of folder `id`, or 0 when
@@ -296,16 +319,8 @@ on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name)
 static gint64
 folder_parent_of(OnDatabase *db, gint64 id)
 {
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT COALESCE(parent_id,0) FROM folders WHERE id=?");
-    if (stmt == NULL)
-        return 0;
-    sqlite3_bind_int64(stmt, 1, id);
-    gint64 parent = 0;                   /* parent id (0 = top level)       */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        parent = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    return parent;
+    return query_int64(db,
+        "SELECT COALESCE(parent_id,0) FROM folders WHERE id=?", id);
 }
 
 gboolean
@@ -328,32 +343,35 @@ on_db_folder_move(OnDatabase *db, gint64 id, gint64 parent_id)
     /* Re-parent, appending after the new parent's existing children
      * (the moved folder is excluded from the MAX in case it is already
      * there).  trashed=0 makes drag-out-of-Trash a restore-to-location,
-     * mirroring on_db_note_move.                                            */
+     * mirroring on_db_notes_move.                                           */
     sqlite3_stmt *stmt = prepare(db,
         "UPDATE folders SET parent_id=?, trashed=0, sort_order="
         "  COALESCE((SELECT MAX(sort_order)+1 FROM folders "
         "            WHERE parent_id IS ? AND id<>?), 0) "
         "WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    bind_id_or_null(stmt, 1, parent_id);
-    bind_id_or_null(stmt, 2, parent_id);
-    sqlite3_bind_int64(stmt, 3, id);
-    sqlite3_bind_int64(stmt, 4, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    if (!ok)
-        g_warning("db: folder_move: %s", sqlite3_errmsg(db->handle));
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL) {
+        bind_id_or_null(stmt, 1, parent_id);
+        bind_id_or_null(stmt, 2, parent_id);
+        sqlite3_bind_int64(stmt, 3, id);
+        sqlite3_bind_int64(stmt, 4, id);
+    }
+    return stmt_done(db, stmt);
 }
 
-gboolean
-on_db_folder_reorder(OnDatabase *db, const gint64 *folder_ids, gsize n)
+/* ---------------------------------------------------------------------------
+ * reorder_rows() — persist an explicit row ordering in one transaction.
+ *   sql — an UPDATE with two placeholders: sort_order, then row id.
+ *   ids — row ids in the desired order (sort_order = array index).
+ *   n   — number of ids.
+ * Shared body of on_db_folder_reorder/on_db_note_reorder.  Returns TRUE
+ * when every update succeeded (failure rolls the batch back).
+ * ------------------------------------------------------------------------- */
+static gboolean
+reorder_rows(OnDatabase *db, const char *sql, const gint64 *ids, gsize n)
 {
     if (!exec_simple(db, "BEGIN"))
         return FALSE;
-    sqlite3_stmt *stmt = prepare(db,
-        "UPDATE folders SET sort_order=? WHERE id=?");
+    sqlite3_stmt *stmt = prepare(db, sql);
     if (stmt == NULL) {
         exec_simple(db, "ROLLBACK");
         return FALSE;
@@ -362,7 +380,7 @@ on_db_folder_reorder(OnDatabase *db, const gint64 *folder_ids, gsize n)
     gboolean ok = TRUE;                  /* set FALSE on first failure      */
     for (gsize i = 0; i < n && ok; i++) {
         sqlite3_bind_int(stmt, 1, (int)i);
-        sqlite3_bind_int64(stmt, 2, folder_ids[i]);
+        sqlite3_bind_int64(stmt, 2, ids[i]);
         ok = sqlite3_step(stmt) == SQLITE_DONE;
         sqlite3_reset(stmt);
     }
@@ -372,17 +390,21 @@ on_db_folder_reorder(OnDatabase *db, const gint64 *folder_ids, gsize n)
 }
 
 gboolean
+on_db_folder_reorder(OnDatabase *db, const gint64 *folder_ids, gsize n)
+{
+    return reorder_rows(db, "UPDATE folders SET sort_order=? WHERE id=?",
+                        folder_ids, n);
+}
+
+gboolean
 on_db_folder_delete(OnDatabase *db, gint64 id)
 {
     sqlite3_stmt *stmt = prepare(db, "DELETE FROM folders WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_int64(stmt, 1, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
+    if (stmt != NULL)
+        sqlite3_bind_int64(stmt, 1, id);
+    gboolean ok = stmt_done(db, stmt);
     if (ok)
-        exec_simple(db,
-            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)");
+        exec_simple(db, PRUNE_ORPHAN_TAGS_SQL);
     return ok;
 }
 
@@ -462,21 +484,6 @@ on_db_note_create(OnDatabase *db, gint64 folder_id)
 }
 
 gboolean
-on_db_note_delete(OnDatabase *db, gint64 id)
-{
-    sqlite3_stmt *stmt = prepare(db, "DELETE FROM notes WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_int64(stmt, 1, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    if (ok)
-        exec_simple(db,
-            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)");
-    return ok;
-}
-
-gboolean
 on_db_notes_delete(OnDatabase *db, const gint64 *ids, gsize n)
 {
     if (n == 0)
@@ -498,30 +505,8 @@ on_db_notes_delete(OnDatabase *db, const gint64 *ids, gsize n)
         sqlite3_finalize(stmt);
 
     if (ok)
-        ok = exec_simple(db,
-            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)");
+        ok = exec_simple(db, PRUNE_ORPHAN_TAGS_SQL);
     exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
-    return ok;
-}
-
-gboolean
-on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id)
-{
-    /* trashed=0: dragging a note out of the Trash into a folder is a
-     * restore — a moved note is always meant to be visible where it
-     * lands.                                                                */
-    sqlite3_stmt *stmt = prepare(db,
-        "UPDATE notes SET folder_id=?, trashed=0, sort_order="
-        "  COALESCE((SELECT MAX(sort_order)+1 FROM notes "
-        "            WHERE folder_id IS ?), 0) "
-        "WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    bind_id_or_null(stmt, 1, folder_id);
-    bind_id_or_null(stmt, 2, folder_id);
-    sqlite3_bind_int64(stmt, 3, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
     return ok;
 }
 
@@ -531,9 +516,10 @@ on_db_notes_move(OnDatabase *db, const gint64 *note_ids, gsize n,
 {
     if (!exec_simple(db, "BEGIN"))
         return FALSE;
-    /* Same statement as on_db_note_move; the MAX subselect re-evaluates
-     * per row inside the transaction, so the notes land appended in
-     * array order.                                                          */
+    /* trashed=0: dragging a note out of the Trash into a folder is a
+     * restore — a moved note is always meant to be visible where it
+     * lands.  The MAX subselect re-evaluates per row inside the
+     * transaction, so the notes land appended in array order.               */
     sqlite3_stmt *stmt = prepare(db,
         "UPDATE notes SET folder_id=?, trashed=0, sort_order="
         "  COALESCE((SELECT MAX(sort_order)+1 FROM notes "
@@ -564,23 +550,19 @@ on_db_note_save(OnDatabase *db, gint64 id, const gchar *title,
     sqlite3_stmt *stmt = prepare(db,
         "UPDATE notes SET title=?, content=?, body_text=?, "
         "updated_at=strftime('%s','now') WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_text(stmt, 1, title, -1, SQLITE_TRANSIENT);
-    if (content != NULL && len > 0)
-        sqlite3_bind_blob(stmt, 2, content, (int)len, SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_null(stmt, 2);
-    if (body_text != NULL)
-        sqlite3_bind_text(stmt, 3, body_text, -1, SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_null(stmt, 3);
-    sqlite3_bind_int64(stmt, 4, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    if (!ok)
-        g_warning("db: note_save: %s", sqlite3_errmsg(db->handle));
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL) {
+        sqlite3_bind_text(stmt, 1, title, -1, SQLITE_TRANSIENT);
+        if (content != NULL && len > 0)
+            sqlite3_bind_blob(stmt, 2, content, (int)len, SQLITE_TRANSIENT);
+        else
+            sqlite3_bind_null(stmt, 2);
+        if (body_text != NULL)
+            sqlite3_bind_text(stmt, 3, body_text, -1, SQLITE_TRANSIENT);
+        else
+            sqlite3_bind_null(stmt, 3);
+        sqlite3_bind_int64(stmt, 4, id);
+    }
+    return stmt_done(db, stmt);
 }
 
 gchar *
@@ -604,13 +586,11 @@ on_db_note_set_body_text(OnDatabase *db, gint64 id, const gchar *body_text)
 {
     sqlite3_stmt *stmt = prepare(db,
         "UPDATE notes SET body_text=? WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_text(stmt, 1, body_text, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 2, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL) {
+        sqlite3_bind_text(stmt, 1, body_text, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, id);
+    }
+    return stmt_done(db, stmt);
 }
 
 gboolean
@@ -618,13 +598,11 @@ on_db_note_set_updated_at(OnDatabase *db, gint64 id, gint64 ts)
 {
     sqlite3_stmt *stmt = prepare(db,
         "UPDATE notes SET updated_at=? WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_int64(stmt, 1, ts);
-    sqlite3_bind_int64(stmt, 2, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL) {
+        sqlite3_bind_int64(stmt, 1, ts);
+        sqlite3_bind_int64(stmt, 2, id);
+    }
+    return stmt_done(db, stmt);
 }
 
 guint8 *
@@ -701,6 +679,16 @@ run_meta_query(sqlite3_stmt *stmt)
     return g_list_reverse(out);
 }
 
+/* meta_query() — prepare a parameterless note-metadata SELECT (columns =
+ * NOTE_META_COLS) and collect its rows.  Returns a GList of OnNoteMeta*
+ * (free with on_db_note_list_free), or NULL on a prepare failure.            */
+static GList *
+meta_query(OnDatabase *db, const char *sql)
+{
+    sqlite3_stmt *stmt = prepare(db, sql);
+    return (stmt != NULL) ? run_meta_query(stmt) : NULL;
+}
+
 GList *
 on_db_note_list(OnDatabase *db, gint64 folder_id)
 {
@@ -720,27 +708,21 @@ on_db_note_list(OnDatabase *db, gint64 folder_id)
 GList *
 on_db_note_list_all(OnDatabase *db, gboolean include_trash)
 {
-    sqlite3_stmt *stmt = prepare(db, include_trash
+    return meta_query(db, include_trash
         ? "SELECT " NOTE_META_COLS " "
           "FROM notes ORDER BY folder_id, sort_order"
         : "SELECT " NOTE_META_COLS " "
           "FROM notes WHERE " NOTE_VISIBLE_SQL " "
           "ORDER BY folder_id, sort_order");
-    if (stmt == NULL)
-        return NULL;
-    return run_meta_query(stmt);
 }
 
 GList *
 on_db_note_list_recent(OnDatabase *db)
 {
-    sqlite3_stmt *stmt = prepare(db,
+    return meta_query(db,
         "SELECT " NOTE_META_COLS " "
         "FROM notes WHERE " NOTE_VISIBLE_SQL " "
         "ORDER BY updated_at DESC");
-    if (stmt == NULL)
-        return NULL;
-    return run_meta_query(stmt);
 }
 
 gboolean
@@ -748,63 +730,35 @@ on_db_note_set_pinned(OnDatabase *db, gint64 id, gboolean pinned)
 {
     sqlite3_stmt *stmt = prepare(db,
         "UPDATE notes SET pinned=? WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_int(stmt, 1, pinned ? 1 : 0);
-    sqlite3_bind_int64(stmt, 2, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL) {
+        sqlite3_bind_int(stmt, 1, pinned ? 1 : 0);
+        sqlite3_bind_int64(stmt, 2, id);
+    }
+    return stmt_done(db, stmt);
 }
 
 GList *
 on_db_note_list_pinned(OnDatabase *db)
 {
-    sqlite3_stmt *stmt = prepare(db,
+    return meta_query(db,
         "SELECT " NOTE_META_COLS " "
         "FROM notes WHERE pinned=1 AND " NOTE_VISIBLE_SQL " "
         "ORDER BY updated_at DESC");
-    if (stmt == NULL)
-        return NULL;
-    return run_meta_query(stmt);
 }
 
 gint
 on_db_note_count_pinned(OnDatabase *db)
 {
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT COUNT(*) FROM notes WHERE pinned=1 AND " NOTE_VISIBLE_SQL);
-    if (stmt == NULL)
-        return 0;
-    gint count = 0;                  /* number of pinned notes              */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return count;
+    return (gint)query_int64(db,
+        "SELECT COUNT(*) FROM notes WHERE pinned=1 AND " NOTE_VISIBLE_SQL,
+        -1);
 }
 
 gboolean
 on_db_note_reorder(OnDatabase *db, const gint64 *note_ids, gsize n)
 {
-    if (!exec_simple(db, "BEGIN"))
-        return FALSE;
-    sqlite3_stmt *stmt = prepare(db,
-        "UPDATE notes SET sort_order=? WHERE id=?");
-    if (stmt == NULL) {
-        exec_simple(db, "ROLLBACK");
-        return FALSE;
-    }
-
-    gboolean ok = TRUE;                  /* set FALSE on first failure      */
-    for (gsize i = 0; i < n && ok; i++) {
-        sqlite3_bind_int(stmt, 1, (int)i);
-        sqlite3_bind_int64(stmt, 2, note_ids[i]);
-        ok = sqlite3_step(stmt) == SQLITE_DONE;
-        sqlite3_reset(stmt);
-    }
-    sqlite3_finalize(stmt);
-    exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
-    return ok;
+    return reorder_rows(db, "UPDATE notes SET sort_order=? WHERE id=?",
+                        note_ids, n);
 }
 
 void
@@ -832,19 +786,12 @@ static gint64
 on_db_tag_get_or_create(OnDatabase *db, const gchar *name)
 {
     /* Try the fast path first: the tag already exists.                     */
-    sqlite3_stmt *stmt = prepare(db, "SELECT id FROM tags WHERE name=?");
-    if (stmt == NULL)
-        return 0;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
-    gint64 tag_id = 0;                   /* resulting tag id                */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        tag_id = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
+    gint64 tag_id = on_db_tag_find(db, name);   /* resulting tag id         */
     if (tag_id != 0)
         return tag_id;
 
     /* Not found: insert it.                                                */
-    stmt = prepare(db, "INSERT INTO tags (name) VALUES (?)");
+    sqlite3_stmt *stmt = prepare(db, "INSERT INTO tags (name) VALUES (?)");
     if (stmt == NULL)
         return 0;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
@@ -872,12 +819,9 @@ gboolean
 on_db_tag_delete(OnDatabase *db, gint64 id)
 {
     sqlite3_stmt *stmt = prepare(db, "DELETE FROM tags WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_int64(stmt, 1, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL)
+        sqlite3_bind_int64(stmt, 1, id);
+    return stmt_done(db, stmt);
 }
 
 GList *
@@ -952,8 +896,7 @@ on_db_note_set_tags(OnDatabase *db, gint64 note_id, GList *tag_names)
     /* Remove tags that no longer label any note so the tag list in the
      * library window stays tidy.                                           */
     if (ok)
-        ok = exec_simple(db,
-            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)");
+        ok = exec_simple(db, PRUNE_ORPHAN_TAGS_SQL);
 
     exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
     return ok;
@@ -1012,12 +955,9 @@ on_db_note_restore(OnDatabase *db, gint64 id)
         "  CASE WHEN folder_id IN (SELECT id FROM trash_folder_ids) "
         "       THEN NULL ELSE folder_id END "
         "WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_int64(stmt, 1, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL)
+        sqlite3_bind_int64(stmt, 1, id);
+    return stmt_done(db, stmt);
 }
 
 gboolean
@@ -1025,12 +965,9 @@ on_db_folder_trash(OnDatabase *db, gint64 id)
 {
     sqlite3_stmt *stmt = prepare(db,
         "UPDATE folders SET trashed=1 WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_int64(stmt, 1, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL)
+        sqlite3_bind_int64(stmt, 1, id);
+    return stmt_done(db, stmt);
 }
 
 gboolean
@@ -1046,13 +983,11 @@ on_db_folder_restore(OnDatabase *db, gint64 id)
         "                          WHERE id<>?) "
         "       THEN NULL ELSE parent_id END "
         "WHERE id=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_int64(stmt, 1, id);
-    sqlite3_bind_int64(stmt, 2, id);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+    if (stmt != NULL) {
+        sqlite3_bind_int64(stmt, 1, id);
+        sqlite3_bind_int64(stmt, 2, id);
+    }
+    return stmt_done(db, stmt);
 }
 
 GList *
@@ -1069,27 +1004,17 @@ on_db_folder_list_trashed(OnDatabase *db)
 GList *
 on_db_note_list_trashed(OnDatabase *db)
 {
-    sqlite3_stmt *stmt = prepare(db,
+    return meta_query(db,
         "SELECT " NOTE_META_COLS " "
         "FROM notes WHERE trashed=1 ORDER BY updated_at DESC");
-    if (stmt == NULL)
-        return NULL;
-    return run_meta_query(stmt);
 }
 
 gint
 on_db_trash_count(OnDatabase *db)
 {
-    sqlite3_stmt *stmt = prepare(db,
+    return (gint)query_int64(db,
         "SELECT (SELECT COUNT(*) FROM notes   WHERE trashed=1) + "
-        "       (SELECT COUNT(*) FROM folders WHERE trashed=1)");
-    if (stmt == NULL)
-        return 0;
-    gint count = 0;                  /* notes + folders directly in Trash   */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return count;
+        "       (SELECT COUNT(*) FROM folders WHERE trashed=1)", -1);
 }
 
 /* run_id_query() — collect a one-column id result set into a GArray of
@@ -1143,8 +1068,7 @@ on_db_trash_empty(OnDatabase *db)
             "DELETE FROM notes WHERE trashed=1 OR "
             "folder_id IN (SELECT id FROM trash_folder_ids)") &&
         exec_simple(db, "DELETE FROM folders WHERE trashed=1") &&
-        exec_simple(db,
-            "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)");
+        exec_simple(db, PRUNE_ORPHAN_TAGS_SQL);
     exec_simple(db, ok ? "COMMIT" : "ROLLBACK");
     return ok;
 }
@@ -1156,45 +1080,8 @@ on_db_trash_empty(OnDatabase *db)
 gint
 on_db_note_count_visible(OnDatabase *db)
 {
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT COUNT(*) FROM notes WHERE " NOTE_VISIBLE_SQL);
-    if (stmt == NULL)
-        return 0;
-    gint count = 0;                  /* every note outside the Trash        */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return count;
-}
-
-gint
-on_db_note_count_for_folder(OnDatabase *db, gint64 folder_id)
-{
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT COUNT(*) FROM notes WHERE folder_id IS ? AND trashed=0");
-    if (stmt == NULL)
-        return 0;
-    bind_id_or_null(stmt, 1, folder_id);
-    gint count = 0;                  /* number of notes found               */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return count;
-}
-
-gint
-on_db_note_count_for_tag(OnDatabase *db, gint64 tag_id)
-{
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT COUNT(*) FROM note_tags WHERE tag_id=?");
-    if (stmt == NULL)
-        return 0;
-    sqlite3_bind_int64(stmt, 1, tag_id);
-    gint count = 0;                  /* number of tagged notes              */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return count;
+    return (gint)query_int64(db,
+        "SELECT COUNT(*) FROM notes WHERE " NOTE_VISIBLE_SQL, -1);
 }
 
 /* count_all() — COUNT(*) of one table (by trusted internal name).           */
@@ -1202,14 +1089,8 @@ static gint
 count_all(OnDatabase *db, const gchar *table)
 {
     gchar *sql = g_strdup_printf("SELECT COUNT(*) FROM %s", table);
-    sqlite3_stmt *stmt = prepare(db, sql);
+    gint count = (gint)query_int64(db, sql, -1);
     g_free(sql);
-    if (stmt == NULL)
-        return 0;
-    gint count = 0;                  /* the table's row count               */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
     return count;
 }
 
@@ -1285,37 +1166,6 @@ on_db_note_body_map(OnDatabase *db)
     }
     sqlite3_finalize(stmt);
     return map;
-}
-
-/* =========================================================================
- * settings
- * ========================================================================= */
-
-gchar *
-on_db_setting_get(OnDatabase *db, const gchar *key)
-{
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT value FROM settings WHERE key=?");
-    if (stmt == NULL)
-        return NULL;
-    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-    gchar *value = NULL;             /* stored value, NULL if unset         */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        value = g_strdup((const gchar *)sqlite3_column_text(stmt, 0));
-    sqlite3_finalize(stmt);
-    return value;
-}
-
-gboolean
-on_db_setting_delete(OnDatabase *db, const gchar *key)
-{
-    sqlite3_stmt *stmt = prepare(db, "DELETE FROM settings WHERE key=?");
-    if (stmt == NULL)
-        return FALSE;
-    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-    gboolean ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
 }
 
 /* =========================================================================

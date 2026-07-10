@@ -41,9 +41,9 @@ sees the new flags.
 
 | File | Purpose |
 |---|---|
-| `src/main.c` | GtkApplication entry; config init + settings migration; sets `icons/vinyl.png` as default window icon |
+| `src/main.c` | GtkApplication entry; config init; sets `icons/vinyl.png` as default window icon |
 | `src/app.[ch]` | Shared `OnApp` context: db handle, open-editors map, per-family toolbar styles, icon loading, toolbar registry + right-click style menu |
-| `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
+| `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, counts, ordering |
 | `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
 | `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid (list: Title/Path/Modified/Created, all resizable + sortable, Path and Created hidden by default; Path fed by `on_db_folder_path_map`), notes sorted Modified-newest-first by default (in-list drag reorder is off while sorted — list stores refuse row drops), folder context menu has Sort Subfolders Alphabetically (one level, `on_db_folder_reorder`), DnD (notes→folder incl. multi-select; single folder rows re-nest INTO / reorder BEFORE-AFTER / trash / drag-restore via `on_db_folder_move`+`on_db_folder_reorder`; drag icons: folder.png, file.png for one note, documents.png for 2+), sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; selecting notes posts a transient "N files selected" event from both views' selection signals; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
@@ -57,23 +57,24 @@ sees the new flags.
 ## Data & formats
 
 - DB: `~/.local/share/blue_notes/blue_notes.db` (GLib user-data dir; the
-  filename is `ON_DB_FILENAME` in db.h — a legacy `notes.db` (pre-1.4) is
-  renamed in place by `on_db_migrate_legacy_name()`, called before every
-  directory-level open: GUI/CLI startup, db switch, first-run chooser;
-  the dir was renamed
+  filename is `ON_DB_FILENAME` in db.h.  The pre-1.4 `notes.db` rename
+  shim was removed 2026-07 (sole user's DB verified migrated); the dir
+  was renamed
   from `orange-notes` pre-release — do NOT rename again once released,
   user data will live there).
-- Note content: **BNBF v5** blobs (magic `BNBF`; the pre-rename `ONBF` magic is accepted forever) (see header comment in `serialize.h`).
+- Note content: **BNBF v5** blobs (magic `BNBF`; the pre-rename `ONBF`
+  magic was retired 2026-07 after an offline scan found zero such blobs)
+  (see header comment in `serialize.h`).
   TEXT records = styled runs (flag bits ↔ named GtkTextTags via one
   shared table); IMAGE = full-resolution PNG + display width; TABLE;
   CHECK. All older versions (1–4) still parse.
 - **Task checkboxes are GtkTextChildAnchors** carrying their state as
   object data (`on_anchor_set/is_checkbox`), rendered as native
   GtkCheckButtons (BNBF v5 CHECK records).  A task line = anchor + space
-  + text under the on-list-check paragraph tag.  Legacy glyph-based
-  notes (⬜/✅/☐/☑ prefixes) are migrated to anchors on load
-  (`migrate_legacy_checkboxes`).  Like all anchors, copy/paste within a
-  note drops the widget/state.
+  + text under the on-list-check paragraph tag.  (The pre-v5 glyph
+  format and its load-time migration were removed 2026-07 after a blob
+  scan verified zero glyph notes remained.)  Like all anchors,
+  copy/paste within a note drops the widget/state.
 - **Images are GtkTextChildAnchors**, not pixbufs: the anchor carries the
   original pixbuf + display width as object data
   (`on_anchor_set_image/get_image`). The editor attaches a HiDPI-aware
@@ -134,9 +135,9 @@ sees the new flags.
   unusable: columns cache resized/requested widths that override it
   (never shrinking back), and ellipsizing renderers report a ~3-char
   minimum so ellipsized columns collapse instead of fitting.  Manual
-  resize grips come back when it's off). The DB settings table is legacy-only: main.c
-  migrates any old UI keys out of it and deletes the retired `in_use`
-  lock key at startup; nothing writes to it anymore.
+  resize grips come back when it's off). The old DB settings table is
+  GONE (dropped from the schema and the live DB 2026-07); all
+  preferences live in the ini.
 - **Custom DB location** (shared-folder support) lives in the CONFIG
   FILE `blue_notes.ini` NEXT TO THE BINARY (`[blue-notes] db_dir=`;
   resolved from argv[0] by `on_app_config_init()`, which must run before
@@ -151,9 +152,8 @@ sees the new flags.
   the dying instance's final flush past the 5 s busy timeout). One
   configured database, or a clear error. When no blue_notes.db EXISTS at
   the expected location (first launch / emptied dir),
-  `startup_first_run()` asks — "Open a blue_notes.db File" (chooser also
-  accepts a legacy notes.db, renamed on selection; persists the new
-  db_dir) or "Create a New blue_notes.db" — instead of silently creating
+  `startup_first_run()` asks — "Open a blue_notes.db File" (persists the
+  new db_dir) or "Create a New blue_notes.db" — instead of silently creating
   an empty DB; both paths clear any stale db_hash.
 - **Trash is a soft-delete flag, not a folder**: `notes.trashed` /
   `folders.trashed` columns + the `trash_folder_ids` view (recursive
@@ -161,7 +161,7 @@ sees the new flags.
   attached and is implicitly trashed via the view). folder_id/parent_id
   are untouched by deletion — they ARE the restore location; restore
   clears the flag and re-parents to top level only when the original
-  location is itself still trashed. Moving a note (`on_db_note_move`)
+  location is itself still trashed. Moving notes (`on_db_notes_move`)
   always clears the flag (drag out of Trash = restore-to-folder). All
   normal listings/counts filter through `NOTE_VISIBLE_SQL`; search's
   All-scope uses `on_db_note_list_all(db, TRUE)` to keep deleted notes
@@ -181,7 +181,7 @@ sees the new flags.
   the two never write the DB concurrently. The old in-DB `in_use`
   instance lock and the read-only mode (`app->read_only`, `PRAGMA
   query_only`, `on_app_db_acquire/release`) were REMOVED with that
-  change; main.c deletes any leftover `in_use` key at startup. SIGTERM
+  change. SIGTERM
   (pkill) destroys all windows so editor autosaves flush and the loop
   ends cleanly.
 
@@ -372,11 +372,10 @@ sees the new flags.
   caller pairs it with an explicit refresh_notes. If the old selection
   no longer exists it falls back to the root and refreshes the notes
   pane itself.
-- Multi-note deletes go through `on_db_notes_delete` (one transaction +
-  one orphan-tag prune), not per-note `on_db_note_delete` (which
-  fsyncs and prunes per call).  Multi-note DROPS likewise use
-  `on_db_notes_move` (one transaction) — per-note `on_db_note_move`
-  fsyncs per call and froze the GUI on big drops.  The drop handler
+- Note deletes/moves go through the BULK `on_db_notes_delete` /
+  `on_db_notes_move` (one transaction + one orphan-tag prune) — the
+  old per-note variants fsynced per call, froze the GUI on big drops,
+  and were REMOVED (pass `&id, 1` for one note).  The drop handler
   also calls `gtk_drag_finish` BEFORE its refreshes so the DnD
   handshake isn't stalled by the model rebuilds.  Autofit column
   measuring rides refresh_notes' population loop (one PangoLayout, one

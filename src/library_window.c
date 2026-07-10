@@ -196,6 +196,10 @@ static void    list_autofit_set(OnLibrary *lw, PangoLayout *lay,
 static GtkTreePath *notes_sel_unblock(OnLibrary *lw, gboolean want_path);
 static void    close_editors_for_ids(OnLibrary *lw, const gint64 *ids,
                                      gsize n);
+static gboolean trash_notes_core(OnLibrary *lw, const gint64 *ids,
+                                 guint n);
+static gboolean trash_folder(OnLibrary *lw, gint64 folder_id,
+                             const gchar *name);
 static void    add_menu_item(GtkWidget *menu, const gchar *label,
                              GCallback callback, gpointer data);
 static void    about_button_fit_style(GtkToolItem *item,
@@ -277,6 +281,18 @@ in_trash_view(OnLibrary *lw)
 {
     return lw->sel_kind == SB_KIND_TRASH ||
            lw->sel_kind == SB_KIND_TRASH_FOLDER;
+}
+
+/* sb_kind_is_section() — is `kind` one of the bold sidebar section rows
+ * (the Notes root, the Tags header, Pinned Notes, All Notes, Trash)?        */
+static gboolean
+sb_kind_is_section(gint kind)
+{
+    return kind == SB_KIND_ROOT ||
+           kind == SB_KIND_TAGS_HEADER ||
+           kind == SB_KIND_PINNED ||
+           kind == SB_KIND_ALL ||
+           kind == SB_KIND_TRASH;
 }
 
 static void
@@ -889,6 +905,21 @@ refresh_notes(OnLibrary *lw)
 }
 
 /* ---------------------------------------------------------------------------
+ * refresh_all() — rebuild the sidebar and the notes pane together: the
+ * standard follow-up to any change that can touch both (moves, deletes,
+ * tag edits, …).  refresh_sidebar keeps its populating guard up through
+ * the selection restore, so the explicit refresh_notes here is the one
+ * that repopulates the pane (the sidebar's own fallback refresh — taken
+ * when the old selection vanished — is redundant but harmless).
+ * ------------------------------------------------------------------------- */
+static void
+refresh_all(OnLibrary *lw)
+{
+    refresh_sidebar(lw);
+    refresh_notes(lw);
+}
+
+/* ---------------------------------------------------------------------------
  * persist_note_order() — write the notes model's current row order back
  * to the database.  Only meaningful when a folder (not a tag) is shown.
  * ------------------------------------------------------------------------- */
@@ -985,14 +1016,19 @@ sidebar_select_func(GtkTreeSelection *sel, GtkTreeModel *model,
 }
 
 /* ---------------------------------------------------------------------------
- * open_note_at_iter() — open the editor for the note in `iter` of the
- * notes model.
+ * open_note_at_path() — open the editor for the note at `path` (NOT
+ * owned) in the notes model; the shared tail of both views' activation
+ * handlers.
  * ------------------------------------------------------------------------- */
 static void
-open_note_at_iter(OnLibrary *lw, GtkTreeIter *iter)
+open_note_at_path(OnLibrary *lw, GtkTreePath *path)
 {
-    gint64 id;                       /* note id                             */
-    gtk_tree_model_get(GTK_TREE_MODEL(lw->notes_store), iter,
+    GtkTreeIter iter;                /* activated row                       */
+    gint64 id;                       /* its note id                         */
+    if (!gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->notes_store),
+                                 &iter, path))
+        return;
+    gtk_tree_model_get(GTK_TREE_MODEL(lw->notes_store), &iter,
                        NL_ID, &id, -1);
     on_editor_window_open(lw->app, id);
 }
@@ -1003,11 +1039,7 @@ on_note_list_activated(GtkTreeView *view, GtkTreePath *path,
                        GtkTreeViewColumn *col, gpointer user_data)
 {
     (void)view; (void)col;
-    OnLibrary *lw = user_data;       /* owning library window               */
-    GtkTreeIter iter;                /* activated row                       */
-    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->notes_store),
-                                &iter, path))
-        open_note_at_iter(lw, &iter);
+    open_note_at_path(user_data, path);
 }
 
 /* on_note_grid_activated() — double-click in grid mode opens the note.      */
@@ -1016,11 +1048,7 @@ on_note_grid_activated(GtkIconView *view, GtkTreePath *path,
                        gpointer user_data)
 {
     (void)view;
-    OnLibrary *lw = user_data;       /* owning library window               */
-    GtkTreeIter iter;                /* activated item                      */
-    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->notes_store),
-                                &iter, path))
-        open_note_at_iter(lw, &iter);
+    open_note_at_path(user_data, path);
 }
 
 /* ===========================================================================
@@ -1336,13 +1364,8 @@ on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
             }
             if (dest_kind == SB_KIND_TRASH) {
                 /* Dropping on Trash IS the delete gesture.                 */
-                close_editors_for_ids(lw, (const gint64 *)ids->data,
-                                      ids->len);
-                success = on_db_notes_trash(
-                    lw->app->db, (const gint64 *)ids->data, ids->len);
-                if (success)
-                    on_app_status(lw->app, "Moved %u note%s to Trash",
-                                  ids->len, ids->len == 1 ? "" : "s");
+                success = trash_notes_core(
+                    lw, (const gint64 *)ids->data, ids->len);
             } else {
                 /* ONE transaction for the whole selection: per-note
                  * moves fsync per call and froze the GUI on big drops.  */
@@ -1382,21 +1405,7 @@ on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
         if (movable && dest_kind == SB_KIND_TRASH &&
             src_kind == SB_KIND_FOLDER) {
             /* Dropping on Trash IS the delete gesture.                     */
-            GArray *nids = on_db_folder_note_ids(lw->app->db, folder_id);
-            close_editors_for_ids(lw, (const gint64 *)nids->data,
-                                  nids->len);
-            g_array_free(nids, TRUE);
-            success = on_db_folder_trash(lw->app->db, folder_id);
-            if (success) {
-                on_app_status(lw->app,
-                              "Folder \xe2\x80\x9c%s\xe2\x80\x9d moved "
-                              "to Trash", fname);
-                if (lw->sel_kind == SB_KIND_FOLDER &&
-                    lw->sel_id == folder_id) {
-                    lw->sel_kind = SB_KIND_ROOT;
-                    lw->sel_id   = 0;
-                }
-            }
+            success = trash_folder(lw, folder_id, fname);
         } else if (movable && (dest_kind == SB_KIND_FOLDER ||
                                dest_kind == SB_KIND_ROOT)) {
             /* INTO a folder (or anywhere on the root) re-nests, appended
@@ -1460,10 +1469,8 @@ on_sidebar_drag_received(GtkWidget *widget, GdkDragContext *context,
      * models, and running them before gtk_drag_finish() stalls the drop
      * (the source sits waiting while we repaint).                          */
     gtk_drag_finish(context, success, FALSE, time);
-    if (success) {
-        refresh_sidebar(lw);         /* tree shape and counts changed       */
-        refresh_notes(lw);
-    }
+    if (success)
+        refresh_all(lw);             /* tree shape and counts changed       */
 }
 
 /* ===========================================================================
@@ -1514,9 +1521,12 @@ prompt_for_text(OnLibrary *lw, const gchar *title, const gchar *initial)
 
     gchar *result = NULL;            /* entered text, NULL if cancelled     */
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK) {
-        const gchar *text = gtk_entry_get_text(GTK_ENTRY(entry));
-        if (text != NULL && *g_strstrip(g_strdup(text)) != '\0')
-            result = g_strdup(text);
+        gchar *text =                /* trimmed copy of the entry text      */
+            g_strstrip(g_strdup(gtk_entry_get_text(GTK_ENTRY(entry))));
+        if (*text != '\0')
+            result = text;
+        else
+            g_free(text);
     }
     gtk_widget_destroy(dialog);
     return result;
@@ -1593,8 +1603,7 @@ on_new_note(GtkWidget *widget, gpointer user_data)
     OnLibrary *lw = user_data;       /* owning library window               */
     gint64 id = on_db_note_create(lw->app->db, current_folder_id(lw));
     if (id != 0) {
-        refresh_notes(lw);
-        refresh_sidebar(lw);         /* the folder's count just grew        */
+        refresh_all(lw);             /* the folder's count just grew        */
         on_editor_window_open(lw->app, id);
     }
 }
@@ -1664,23 +1673,63 @@ close_editors_for_ids(OnLibrary *lw, const gint64 *ids, gsize n)
 }
 
 /* ---------------------------------------------------------------------------
- * trash_notes() — move every note in `ids` to the Trash (closing any open
- * editors first).  No confirmation: the move is reversible, so a status
- * message is enough.
+ * trash_notes_core() — move the notes in `ids` to the Trash: close any
+ * open editors, flip the trash flag (ONE transaction) and post the status
+ * message.  No confirmation: the move is reversible.  Refresh-free — the
+ * callers refresh on their own schedule (the drag path must finish the
+ * DnD handshake first).
+ *   lw  — the library window.
+ *   ids — the note ids.
+ *   n   — how many.
+ * Returns TRUE when the database move succeeded.
  * ------------------------------------------------------------------------- */
+static gboolean
+trash_notes_core(OnLibrary *lw, const gint64 *ids, guint n)
+{
+    close_editors_for_ids(lw, ids, n);
+    if (!on_db_notes_trash(lw->app->db, ids, n))
+        return FALSE;
+    on_app_status(lw->app, "Moved %u note%s to Trash",
+                  n, n == 1 ? "" : "s");
+    return TRUE;
+}
+
+/* trash_notes() — action/menu path of the note-trash gesture: the shared
+ * core plus the immediate refresh.                                          */
 static void
 trash_notes(OnLibrary *lw, GArray *ids)
 {
     if (ids->len == 0)
         return;
-    close_editors_for_ids(lw, (const gint64 *)ids->data, ids->len);
-    if (on_db_notes_trash(lw->app->db, (const gint64 *)ids->data,
-                          ids->len)) {
-        on_app_status(lw->app, "Moved %u note%s to Trash",
-                      ids->len, ids->len == 1 ? "" : "s");
-        refresh_notes(lw);
-        refresh_sidebar(lw);         /* counts + the Trash section          */
+    if (trash_notes_core(lw, (const gint64 *)ids->data, ids->len))
+        refresh_all(lw);             /* counts + the Trash section          */
+}
+
+/* ---------------------------------------------------------------------------
+ * trash_folder() — move folder `folder_id` (with its whole subtree) to
+ * the Trash: close any editors open on its notes, flip the trash flag,
+ * post the status message, and pull the selection off the now-hidden
+ * folder.  Refresh-free, like trash_notes_core above.
+ *   lw        — the library window.
+ *   folder_id — the folder to trash.
+ *   name      — its bare name (for the status message).
+ * Returns TRUE when the database move succeeded.
+ * ------------------------------------------------------------------------- */
+static gboolean
+trash_folder(OnLibrary *lw, gint64 folder_id, const gchar *name)
+{
+    GArray *nids = on_db_folder_note_ids(lw->app->db, folder_id);
+    close_editors_for_ids(lw, (const gint64 *)nids->data, nids->len);
+    g_array_free(nids, TRUE);
+    if (!on_db_folder_trash(lw->app->db, folder_id))
+        return FALSE;
+    on_app_status(lw->app,
+                  "Folder \xe2\x80\x9c%s\xe2\x80\x9d moved to Trash", name);
+    if (lw->sel_kind == SB_KIND_FOLDER && lw->sel_id == folder_id) {
+        lw->sel_kind = SB_KIND_ROOT;
+        lw->sel_id   = 0;
     }
+    return TRUE;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1703,8 +1752,7 @@ delete_notes_permanently(OnLibrary *lw, GArray *ids)
 
     close_editors_for_ids(lw, (const gint64 *)ids->data, ids->len);
     on_db_notes_delete(lw->app->db, (const gint64 *)ids->data, ids->len);
-    refresh_notes(lw);
-    refresh_sidebar(lw);             /* tag list/counts may have changed    */
+    refresh_all(lw);                 /* tag list/counts may have changed    */
 }
 
 /* on_delete_note() — action-bar Delete: trash every selected note, or
@@ -1731,15 +1779,8 @@ on_delete_folder(GtkWidget *widget, gpointer user_data)
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
     if (lw->sel_kind == SB_KIND_FOLDER) {
-        if (on_db_folder_trash(lw->app->db, lw->sel_id)) {
-            on_app_status(lw->app,
-                          "Folder \xe2\x80\x9c%s\xe2\x80\x9d moved to Trash",
-                          lw->sel_name);
-            lw->sel_kind = SB_KIND_ROOT;
-            lw->sel_id   = 0;
-            refresh_sidebar(lw);
-            refresh_notes(lw);
-        }
+        if (trash_folder(lw, lw->sel_id, lw->sel_name))
+            refresh_all(lw);
     } else if (lw->sel_kind == SB_KIND_TRASH_FOLDER) {
         if (confirm(lw,
                     "Permanently delete this folder and everything "
@@ -1751,8 +1792,7 @@ on_delete_folder(GtkWidget *widget, gpointer user_data)
             on_db_folder_delete(lw->app->db, lw->sel_id);
             lw->sel_kind = SB_KIND_TRASH;
             lw->sel_id   = 0;
-            refresh_sidebar(lw);
-            refresh_notes(lw);
+            refresh_all(lw);
         }
     }
 }
@@ -1772,8 +1812,7 @@ on_restore_folder(GtkWidget *widget, gpointer user_data)
                       "Folder \xe2\x80\x9c%s\xe2\x80\x9d restored",
                       lw->sel_name);
         lw->sel_kind = SB_KIND_FOLDER;   /* same id, back in the tree       */
-        refresh_sidebar(lw);
-        refresh_notes(lw);
+        refresh_all(lw);
     }
 }
 
@@ -1796,8 +1835,7 @@ on_empty_trash(GtkWidget *widget, gpointer user_data)
 
     if (on_db_trash_empty(lw->app->db)) {
         on_app_status(lw->app, "Trash emptied");
-        refresh_sidebar(lw);         /* the Trash section disappears        */
-        refresh_notes(lw);
+        refresh_all(lw);             /* the Trash section disappears        */
     }
 }
 
@@ -1878,13 +1916,10 @@ on_backup_db(GtkWidget *widget, gpointer user_data)
         gboolean ok = on_db_backup_to(lw->app->db, path);
         if (ok)
             on_app_status(lw->app, "Database backed up");
-        GtkWidget *msg = gtk_message_dialog_new(
-            GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
-            ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            ok ? "Database backed up to\n%s" : "Backup to %s failed",
-            path);
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
+        on_app_notice(GTK_WINDOW(lw->window),
+                      ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_ERROR, NULL,
+                      ok ? "Database backed up to\n%s"
+                         : "Backup to %s failed", path);
         g_free(path);
     } else {
         gtk_widget_destroy(chooser);
@@ -1903,22 +1938,10 @@ on_open_db(GtkWidget *widget, gpointer user_data)
     OnApp     *app = lw->app;
 
     /* Step 1: pick the file. */
-    GtkWidget *chooser = gtk_file_chooser_dialog_new(
-        "Open Database", GTK_WINDOW(lw->window),
-        GTK_FILE_CHOOSER_ACTION_OPEN,
-        "_Cancel", GTK_RESPONSE_CANCEL,
-        "_Open",   GTK_RESPONSE_ACCEPT,
-        NULL);
-    GtkFileFilter *ff = gtk_file_filter_new();
-    gtk_file_filter_add_pattern(ff, "*.db");
-    gtk_file_filter_set_name(ff, "SQLite Database (*.db)");
-    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), ff);
-
-    gchar *file_path = NULL;
-    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT)
-        file_path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
-    gtk_widget_destroy(chooser);
-
+    gchar *file_path = on_app_pick_path(
+        GTK_WINDOW(lw->window), "Open Database",
+        GTK_FILE_CHOOSER_ACTION_OPEN, "_Open",
+        "SQLite Database (*.db)", "*.db");
     if (file_path == NULL)
         return;
 
@@ -1958,13 +1981,9 @@ on_open_db(GtkWidget *widget, gpointer user_data)
     app->db = on_db_open(file_path);
 
     if (app->db == NULL) {
-        GtkWidget *err = gtk_message_dialog_new(
-            GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
-            GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            "Could not open:\n%s", file_path);
-        gtk_window_set_title(GTK_WINDOW(err), "Blue Notes - Database Error");
-        gtk_dialog_run(GTK_DIALOG(err));
-        gtk_widget_destroy(err);
+        on_app_notice(GTK_WINDOW(lw->window), GTK_MESSAGE_ERROR,
+                      "Blue Notes - Database Error",
+                      "Could not open:\n%s", file_path);
         /* Revert to old database. */
         app->db = on_db_open(old_path);
         g_free(old_path);
@@ -2003,35 +2022,22 @@ on_restore_db(GtkWidget *widget, gpointer user_data)
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
 
-    GtkWidget *chooser = gtk_file_chooser_dialog_new(
-        "Restore Database", GTK_WINDOW(lw->window),
-        GTK_FILE_CHOOSER_ACTION_OPEN,
-        "_Cancel", GTK_RESPONSE_CANCEL,
-        "_Restore", GTK_RESPONSE_ACCEPT,
-        NULL);
-    GtkFileFilter *filter = gtk_file_filter_new();
-    gtk_file_filter_set_name(filter, "Database files (*.db)");
-    gtk_file_filter_add_pattern(filter, "*.db");
-    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), filter);
-
-    if (gtk_dialog_run(GTK_DIALOG(chooser)) != GTK_RESPONSE_ACCEPT) {
-        gtk_widget_destroy(chooser);
+    gchar *path = on_app_pick_path(
+        GTK_WINDOW(lw->window), "Restore Database",
+        GTK_FILE_CHOOSER_ACTION_OPEN, "_Restore",
+        "Database files (*.db)", "*.db");
+    if (path == NULL)
         return;
-    }
-    gchar *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
-    gtk_widget_destroy(chooser);
 
     if (confirm(lw, "Replace ALL current notes with this backup?",
                 "The current database will be kept as "
                 "blue_notes.db.pre-restore.")) {
         gboolean ok = on_app_restore_database(lw->app, path);
-        GtkWidget *msg = gtk_message_dialog_new(
-            GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
-            ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            ok ? "Database restored." :
-                 "Restore failed — the previous database is still in use.");
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
+        on_app_notice(GTK_WINDOW(lw->window),
+                      ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_ERROR, NULL,
+                      "%s", ok ? "Database restored."
+                               : "Restore failed \xe2\x80\x94 the previous "
+                                 "database is still in use.");
     }
     g_free(path);
 }
@@ -2163,18 +2169,26 @@ on_sidebar_search_here(GtkWidget *widget, gpointer user_data)
     on_search_window_open(lw->app, TRUE);
 }
 
+/* utf8_casecmp() — case-insensitive UTF-8 string comparison (casefold
+ * both sides; NULL compares as the empty string).                           */
+static gint
+utf8_casecmp(const gchar *a, const gchar *b)
+{
+    gchar *ca = g_utf8_casefold(a != NULL ? a : "", -1);
+    gchar *cb = g_utf8_casefold(b != NULL ? b : "", -1);
+    gint result = g_strcmp0(ca, cb);
+    g_free(ca);
+    g_free(cb);
+    return result;
+}
+
 /* folder_name_cmp() — GCompareFunc: case-insensitive alphabetical order
  * of two OnFolder*s.                                                        */
 static gint
 folder_name_cmp(gconstpointer a, gconstpointer b)
 {
     const OnFolder *fa = a, *fb = b;
-    gchar *ca = g_utf8_casefold(fa->name != NULL ? fa->name : "", -1);
-    gchar *cb = g_utf8_casefold(fb->name != NULL ? fb->name : "", -1);
-    gint result = g_strcmp0(ca, cb);
-    g_free(ca);
-    g_free(cb);
-    return result;
+    return utf8_casecmp(fa->name, fb->name);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2205,10 +2219,32 @@ on_sort_subfolders(GtkWidget *widget, gpointer user_data)
                              ids->len)) {
         on_app_status(lw->app, "Sorted %u subfolders alphabetically",
                       ids->len);
-        refresh_sidebar(lw);
-        refresh_notes(lw);
+        refresh_all(lw);
     }
     g_array_free(ids, TRUE);
+}
+
+/* ---------------------------------------------------------------------------
+ * menu_new_transient() — one-shot context-menu scaffold: a fresh GtkMenu
+ * attached to the library window that destroys itself once its selection
+ * is done.
+ * ------------------------------------------------------------------------- */
+static GtkWidget *
+menu_new_transient(OnLibrary *lw)
+{
+    GtkWidget *menu = gtk_menu_new();
+    gtk_menu_attach_to_widget(GTK_MENU(menu), lw->window, NULL);
+    g_signal_connect(menu, "selection-done",
+                     G_CALLBACK(gtk_widget_destroy), NULL);
+    return menu;
+}
+
+/* menu_popup() — show a fully-built menu at the pointer of `event`.         */
+static void
+menu_popup(GtkWidget *menu, GdkEventButton *event)
+{
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2244,17 +2280,13 @@ on_sidebar_button_press(GtkWidget *widget, GdkEventButton *event,
     if (kind == SB_KIND_TAGS_HEADER)
         return TRUE;                 /* consumed, but no menu               */
 
-    GtkWidget *menu = gtk_menu_new();
-    gtk_menu_attach_to_widget(GTK_MENU(menu), lw->window, NULL);
-    g_signal_connect(menu, "selection-done",
-                     G_CALLBACK(gtk_widget_destroy), NULL);
+    GtkWidget *menu = menu_new_transient(lw);
 
     if (kind == SB_KIND_TRASH) {
         /* The Trash row's only action: purge it.                           */
         add_menu_item(menu, "_Empty Trash\xe2\x80\xa6",
                       G_CALLBACK(on_empty_trash), lw);
-        gtk_widget_show_all(menu);
-        gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+        menu_popup(menu, event);
         return TRUE;
     }
 
@@ -2284,8 +2316,7 @@ on_sidebar_button_press(GtkWidget *widget, GdkEventButton *event,
     add_menu_item(menu, "Search _Here\xe2\x80\xa6",
                   G_CALLBACK(on_sidebar_search_here), lw);
 
-    gtk_widget_show_all(menu);
-    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+    menu_popup(menu, event);
     return TRUE;
 }
 
@@ -2339,6 +2370,37 @@ on_toggle_view(GtkWidget *widget, gpointer user_data)
         on_view_list(NULL, lw);
 }
 
+/* pick_export_dir() — run the "Choose Export Folder" chooser shared by
+ * every export flow.  Returns the chosen directory (g_free), or NULL if
+ * the user cancelled.                                                       */
+static gchar *
+pick_export_dir(OnLibrary *lw)
+{
+    return on_app_pick_path(GTK_WINDOW(lw->window), "Choose Export Folder",
+                            GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
+                            "_Export", NULL, NULL);
+}
+
+/* ---------------------------------------------------------------------------
+ * report_exported() — modal result dialog for an export run.
+ *   lw  — the library window (dialog parent).
+ *   n   — how many notes were written; negative means the run failed.
+ *   dir — the destination directory (for the success message).
+ *   err — exporter error message for a failed run, or NULL.
+ * ------------------------------------------------------------------------- */
+static void
+report_exported(OnLibrary *lw, gint n, const gchar *dir, const gchar *err)
+{
+    if (n >= 0)
+        on_app_notice(GTK_WINDOW(lw->window), GTK_MESSAGE_INFO, NULL,
+                      "Exported %d note%s to\n%s",
+                      n, n == 1 ? "" : "s", dir);
+    else
+        on_app_notice(GTK_WINDOW(lw->window), GTK_MESSAGE_ERROR, NULL,
+                      "Export failed: %s",
+                      err != NULL ? err : "unknown error");
+}
+
 /* ---------------------------------------------------------------------------
  * run_export() — pick a destination directory and export every note in
  * the requested format, then report the result.
@@ -2348,40 +2410,15 @@ on_toggle_view(GtkWidget *widget, gpointer user_data)
 static void
 run_export(OnLibrary *lw, OnExportFormat format)
 {
-    GtkWidget *chooser = gtk_file_chooser_dialog_new(
-        "Choose Export Folder", GTK_WINDOW(lw->window),
-        GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
-        "_Cancel", GTK_RESPONSE_CANCEL,
-        "_Export", GTK_RESPONSE_ACCEPT,
-        NULL);
+    gchar *dir = pick_export_dir(lw);
+    if (dir == NULL)
+        return;
 
-    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT) {
-        gchar *dir = gtk_file_chooser_get_filename(
-            GTK_FILE_CHOOSER(chooser));
-        gtk_widget_destroy(chooser);
-
-        gchar *err = NULL;           /* exporter error message              */
-        gint   n   = on_export_all(lw->app, dir, format, &err);
-
-        GtkWidget *msg;              /* result dialog                       */
-        if (n >= 0) {
-            msg = gtk_message_dialog_new(
-                GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
-                GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-                "Exported %d note%s to\n%s", n, n == 1 ? "" : "s", dir);
-        } else {
-            msg = gtk_message_dialog_new(
-                GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
-                GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                "Export failed: %s", err != NULL ? err : "unknown error");
-        }
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
-        g_free(err);
-        g_free(dir);
-    } else {
-        gtk_widget_destroy(chooser);
-    }
+    gchar *err = NULL;               /* exporter error message              */
+    gint   n   = on_export_all(lw->app, dir, format, &err);
+    report_exported(lw, n, dir, err);
+    g_free(err);
+    g_free(dir);
 }
 
 /* on_export_html() / on_export_markdown() — File-menu export entries.       */
@@ -2425,19 +2462,11 @@ ctx_export_selection(OnLibrary *lw, OnExportFormat format)
         return;
     }
 
-    GtkWidget *chooser = gtk_file_chooser_dialog_new(
-        "Choose Export Folder", GTK_WINDOW(lw->window),
-        GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
-        "_Cancel", GTK_RESPONSE_CANCEL,
-        "_Export", GTK_RESPONSE_ACCEPT,
-        NULL);
-    if (gtk_dialog_run(GTK_DIALOG(chooser)) != GTK_RESPONSE_ACCEPT) {
-        gtk_widget_destroy(chooser);
+    gchar *dir = pick_export_dir(lw);
+    if (dir == NULL) {
         g_array_free(ids, TRUE);
         return;
     }
-    gchar *dir = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
-    gtk_widget_destroy(chooser);
 
     gint exported = 0;               /* how many notes were written         */
     for (guint i = 0; i < ids->len; i++)
@@ -2445,13 +2474,7 @@ ctx_export_selection(OnLibrary *lw, OnExportFormat format)
                            dir, format))
             exported++;
 
-    GtkWidget *msg = gtk_message_dialog_new(
-        GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
-        GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-        "Exported %d note%s to\n%s",
-        exported, exported == 1 ? "" : "s", dir);
-    gtk_dialog_run(GTK_DIALOG(msg));
-    gtk_widget_destroy(msg);
+    report_exported(lw, exported, dir, NULL);
     g_free(dir);
     g_array_free(ids, TRUE);
 }
@@ -2497,8 +2520,7 @@ on_note_ctx_restore(GtkMenuItem *item, gpointer user_data)
             on_db_note_restore(lw->app->db, g_array_index(ids, gint64, i));
         on_app_status(lw->app, "Restored %u note%s",
                       ids->len, ids->len == 1 ? "" : "s");
-        refresh_notes(lw);
-        refresh_sidebar(lw);         /* counts + the Trash section          */
+        refresh_all(lw);             /* counts + the Trash section          */
     }
     g_array_free(ids, TRUE);
 }
@@ -2518,8 +2540,8 @@ on_note_ctx_toggle_pin(GtkMenuItem *item, gpointer user_data)
                               g_array_index(ids, gint64, i), pin);
     g_array_free(ids, TRUE);
 
-    refresh_sidebar(lw);             /* Pinned Notes count/section          */
-    refresh_notes(lw);               /* the pinned view may be showing      */
+    refresh_all(lw);                 /* the Pinned Notes count/section, and
+                                        the pinned view may be showing      */
 }
 
 /* ---------------------------------------------------------------------------
@@ -2531,11 +2553,7 @@ on_note_ctx_toggle_pin(GtkMenuItem *item, gpointer user_data)
 static void
 show_note_context_menu(OnLibrary *lw, gint64 note_id, GdkEventButton *event)
 {
-    GtkWidget *menu = gtk_menu_new();
-    gtk_menu_attach_to_widget(GTK_MENU(menu), lw->window, NULL);
-    /* One-shot menu: destroy it after the selection is done.               */
-    g_signal_connect(menu, "selection-done",
-                     G_CALLBACK(gtk_widget_destroy), NULL);
+    GtkWidget *menu = menu_new_transient(lw);
 
     /* Pin/Unpin reflects the clicked note's current state.                 */
     OnNoteMeta *meta = on_db_note_get(lw->app->db, note_id);
@@ -2579,8 +2597,28 @@ show_note_context_menu(OnLibrary *lw, gint64 note_id, GdkEventButton *event)
         }
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
     }
-    gtk_widget_show_all(menu);
-    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+    menu_popup(menu, event);
+}
+
+/* ---------------------------------------------------------------------------
+ * notes_ctx_popup() — shared right-click tail of both notes views: read
+ * the note id at `path` (owned — freed here) and pop up the note context
+ * menu for it.  Returns TRUE: the click is consumed either way.
+ * ------------------------------------------------------------------------- */
+static gboolean
+notes_ctx_popup(OnLibrary *lw, GtkTreePath *path, GdkEventButton *event)
+{
+    GtkTreeIter iter;                /* the clicked row                     */
+    gint64 id = 0;                   /* its note id                         */
+    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->notes_store),
+                                &iter, path))
+        gtk_tree_model_get(GTK_TREE_MODEL(lw->notes_store), &iter,
+                           NL_ID, &id, -1);
+    gtk_tree_path_free(path);
+
+    if (id != 0)
+        show_note_context_menu(lw, id, event);
+    return TRUE;
 }
 
 /* notes_sel_block_func() / notes_sel_allow_func() — temporary select
@@ -2684,17 +2722,7 @@ on_notes_list_button_press(GtkWidget *widget, GdkEventButton *event,
         gtk_tree_selection_select_path(sel, path);
     }
 
-    GtkTreeIter iter;                /* the clicked row                     */
-    gint64 id = 0;                   /* its note id                         */
-    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->notes_store),
-                                &iter, path))
-        gtk_tree_model_get(GTK_TREE_MODEL(lw->notes_store), &iter,
-                           NL_ID, &id, -1);
-    gtk_tree_path_free(path);
-
-    if (id != 0)
-        show_note_context_menu(lw, id, event);
-    return TRUE;
+    return notes_ctx_popup(lw, path, event);
 }
 
 /* on_notes_list_button_release() — a blocked press ended WITHOUT a drag:
@@ -2737,17 +2765,7 @@ on_notes_grid_button_press(GtkWidget *widget, GdkEventButton *event,
         gtk_icon_view_select_path(GTK_ICON_VIEW(widget), path);
     }
 
-    GtkTreeIter iter;                /* the clicked item                    */
-    gint64 id = 0;                   /* its note id                         */
-    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->notes_store),
-                                &iter, path))
-        gtk_tree_model_get(GTK_TREE_MODEL(lw->notes_store), &iter,
-                           NL_ID, &id, -1);
-    gtk_tree_path_free(path);
-
-    if (id != 0)
-        show_note_context_menu(lw, id, event);
-    return TRUE;
+    return notes_ctx_popup(lw, path, event);
 }
 
 /* ===========================================================================
@@ -2816,6 +2834,16 @@ status_fade_timeout(gpointer user_data)
     return G_SOURCE_REMOVE;
 }
 
+/* lw_from_app() — the library state stashed on the library window, or
+ * NULL when the window (or the state on it) doesn't exist.                  */
+static OnLibrary *
+lw_from_app(OnApp *app)
+{
+    return (app->library_window != NULL)
+        ? g_object_get_data(G_OBJECT(app->library_window), "on-library")
+        : NULL;
+}
+
 /* ---------------------------------------------------------------------------
  * library_notify_status() — installed as app->notify_status; shows an
  * event message in the status bar's right label, fading it out after
@@ -2825,8 +2853,7 @@ status_fade_timeout(gpointer user_data)
 static void
 library_notify_status(OnApp *app, const gchar *message)
 {
-    OnLibrary *lw =                  /* library state stashed on the window */
-        g_object_get_data(G_OBJECT(app->library_window), "on-library");
+    OnLibrary *lw = lw_from_app(app);
     if (lw == NULL || lw->status_event == NULL)
         return;
 
@@ -2851,12 +2878,9 @@ library_notify_status(OnApp *app, const gchar *message)
 static void
 library_notify_notes_changed(OnApp *app)
 {
-    OnLibrary *lw =                  /* library state stashed on the window */
-        g_object_get_data(G_OBJECT(app->library_window), "on-library");
-    if (lw != NULL) {
-        refresh_sidebar(lw);
-        refresh_notes(lw);
-    }
+    OnLibrary *lw = lw_from_app(app);
+    if (lw != NULL)
+        refresh_all(lw);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2869,8 +2893,7 @@ library_notify_notes_changed(OnApp *app)
 static void
 library_notify_note_saved(OnApp *app)
 {
-    OnLibrary *lw =                  /* library state stashed on the window */
-        g_object_get_data(G_OBJECT(app->library_window), "on-library");
+    OnLibrary *lw = lw_from_app(app);
     if (lw != NULL)
         refresh_notes(lw);
 }
@@ -2910,10 +2933,7 @@ on_library_get_scope(OnApp *app, OnSearchScope *scope, gint64 *id,
     *id    = 0;
     *name  = g_strdup("Notes");
 
-    OnLibrary *lw =                  /* library state stashed on the window */
-        (app->library_window != NULL)
-        ? g_object_get_data(G_OBJECT(app->library_window), "on-library")
-        : NULL;
+    OnLibrary *lw = lw_from_app(app);
     if (lw == NULL)
         return;
 
@@ -2947,10 +2967,7 @@ sort_by_title(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
     gchar *ta, *tb;                  /* the two titles                      */
     gtk_tree_model_get(model, a, NL_TITLE, &ta, -1);
     gtk_tree_model_get(model, b, NL_TITLE, &tb, -1);
-    gchar *ca = g_utf8_casefold(ta != NULL ? ta : "", -1);
-    gchar *cb = g_utf8_casefold(tb != NULL ? tb : "", -1);
-    gint result = g_strcmp0(ca, cb);
-    g_free(ca); g_free(cb);
+    gint result = utf8_casecmp(ta, tb);
     g_free(ta); g_free(tb);
     return result;
 }
@@ -2964,6 +2981,10 @@ sort_by_title(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
  * carries its stable key as object data ("on-colkey").
  * =========================================================================== */
 
+/* How many columns the notes list owns (Title, Path, Modified, Created) —
+ * keep in sync with the COLS[] table in the window constructor.             */
+#define N_LIST_COLUMNS 4
+
 /* ---------------------------------------------------------------------------
  * list_columns_persist() — write the list view's current column order and
  * visibility to the ini.  A partial column list (the view tearing down
@@ -2973,7 +2994,7 @@ static void
 list_columns_persist(OnLibrary *lw)
 {
     GList *cols = gtk_tree_view_get_columns(lw->notes_list);
-    if (g_list_length(cols) != 3) {
+    if (g_list_length(cols) != N_LIST_COLUMNS) {
         g_list_free(cols);
         return;
     }
@@ -3186,10 +3207,7 @@ on_column_header_press(GtkWidget *button, GdkEventButton *event,
     if (event->button != GDK_BUTTON_SECONDARY)
         return FALSE;
 
-    GtkWidget *menu = gtk_menu_new();
-    gtk_menu_attach_to_widget(GTK_MENU(menu), lw->window, NULL);
-    g_signal_connect(menu, "selection-done",
-                     G_CALLBACK(gtk_widget_destroy), NULL);
+    GtkWidget *menu = menu_new_transient(lw);
 
     GList *cols = gtk_tree_view_get_columns(lw->notes_list);
     gint n_visible = 0;              /* how many columns are shown          */
@@ -3222,8 +3240,7 @@ on_column_header_press(GtkWidget *button, GdkEventButton *event,
                      G_CALLBACK(on_autofit_toggled), lw);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), fit);
 
-    gtk_widget_show_all(menu);
-    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+    menu_popup(menu, event);
     return TRUE;
 }
 
@@ -3239,41 +3256,26 @@ sort_by_path(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
     gchar *pa, *pb;                  /* the two paths                       */
     gtk_tree_model_get(model, a, NL_PATH, &pa, -1);
     gtk_tree_model_get(model, b, NL_PATH, &pb, -1);
-    gchar *ca = g_utf8_casefold(pa != NULL ? pa : "", -1);
-    gchar *cb = g_utf8_casefold(pb != NULL ? pb : "", -1);
-    gint result = g_strcmp0(ca, cb);
-    g_free(ca); g_free(cb);
+    gint result = utf8_casecmp(pa, pb);
     g_free(pa); g_free(pb);
     return result != 0 ? result : sort_by_title(model, a, b, NULL);
 }
 
 /* ---------------------------------------------------------------------------
- * sort_by_updated() — sort for the Modified header.  Deliberately
- * inverted so the FIRST click on the header shows the most recently
- * modified notes on top.
+ * sort_by_time() — sort for the Modified and Created headers; the model
+ * column holding the raw timestamp (NL_UPDATED or NL_CREATED_RAW) rides
+ * in as GINT_TO_POINTER user_data.  Deliberately inverted so the FIRST
+ * click on either header shows the newest notes on top.
  * ------------------------------------------------------------------------- */
 static gint
-sort_by_updated(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
-                gpointer user_data)
+sort_by_time(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
+             gpointer user_data)
 {
-    (void)user_data;
-    gint64 ua, ub;                   /* the two timestamps                  */
-    gtk_tree_model_get(model, a, NL_UPDATED, &ua, -1);
-    gtk_tree_model_get(model, b, NL_UPDATED, &ub, -1);
-    return (ub > ua) - (ub < ua);
-}
-
-/* sort_by_created() — sort for the Created header, inverted like
- * sort_by_updated so the first click puts the newest notes on top.         */
-static gint
-sort_by_created(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
-                gpointer user_data)
-{
-    (void)user_data;
-    gint64 ca, cb;                   /* the two timestamps                  */
-    gtk_tree_model_get(model, a, NL_CREATED_RAW, &ca, -1);
-    gtk_tree_model_get(model, b, NL_CREATED_RAW, &cb, -1);
-    return (cb > ca) - (cb < ca);
+    gint col = GPOINTER_TO_INT(user_data);  /* the timestamp column         */
+    gint64 ta, tb;                   /* the two timestamps                  */
+    gtk_tree_model_get(model, a, col, &ta, -1);
+    gtk_tree_model_get(model, b, col, &tb, -1);
+    return (tb > ta) - (tb < ta);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3573,13 +3575,9 @@ sidebar_name_cell_func(GtkTreeViewColumn *col, GtkCellRenderer *cell,
     (void)col; (void)user_data;
     gint kind;                       /* SB_KIND_* of this row               */
     gtk_tree_model_get(model, iter, SB_KIND, &kind, -1);
-    gboolean bold = kind == SB_KIND_ROOT ||
-                    kind == SB_KIND_TAGS_HEADER ||
-                    kind == SB_KIND_PINNED ||
-                    kind == SB_KIND_ALL ||
-                    kind == SB_KIND_TRASH;
     g_object_set(cell, "weight",
-                 bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL, NULL);
+                 sb_kind_is_section(kind) ? PANGO_WEIGHT_BOLD
+                                          : PANGO_WEIGHT_NORMAL, NULL);
 }
 
 /* library_free() — destructor for the OnLibrary attached to the window.     */
@@ -3617,13 +3615,8 @@ sb_fit_measure(GtkTreeModel *model, GtkTreePath *path,
     gint      kind;
     gtk_tree_model_get(model, iter, SB_NAME, &name, SB_KIND, &kind, -1);
     if (name && *name) {
-        gboolean bold = (kind == SB_KIND_ROOT  ||
-                         kind == SB_KIND_TAGS_HEADER ||
-                         kind == SB_KIND_PINNED ||
-                         kind == SB_KIND_ALL ||
-                         kind == SB_KIND_TRASH);
         PangoAttrList *al = pango_attr_list_new();
-        if (bold)
+        if (sb_kind_is_section(kind))
             pango_attr_list_insert(al,
                 pango_attr_weight_new(PANGO_WEIGHT_BOLD));
         pango_layout_set_attributes(ctx->lay, al);
@@ -3737,39 +3730,30 @@ on_library_window_create(OnApp *app)
     /* Sidebar palette: light grey backdrop (rows and the empty area
      * below them — the tree view paints the whole widget), muted grey
      * text, and a blue selection bar (white text for contrast).            */
-    {
-        GtkCssProvider *css = gtk_css_provider_new();
-        gtk_css_provider_load_from_data(css,
-            "treeview.view {"
-            "  background-color: rgb(230,230,230);"
-            "  color: rgb(65,65,65);"
-            "}"
-            "treeview.view:selected {"
-            "  background-color: rgb(86,131,224);"
-            "  color: white;"
-            "}"
-            /* Drop indicator (drawn as the border of the row under the
-             * pointer, state :drop(active) + a position class): a 2px
-             * line in the selection blue — top edge for BEFORE, bottom
-             * for AFTER, a full box for INTO.                             */
-            "treeview.view:drop(active) {"
-            "  border-color: rgb(86,131,224);"
-            "  border-width: 2px;"
-            "  border-style: solid;"
-            "}"
-            "treeview.view:drop(active).before {"
-            "  border-style: solid none none none;"
-            "}"
-            "treeview.view:drop(active).after {"
-            "  border-style: none none solid none;"
-            "}",
-            -1, NULL);
-        gtk_style_context_add_provider(
-            gtk_widget_get_style_context(GTK_WIDGET(lw->sidebar)),
-            GTK_STYLE_PROVIDER(css),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(css);
-    }
+    on_app_widget_add_css(GTK_WIDGET(lw->sidebar),
+        "treeview.view {"
+        "  background-color: rgb(230,230,230);"
+        "  color: rgb(65,65,65);"
+        "}"
+        "treeview.view:selected {"
+        "  background-color: rgb(86,131,224);"
+        "  color: white;"
+        "}"
+        /* Drop indicator (drawn as the border of the row under the
+         * pointer, state :drop(active) + a position class): a 2px
+         * line in the selection blue — top edge for BEFORE, bottom
+         * for AFTER, a full box for INTO.                                 */
+        "treeview.view:drop(active) {"
+        "  border-color: rgb(86,131,224);"
+        "  border-width: 2px;"
+        "  border-style: solid;"
+        "}"
+        "treeview.view:drop(active).before {"
+        "  border-style: solid none none none;"
+        "}"
+        "treeview.view:drop(active).after {"
+        "  border-style: none none solid none;"
+        "}");
 
     GtkTreeSelection *sb_sel = gtk_tree_view_get_selection(lw->sidebar);
     gtk_tree_selection_set_select_function(sb_sel, sidebar_select_func,
@@ -3829,24 +3813,15 @@ on_library_window_create(OnApp *app)
      * over the middle of a row, but a list-store drop there INSERTS
      * BEFORE that row, so the .into indicator is drawn as the same
      * between-rows line (top edge), never a box.                          */
-    {
-        GtkCssProvider *css = gtk_css_provider_new();
-        gtk_css_provider_load_from_data(css,
-            "treeview.view:drop(active) {"
-            "  border-color: rgb(86,131,224);"
-            "  border-width: 2px;"
-            "  border-style: solid none none none;"
-            "}"
-            "treeview.view:drop(active).after {"
-            "  border-style: none none solid none;"
-            "}",
-            -1, NULL);
-        gtk_style_context_add_provider(
-            gtk_widget_get_style_context(GTK_WIDGET(lw->notes_list)),
-            GTK_STYLE_PROVIDER(css),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(css);
-    }
+    on_app_widget_add_css(GTK_WIDGET(lw->notes_list),
+        "treeview.view:drop(active) {"
+        "  border-color: rgb(86,131,224);"
+        "  border-width: 2px;"
+        "  border-style: solid none none none;"
+        "}"
+        "treeview.view:drop(active).after {"
+        "  border-style: none none solid none;"
+        "}");
     {
         /* Each column gets a data func painting the alternating row tint.  */
         GtkCellRenderer *r1 = gtk_cell_renderer_text_new();
@@ -3914,20 +3889,20 @@ on_library_window_create(OnApp *app)
             sort_by_title, NULL, NULL);
         gtk_tree_sortable_set_sort_func(
             GTK_TREE_SORTABLE(lw->notes_store), NL_UPDATED,
-            sort_by_updated, NULL, NULL);
+            sort_by_time, GINT_TO_POINTER(NL_UPDATED), NULL);
         gtk_tree_sortable_set_sort_func(
             GTK_TREE_SORTABLE(lw->notes_store), NL_PATH,
             sort_by_path, NULL, NULL);
         gtk_tree_sortable_set_sort_func(
             GTK_TREE_SORTABLE(lw->notes_store), NL_CREATED_RAW,
-            sort_by_created, NULL, NULL);
+            sort_by_time, GINT_TO_POINTER(NL_CREATED_RAW), NULL);
         gtk_tree_view_column_set_sort_column_id(c1, NL_TITLE);
         gtk_tree_view_column_set_sort_column_id(cp, NL_PATH);
         gtk_tree_view_column_set_sort_column_id(c2, NL_UPDATED);
         gtk_tree_view_column_set_sort_column_id(cc, NL_CREATED_RAW);
 
         /* Default sort: Modified with the most recent on top
-         * (sort_by_updated is deliberately inverted, so ASCENDING =
+         * (sort_by_time is deliberately inverted, so ASCENDING =
          * newest first).  While any sort is active the list store
          * refuses in-list row drops, so manual drag-reordering of notes
          * is off in this mode — moves to folders are unaffected.          */
@@ -3940,7 +3915,7 @@ on_library_window_create(OnApp *app)
          * (applied below once all columns exist).  Each column carries
          * its renderer so autofit can move the ellipsis around.           */
         struct { GtkTreeViewColumn *col; GtkCellRenderer *cell;
-                 const gchar *key; } COLS[] = {
+                 const gchar *key; } COLS[N_LIST_COLUMNS] = {
             { c1, r1, "title" }, { cp, rp, "path" }, { c2, r2, "modified" },
             { cc, rc, "created" },
         };
@@ -3958,9 +3933,7 @@ on_library_window_create(OnApp *app)
     list_columns_apply(lw);          /* saved order + visibility            */
     {
         /* Autofit is the default; only an explicit "0" turns it off.       */
-        gchar *v = on_app_config_get("list_autofit");
-        lw->list_autofit = g_strcmp0(v, "0") != 0;
-        g_free(v);
+        lw->list_autofit = on_app_config_get_bool("list_autofit", TRUE);
         if (lw->list_autofit)
             list_autofit_apply(lw);
     }
@@ -4086,20 +4059,8 @@ on_library_window_create(OnApp *app)
                      FALSE, FALSE, 0);
 
     /* Both labels a step smaller than the UI font.                          */
-    {
-        GtkCssProvider *css = gtk_css_provider_new();
-        gtk_css_provider_load_from_data(css, "label { font-size: 85%; }",
-                                        -1, NULL);
-        gtk_style_context_add_provider(
-            gtk_widget_get_style_context(lw->status_path),
-            GTK_STYLE_PROVIDER(css),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        gtk_style_context_add_provider(
-            gtk_widget_get_style_context(lw->status_event),
-            GTK_STYLE_PROVIDER(css),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(css);
-    }
+    on_app_widget_add_css(lw->status_path,  "label { font-size: 85%; }");
+    on_app_widget_add_css(lw->status_event, "label { font-size: 85%; }");
 
     /* --- assemble -----------------------------------------------------------*/
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
@@ -4126,8 +4087,7 @@ on_library_window_create(OnApp *app)
     gtk_container_add(GTK_CONTAINER(lw->window), vbox);
 
     /* --- initial population -------------------------------------------------*/
-    refresh_sidebar(lw);
-    refresh_notes(lw);
+    refresh_all(lw);
     on_app_status(app, "DB at %s loaded", app->db->path);
 
     gtk_widget_show_all(lw->window);

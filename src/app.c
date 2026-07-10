@@ -48,6 +48,58 @@ on_app_location_text(OnApp *app, const gchar *location)
                            location);
 }
 
+void
+on_app_notice(GtkWindow *parent, GtkMessageType type,
+              const gchar *title, const gchar *fmt, ...)
+{
+    va_list args;                    /* printf-style arguments              */
+    va_start(args, fmt);
+    gchar *message = g_strdup_vprintf(fmt, args);
+    va_end(args);
+
+    GtkWidget *dialog = gtk_message_dialog_new(
+        parent, GTK_DIALOG_MODAL, type, GTK_BUTTONS_OK, "%s", message);
+    if (title != NULL)
+        gtk_window_set_title(GTK_WINDOW(dialog), title);
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    g_free(message);
+}
+
+gchar *
+on_app_pick_path(GtkWindow *parent, const gchar *title,
+                 GtkFileChooserAction action, const gchar *accept_label,
+                 const gchar *filter_name, const gchar *filter_pattern)
+{
+    GtkWidget *chooser = gtk_file_chooser_dialog_new(
+        title, parent, action,
+        "_Cancel",    GTK_RESPONSE_CANCEL,
+        accept_label, GTK_RESPONSE_ACCEPT,
+        NULL);
+    if (filter_name != NULL) {
+        GtkFileFilter *filter = gtk_file_filter_new();
+        gtk_file_filter_set_name(filter, filter_name);
+        gtk_file_filter_add_pattern(filter, filter_pattern);
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), filter);
+    }
+    gchar *path = NULL;              /* the selection, NULL if cancelled    */
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT)
+        path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
+    gtk_widget_destroy(chooser);
+    return path;
+}
+
+void
+on_app_widget_add_css(GtkWidget *widget, const gchar *css_text)
+{
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(css, css_text, -1, NULL);
+    gtk_style_context_add_provider(gtk_widget_get_style_context(widget),
+                                   GTK_STYLE_PROVIDER(css),
+                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+}
+
 /* ---------------------------------------------------------------------------
  * exe_dir_from_argv0() — the directory containing the executable; when
  * launched via a bare name from PATH there is no directory part, so fall
@@ -360,6 +412,15 @@ on_app_config_get(const gchar *key)
     return value;
 }
 
+gboolean
+on_app_config_get_bool(const gchar *key, gboolean def)
+{
+    gchar *v = on_app_config_get(key);
+    gboolean r = (v == NULL) ? def : g_strcmp0(v, "0") != 0;
+    g_free(v);
+    return r;
+}
+
 void
 on_app_config_set(const gchar *key, const gchar *value)
 {
@@ -398,9 +459,8 @@ config_save_db_dir(const gchar *dir)
 void
 on_app_apply_touch_assist(OnApp *app)
 {
-    gchar *v = on_app_config_get("touch_assist");
-    gboolean assist = g_strcmp0(v, "1") == 0;  /* default: disabled        */
-    g_free(v);
+    gboolean assist =                /* default: disabled                   */
+        on_app_config_get_bool("touch_assist", FALSE);
 
     if (!assist && app->touch_css == NULL) {
         GtkCssProvider *css = gtk_css_provider_new();
@@ -481,7 +541,6 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
     gchar *target;                   /* path of the db at the new home      */
     if (new_dir != NULL) {
         g_mkdir_with_parents(new_dir, 0755);
-        on_db_migrate_legacy_name(new_dir);  /* pre-1.4 name: notes.db      */
         target = g_build_filename(new_dir, ON_DB_FILENAME, NULL);
     } else {
         target = on_db_default_path();
@@ -544,14 +603,11 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
         /* Fall back to the previous database so the app stays usable.      */
         g_warning("config: cannot use %s; reverting to %s",
                   target, old_path);
-        GtkWidget *msg = gtk_message_dialog_new(
-            app->library_window != NULL
-                ? GTK_WINDOW(app->library_window) : NULL,
-            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            "Could not open a database at that location.\n"
-            "The previous database is still in use.");
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
+        on_app_notice(app->library_window != NULL
+                          ? GTK_WINDOW(app->library_window) : NULL,
+                      GTK_MESSAGE_ERROR, NULL,
+                      "Could not open a database at that location.\n"
+                      "The previous database is still in use.");
         app->db = on_db_open(old_path);
     } else {
         /* Delete the original file: the data now lives at the new path.   */

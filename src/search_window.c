@@ -196,20 +196,15 @@ note_plain_text(OnDatabase *db, gint64 note_id)
 
 /* ---------------------------------------------------------------------------
  * note_full_path() — build the "/Folder/Sub/Title" display path of one
- * result.  Folder paths are memoized in `cache` (gint64 folder id →
- * owned path string) since a result set typically clusters in a handful
- * of folders.  Returns a newly allocated string.
+ * result from the pre-fetched folder-path map (one query for the whole
+ * search, never per-row — see on_db_folder_path_map).  Returns a newly
+ * allocated string.
  * ------------------------------------------------------------------------- */
 static gchar *
-note_full_path(OnDatabase *db, OnNoteMeta *m, GHashTable *cache)
+note_full_path(OnNoteMeta *m, GHashTable *paths)
 {
-    gpointer key = (gpointer)(gintptr)m->folder_id;
-    gchar *fpath = g_hash_table_lookup(cache, key);
-    if (fpath == NULL) {
-        fpath = on_db_folder_path(db, m->folder_id);
-        g_hash_table_insert(cache, key, fpath);
-    }
-    return g_strdup_printf("%s/%s", fpath, m->title);
+    const gchar *fpath = g_hash_table_lookup(paths, &m->folder_id);
+    return g_strdup_printf("%s/%s", fpath != NULL ? fpath : "", m->title);
 }
 
 /* ---------------------------------------------------------------------------
@@ -301,9 +296,8 @@ search_worker(gpointer user_data)
     else
         notes = on_db_note_list(db, job->scope_id);
 
-    /* Memoized folder-id → path strings for the result rows.               */
-    GHashTable *paths = g_hash_table_new_full(g_direct_hash, g_direct_equal,
-                                              NULL, g_free);
+    /* Folder-id → path strings, all fetched in one query.                  */
+    GHashTable *paths = on_db_folder_path_map(db);
 
     /* All cached note bodies in one query (instead of one SELECT per
      * candidate); the rare pre-column NULL rows fall back below.  The
@@ -337,7 +331,7 @@ search_worker(gpointer user_data)
         GDateTime *dt = g_date_time_new_from_unix_local(m->updated_at);
         SearchHit *h = g_new0(SearchHit, 1);
         h->id   = m->id;
-        h->path = note_full_path(db, m, paths);
+        h->path = note_full_path(m, paths);
         h->when = g_date_time_format(dt, "%b %e, %Y %H:%M");
         g_date_time_unref(dt);
         g_ptr_array_add(job->hits, h);
@@ -423,21 +417,6 @@ run_search(OnSearch *sw)
     gtk_widget_show(sw->spinner);
     gtk_spinner_start(GTK_SPINNER(sw->spinner));
     g_thread_unref(g_thread_new("on-search", search_worker, job));
-}
-
-/* on_search_clicked() / on_entry_activate() — both trigger the search.      */
-static void
-on_search_clicked(GtkButton *btn, gpointer user_data)
-{
-    (void)btn;
-    run_search((OnSearch *)user_data);
-}
-
-static void
-on_entry_activate(GtkEntry *entry, gpointer user_data)
-{
-    (void)entry;
-    run_search((OnSearch *)user_data);
 }
 
 /* on_result_activated() — double-click/Enter on a result opens the note.    */
@@ -534,12 +513,14 @@ on_search_window_open(OnApp *app, gboolean scope_to_sel)
     sw->entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(sw->entry),
                                    "Search titles and note text\xe2\x80\xa6");
-    g_signal_connect(sw->entry, "activate",
-                     G_CALLBACK(on_entry_activate), sw);
+    /* Both triggers run the search; swapped-connect passes `sw` as the
+     * handler's (only used) argument, so no wrapper callbacks needed.      */
+    g_signal_connect_swapped(sw->entry, "activate",
+                             G_CALLBACK(run_search), sw);
     gtk_box_pack_start(GTK_BOX(query_row), sw->entry, TRUE, TRUE, 0);
 
     GtkWidget *btn = gtk_button_new_with_label("Search");
-    g_signal_connect(btn, "clicked", G_CALLBACK(on_search_clicked), sw);
+    g_signal_connect_swapped(btn, "clicked", G_CALLBACK(run_search), sw);
     gtk_box_pack_start(GTK_BOX(query_row), btn, FALSE, FALSE, 0);
 
     /* Spinner shown while a background search runs (hidden when idle).     */

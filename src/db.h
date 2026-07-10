@@ -93,15 +93,8 @@ typedef struct {
 
 /* --------------------------- lifecycle ---------------------------------- */
 
-/* The database filename inside its directory (default or configured).
- * Pre-1.4 builds used "notes.db" — on_db_migrate_legacy_name() renames
- * such a file in place, so the old name never needs handling elsewhere.    */
+/* The database filename inside its directory (default or configured).      */
 #define ON_DB_FILENAME "blue_notes.db"
-
-/* Rename a legacy "notes.db" in `dir` (NULL = the default data directory)
- * to ON_DB_FILENAME, if the directory has the old file but not the new.
- * Call before testing for / opening the database in any directory.         */
-void on_db_migrate_legacy_name(const gchar *dir);
 
 /* The default database path (~/.local/share/blue_notes/blue_notes.db),
  * creating the directory if needed. Returns a new string; g_free() it.     */
@@ -165,23 +158,15 @@ void on_db_folder_list_free(GList *folders);
  * Returns the new note's id, or 0 on failure.                               */
 gint64 on_db_note_create(OnDatabase *db, gint64 folder_id);
 
-/* Permanently delete note `id`. Returns TRUE on success.                    */
-gboolean on_db_note_delete(OnDatabase *db, gint64 id);
-
 /* Permanently delete `n` notes in ONE transaction, pruning orphaned tags
- * once at the end (on_db_note_delete does both per note — this is the
- * bulk variant for multi-selection deletes). Returns TRUE on success.       */
+ * once at the end. Returns TRUE on success.                                 */
 gboolean on_db_notes_delete(OnDatabase *db, const gint64 *ids, gsize n);
 
-/* Move note `id` into folder `folder_id` (0 = top level), appending it at
- * the end of that folder. Returns TRUE on success.                          */
-gboolean on_db_note_move(OnDatabase *db, gint64 id, gint64 folder_id);
-
-/* Move `n` notes into folder `folder_id` in ONE transaction (per-note
- * moves fsync per call — a big multi-selection drop froze the GUI),
- * appended in array order.  Like on_db_note_move, clears each note's
- * trashed flag (drag out of Trash = restore).  Returns TRUE if every
- * move succeeded (all-or-nothing: failure rolls the batch back).            */
+/* Move `n` notes into folder `folder_id` (0 = top level) in ONE
+ * transaction (per-note moves would fsync per call — a big
+ * multi-selection drop froze the GUI), appended in array order.  Clears
+ * each note's trashed flag (drag out of Trash = restore).  Returns TRUE
+ * if every move succeeded (all-or-nothing: failure rolls the batch back).   */
 gboolean on_db_notes_move(OnDatabase *db, const gint64 *note_ids, gsize n,
                           gint64 folder_id);
 
@@ -338,12 +323,6 @@ gboolean on_db_trash_empty(OnDatabase *db);
  * count shown on the "All Notes" sidebar row.                               */
 gint on_db_note_count_visible(OnDatabase *db);
 
-/* Number of notes directly inside folder `folder_id` (0 = top level).      */
-gint on_db_note_count_for_folder(OnDatabase *db, gint64 folder_id);
-
-/* Number of notes labeled with tag `tag_id`.                               */
-gint on_db_note_count_for_tag(OnDatabase *db, gint64 tag_id);
-
 /* Total row counts across the whole database (any out-param may be NULL). */
 void on_db_totals(OnDatabase *db, gint *notes, gint *folders, gint *tags);
 
@@ -363,15 +342,6 @@ GHashTable *on_db_note_body_map(OnDatabase *db);
 
 /* Per-tag note counts in one query; same shape as above.                    */
 GHashTable *on_db_tag_count_map(OnDatabase *db);
-
-/* ---------------------------- settings ---------------------------------- */
-
-/* Read persistent setting `key`. Returns a newly allocated value string
- * (g_free() it), or NULL if the key was never set.                         */
-gchar *on_db_setting_get(OnDatabase *db, const gchar *key);
-
-/* Remove persistent setting `key`. Returns TRUE on success.                */
-gboolean on_db_setting_delete(OnDatabase *db, const gchar *key);
 
 /* ---------------------------- utilities --------------------------------- */
 

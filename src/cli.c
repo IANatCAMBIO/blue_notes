@@ -42,7 +42,6 @@ static OnDatabase *
 cli_open_db(void)
 {
     gchar *db_dir = on_app_config_load_db_dir();
-    on_db_migrate_legacy_name(db_dir);   /* pre-1.4 name: notes.db          */
     gchar *path = (db_dir != NULL)
                   ? g_build_filename(db_dir, ON_DB_FILENAME, NULL)
                   : NULL;
@@ -100,18 +99,38 @@ on_cli_resolve_folder_path(OnDatabase *db, const gchar *path, gboolean create,
 }
 
 /* ---------------------------------------------------------------------------
+ * note_from_arg() — parse a note-id argument and fetch its metadata.
+ *   db  — open database.
+ *   arg — the id string as typed on the command line.
+ * Returns an OnNoteMeta* (free with on_db_note_meta_free), or NULL after
+ * printing "error: no such note: <arg>" to stderr when the argument is
+ * not a positive number or names no note.
+ * ------------------------------------------------------------------------- */
+static OnNoteMeta *
+note_from_arg(OnDatabase *db, const gchar *arg)
+{
+    gint64 id = g_ascii_strtoll(arg, NULL, 10);
+    OnNoteMeta *meta = (id > 0) ? on_db_note_get(db, id) : NULL;
+    if (meta == NULL)
+        fprintf(stderr, "error: no such note: %s\n", arg);
+    return meta;
+}
+
+/* ---------------------------------------------------------------------------
  * cmd_list_tags() — one tag per line: "name<TAB>note-count".
  * ------------------------------------------------------------------------- */
 static int
 cmd_list_tags(OnDatabase *db)
 {
+    GHashTable *counts = on_db_tag_count_map(db);   /* tag id → note count  */
     GList *tags = on_db_tag_list(db);
     for (GList *l = tags; l != NULL; l = l->next) {
         OnTag *t = l->data;
         printf("%s\t%d\n", t->name,
-               on_db_note_count_for_tag(db, t->id));
+               GPOINTER_TO_INT(g_hash_table_lookup(counts, &t->id)));
     }
     on_db_tag_list_free(tags);
+    g_hash_table_destroy(counts);
     return 0;
 }
 
@@ -137,16 +156,19 @@ cmd_delete_tag(OnDatabase *db, const gchar *name)
 
 /* ---------------------------------------------------------------------------
  * print_folder_tree() — recursive indented listing with note counts.
+ *   counts — folder id → note count map (on_db_note_count_map), fetched
+ *            once by cmd_list_folders; a missing key means zero.
  * ------------------------------------------------------------------------- */
 static void
-print_folder_tree(OnDatabase *db, gint64 parent, gint depth)
+print_folder_tree(OnDatabase *db, GHashTable *counts, gint64 parent,
+                  gint depth)
 {
     GList *folders = on_db_folder_list(db, parent);
     for (GList *l = folders; l != NULL; l = l->next) {
         OnFolder *f = l->data;
         printf("%*s%s\t%d\n", depth * 2, "", f->name,
-               on_db_note_count_for_folder(db, f->id));
-        print_folder_tree(db, f->id, depth + 1);
+               GPOINTER_TO_INT(g_hash_table_lookup(counts, &f->id)));
+        print_folder_tree(db, counts, f->id, depth + 1);
     }
     on_db_folder_list_free(folders);
 }
@@ -154,7 +176,9 @@ print_folder_tree(OnDatabase *db, gint64 parent, gint depth)
 static int
 cmd_list_folders(OnDatabase *db)
 {
-    print_folder_tree(db, 0, 0);
+    GHashTable *counts = on_db_note_count_map(db);  /* one query, not per row */
+    print_folder_tree(db, counts, 0, 0);
+    g_hash_table_destroy(counts);
     return 0;
 }
 
@@ -305,12 +329,10 @@ cmd_new_note(OnDatabase *db, const gchar *folder_path, const gchar *content)
 static int
 cmd_add_image(OnDatabase *db, const gchar *id_str, const gchar *file)
 {
-    gint64 id = g_ascii_strtoll(id_str, NULL, 10);
-    OnNoteMeta *meta = (id > 0) ? on_db_note_get(db, id) : NULL;
-    if (meta == NULL) {
-        fprintf(stderr, "error: no such note: %s\n", id_str);
+    OnNoteMeta *meta = note_from_arg(db, id_str);
+    if (meta == NULL)
         return 2;
-    }
+    gint64 id = meta->id;            /* validated note id                   */
 
     if (!gtk_init_check(NULL, NULL)) {
         fprintf(stderr, "error: GTK could not initialize (needed to "
@@ -370,15 +392,14 @@ cmd_delete_notes(OnDatabase *db, char **ids, int n)
 {
     int rc = 0;                      /* worst exit code seen                */
     for (int i = 0; i < n; i++) {
-        gint64 id = g_ascii_strtoll(ids[i], NULL, 10);
-        OnNoteMeta *meta = (id > 0) ? on_db_note_get(db, id) : NULL;
+        OnNoteMeta *meta = note_from_arg(db, ids[i]);
         if (meta == NULL) {
-            fprintf(stderr, "error: no such note: %s\n", ids[i]);
             rc = 2;
             continue;
         }
-        on_db_note_delete(db, id);
-        printf("deleted note %" G_GINT64_FORMAT "\t%s\n", id, meta->title);
+        on_db_notes_delete(db, &meta->id, 1);
+        printf("deleted note %" G_GINT64_FORMAT "\t%s\n",
+               meta->id, meta->title);
         on_db_note_meta_free(meta);
     }
     return rc;
@@ -396,16 +417,14 @@ cmd_move_notes(OnDatabase *db, char **ids, int n, const gchar *dest)
 
     int rc = 0;                      /* worst exit code seen                */
     for (int i = 0; i < n; i++) {
-        gint64 id = g_ascii_strtoll(ids[i], NULL, 10);
-        OnNoteMeta *meta = (id > 0) ? on_db_note_get(db, id) : NULL;
+        OnNoteMeta *meta = note_from_arg(db, ids[i]);
         if (meta == NULL) {
-            fprintf(stderr, "error: no such note: %s\n", ids[i]);
             rc = 2;
             continue;
         }
-        on_db_note_move(db, id, folder);
+        on_db_notes_move(db, &meta->id, 1, folder);
         printf("moved note %" G_GINT64_FORMAT "\t%s -> %s\n",
-               id, meta->title, *dest ? dest : "/");
+               meta->id, meta->title, *dest ? dest : "/");
         on_db_note_meta_free(meta);
     }
     return rc;
@@ -417,12 +436,9 @@ cmd_move_notes(OnDatabase *db, char **ids, int n, const gchar *dest)
 static int
 cmd_set_modified(OnDatabase *db, const gchar *id_str, const gchar *ts_str)
 {
-    gint64 id = g_ascii_strtoll(id_str, NULL, 10);
-    OnNoteMeta *meta = (id > 0) ? on_db_note_get(db, id) : NULL;
-    if (meta == NULL) {
-        fprintf(stderr, "error: no such note: %s\n", id_str);
+    OnNoteMeta *meta = note_from_arg(db, id_str);
+    if (meta == NULL)
         return 2;
-    }
 
     gchar *endp = NULL;              /* end of the parsed number            */
     gint64 ts = g_ascii_strtoll(ts_str, &endp, 10);
@@ -432,9 +448,9 @@ cmd_set_modified(OnDatabase *db, const gchar *id_str, const gchar *ts_str)
         return 2;
     }
 
-    on_db_note_set_updated_at(db, id, ts);
+    on_db_note_set_updated_at(db, meta->id, ts);
     printf("set modified of note %" G_GINT64_FORMAT "\t%s\n",
-           id, meta->title);
+           meta->id, meta->title);
     on_db_note_meta_free(meta);
     return 0;
 }
