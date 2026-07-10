@@ -172,6 +172,9 @@ typedef struct {
                                             collapses to it on release     */
     gint          populating;
     GHashTable   *thumb_cache;
+    GQueue        thumb_pending;         /* ThumbJob* rows awaiting a
+                                            render by thumb_fill_idle       */
+    guint         thumb_idle;            /* the idle source doing it        */
     gint          shown_kind;
     gint64        shown_id;
     GtkWidget    *sidebar_box;
@@ -206,6 +209,49 @@ thumb_entry_free(gpointer data)
     if (e->surface != NULL)
         cairo_surface_destroy(e->surface);
     g_free(e);
+}
+
+/* ---------------------------------------------------------------------------
+ * ThumbJob — one grid row whose thumbnail still has to be rendered.
+ * refresh_notes() only sets thumbnails it finds fresh in the cache; every
+ * stale/missing one is queued as a job and rendered by thumb_fill_idle()
+ * in small time slices, so a cold cache (first grid showing of a big
+ * folder or All Notes) can't freeze the GUI for the whole render — that
+ * once hung the window for ~40 s on a 1200-note database.
+ *
+ * Fields:
+ *   row        — where to deliver the surface (owned; safely goes
+ *                invalid if the model is rebuilt or the row removed).
+ *   id         — the note to render.
+ *   updated_at — its updated_at when the row was populated (cache key).
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    GtkTreeRowReference *row;
+    gint64               id;
+    gint64               updated_at;
+} ThumbJob;
+
+/* thumb_job_free() — release one pending-thumbnail job.                     */
+static void
+thumb_job_free(ThumbJob *job)
+{
+    gtk_tree_row_reference_free(job->row);
+    g_free(job);
+}
+
+/* thumb_pending_clear() — drop every queued job and stop the fill idle;
+ * run before any notes-model rebuild (the rows are about to vanish) and
+ * at window teardown.                                                       */
+static void
+thumb_pending_clear(OnLibrary *lw)
+{
+    ThumbJob *job;                   /* one drained queue entry             */
+    while ((job = g_queue_pop_head(&lw->thumb_pending)) != NULL)
+        thumb_job_free(job);
+    if (lw->thumb_idle != 0) {
+        g_source_remove(lw->thumb_idle);
+        lw->thumb_idle = 0;
+    }
 }
 
 /* Forward declarations.                                                     */
@@ -427,6 +473,24 @@ refresh_sidebar(OnLibrary *lw)
     GHashTable *note_counts = on_db_note_count_map(lw->app->db);
     GHashTable *tag_counts  = on_db_tag_count_map(lw->app->db);
 
+    /* "Pinned Notes" on top — a live view, not a real location; notes
+     * stay in their folders.                                               */
+    gint n_pinned = on_db_note_count_pinned(lw->app->db);
+    if (n_pinned > 0) {
+        gchar *label = lw->app->sidebar_counts
+            ? g_strdup_printf("Pinned Notes (%d)", n_pinned)
+            : g_strdup("Pinned Notes");
+        GtkTreeIter iter;
+        gtk_tree_store_append(lw->sidebar_store, &iter, NULL);
+        gtk_tree_store_set(lw->sidebar_store, &iter,
+                           SB_KIND, SB_KIND_PINNED,
+                           SB_ID,   (gint64)0,
+                           SB_NAME, label,
+                           SB_RAW,  "Pinned Notes",
+                           -1);
+        g_free(label);
+    }
+
     /* "All Notes" — a live view of every note outside the Trash.           */
     gchar *all_label = lw->app->sidebar_counts
         ? g_strdup_printf("All Notes (%d)",
@@ -489,25 +553,7 @@ refresh_sidebar(OnLibrary *lw)
     }
     on_db_tag_list_free(tags);
 
-    /* "Pinned Notes" below folders and tags — a live view, not a real
-     * location; notes stay in their folders.                               */
-    gint n_pinned = on_db_note_count_pinned(lw->app->db);
-    if (n_pinned > 0) {
-        gchar *label = lw->app->sidebar_counts
-            ? g_strdup_printf("Pinned Notes (%d)", n_pinned)
-            : g_strdup("Pinned Notes");
-        GtkTreeIter iter;
-        gtk_tree_store_append(lw->sidebar_store, &iter, NULL);
-        gtk_tree_store_set(lw->sidebar_store, &iter,
-                           SB_KIND, SB_KIND_PINNED,
-                           SB_ID,   (gint64)0,
-                           SB_NAME, label,
-                           SB_RAW,  "Pinned Notes",
-                           -1);
-        g_free(label);
-    }
-
-    /* "Action Items" under Pinned Notes — every '!' line across the
+    /* "Action Items" below folders and tags — every '!' line across the
      * visible notes (mirrored into the action_items table by saves).
      * Shown only while any exist; the optional count is the OPEN ones.     */
     gint n_actions = 0, n_open = 0;  /* all items / unchecked items         */
@@ -633,15 +679,23 @@ refresh_sidebar(OnLibrary *lw)
     g_hash_table_destroy(ectx.expanded);
 
     if (!restored) {
-        /* The first row is the "All Notes" section — the state must match
-         * the row the fallback highlights.                                 */
-        lw->sel_kind = SB_KIND_ALL;
-        lw->sel_id   = 0;
-        g_free(lw->sel_name);
-        lw->sel_name = g_strdup("All Notes");
+        /* Fall back to the first row (Pinned Notes when any are pinned,
+         * All Notes otherwise) — the state must match the row the
+         * fallback highlights, so read it from the model.                  */
         if (gtk_tree_model_get_iter_first(
-                GTK_TREE_MODEL(lw->sidebar_store), &iter))
+                GTK_TREE_MODEL(lw->sidebar_store), &iter)) {
+            gint   kind;             /* the first row's identity            */
+            gint64 id;
+            gchar *raw = NULL;
+            gtk_tree_model_get(GTK_TREE_MODEL(lw->sidebar_store), &iter,
+                               SB_KIND, &kind, SB_ID, &id, SB_RAW, &raw,
+                               -1);
+            lw->sel_kind = kind;
+            lw->sel_id   = id;
+            g_free(lw->sel_name);
+            lw->sel_name = raw;      /* ownership transferred               */
             gtk_tree_selection_select_iter(sel, &iter);
+        }
     }
     lw->populating--;
 
@@ -668,17 +722,17 @@ refresh_sidebar(OnLibrary *lw)
  * HiDPI/Retina displays.  The title is NOT drawn here — the grid shows it
  * as a real text label under the card.
  *   lw — the library window (for the database and scale factor).
- *   m  — the note to render.
+ *   id — the note to render.
  * Returns a new cairo surface reference.
  * ------------------------------------------------------------------------- */
 static cairo_surface_t *
-render_note_thumb(OnLibrary *lw, OnNoteMeta *m)
+render_note_thumb(OnLibrary *lw, gint64 id)
 {
     /* Load the note into an offscreen buffer.                              */
     GtkTextBuffer *buf = gtk_text_buffer_new(NULL);
     on_buffer_ensure_tags(buf);
     gsize   blob_len = 0;            /* stored blob size                    */
-    guint8 *blob = on_db_note_load(lw->app->db, m->id, &blob_len);
+    guint8 *blob = on_db_note_load(lw->app->db, id, &blob_len);
     if (blob != NULL) {
         /* Cap image decode at 512px: the card preview is at most ~256
          * physical pixels wide, so full-resolution decode (potentially
@@ -788,21 +842,65 @@ render_note_thumb(OnLibrary *lw, OnNoteMeta *m)
  * Returns a borrowed reference owned by the cache.
  * ------------------------------------------------------------------------- */
 static cairo_surface_t *
-get_note_thumb(OnLibrary *lw, OnNoteMeta *m)
+get_note_thumb(OnLibrary *lw, gint64 id, gint64 updated_at)
 {
-    ThumbEntry *e = g_hash_table_lookup(lw->thumb_cache, &m->id);
-    if (e != NULL && e->updated_at == m->updated_at)
+    ThumbEntry *e = g_hash_table_lookup(lw->thumb_cache, &id);
+    if (e != NULL && e->updated_at == updated_at)
         return e->surface;
 
-    cairo_surface_t *thumb = render_note_thumb(lw, m);
+    cairo_surface_t *thumb = render_note_thumb(lw, id);
     e = g_new0(ThumbEntry, 1);
-    e->updated_at = m->updated_at;
+    e->updated_at = updated_at;
     e->surface    = thumb;
 
     gint64 *key = g_new(gint64, 1);
-    *key = m->id;
+    *key = id;
     g_hash_table_replace(lw->thumb_cache, key, e);
     return thumb;
+}
+
+/* How long one thumb_fill_idle() slice may run before yielding back to
+ * the main loop (µs).  Big enough to batch several typical cards, small
+ * enough to keep scrolling and typing smooth while a cold grid fills.       */
+#define THUMB_IDLE_BUDGET_US (40 * 1000)
+
+/* ---------------------------------------------------------------------------
+ * thumb_fill_idle() — render queued thumbnails a time slice at a time and
+ * deliver each into its grid row.  Jobs whose row vanished (model rebuilt
+ * mid-fill) are simply dropped — the rebuild queued fresh jobs.
+ * ------------------------------------------------------------------------- */
+static gboolean
+thumb_fill_idle(gpointer user_data)
+{
+    OnLibrary *lw = user_data;       /* owning library window               */
+    gint64 slice_start = g_get_monotonic_time();
+
+    while (!g_queue_is_empty(&lw->thumb_pending)) {
+        ThumbJob *job = g_queue_pop_head(&lw->thumb_pending);
+        GtkTreePath *path = gtk_tree_row_reference_valid(job->row)
+            ? gtk_tree_row_reference_get_path(job->row)
+            : NULL;
+        if (path != NULL) {
+            cairo_surface_t *thumb =     /* borrowed from the cache         */
+                get_note_thumb(lw, job->id, job->updated_at);
+            GtkTreeIter iter;            /* the row to update               */
+            if (gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->notes_store),
+                                        &iter, path))
+                gtk_list_store_set(lw->notes_store, &iter,
+                                   NL_THUMB, thumb, -1);
+            gtk_tree_path_free(path);
+        }
+        thumb_job_free(job);
+
+        if (g_get_monotonic_time() - slice_start > THUMB_IDLE_BUDGET_US)
+            break;                   /* yield; the idle re-runs             */
+    }
+
+    if (g_queue_is_empty(&lw->thumb_pending)) {
+        lw->thumb_idle = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
 }
 
 /* ---------------------------------------------------------------------------
@@ -867,6 +965,10 @@ refresh_actions(OnLibrary *lw)
 static void
 refresh_notes(OnLibrary *lw)
 {
+    /* Whatever happens below, the rows any queued thumbnail jobs point
+     * at are stale (or about to be cleared): drop them.                    */
+    thumb_pending_clear(lw);
+
     /* The Action Items selection swaps in its own view and model.          */
     if (lw->sel_kind == SB_KIND_ACTIONS) {
         refresh_actions(lw);
@@ -975,19 +1077,42 @@ refresh_notes(OnLibrary *lw)
             fit_cre_w = MAX(fit_cre_w, w);
         }
 
+        /* Thumbnails: only what the cache already has goes in right away
+         * — a stale entry still shows (better than a blank card) while
+         * thumb_fill_idle (queued below) renders the replacement.
+         * Rendering every stale/missing thumbnail here froze the GUI.      */
+        cairo_surface_t *thumb = NULL;   /* borrowed from the cache         */
+        gboolean thumb_todo = FALSE;     /* queue a render for this row?    */
+        if (want_thumbs) {
+            ThumbEntry *e = g_hash_table_lookup(lw->thumb_cache, &m->id);
+            if (e != NULL)
+                thumb = e->surface;
+            thumb_todo = e == NULL || e->updated_at != m->updated_at;
+        }
+
         GtkTreeIter iter;
         gtk_list_store_append(lw->notes_store, &iter);
         gtk_list_store_set(lw->notes_store, &iter,
                            NL_ID,       m->id,
                            NL_TITLE,    m->title,
                            NL_MODIFIED, when,
-                           NL_THUMB,    want_thumbs ? get_note_thumb(lw, m)
-                                                    : NULL,
+                           NL_THUMB,    thumb,
                            NL_UPDATED,  m->updated_at,
                            NL_PATH,     where,
                            NL_CREATED,  born,
                            NL_CREATED_RAW, m->created_at,
                            -1);
+        if (thumb_todo) {
+            GtkTreePath *path = gtk_tree_model_get_path(
+                GTK_TREE_MODEL(lw->notes_store), &iter);
+            ThumbJob *job = g_new0(ThumbJob, 1);
+            job->row = gtk_tree_row_reference_new(
+                GTK_TREE_MODEL(lw->notes_store), path);
+            job->id         = m->id;
+            job->updated_at = m->updated_at;
+            g_queue_push_tail(&lw->thumb_pending, job);
+            gtk_tree_path_free(path);
+        }
         g_free(where);
         g_free(when);
         g_free(born);
@@ -1003,6 +1128,10 @@ refresh_notes(OnLibrary *lw)
         g_object_unref(fit_lay);
     }
     lw->populating--;
+
+    /* Render the queued (stale/missing) thumbnails in idle time slices.    */
+    if (!g_queue_is_empty(&lw->thumb_pending) && lw->thumb_idle == 0)
+        lw->thumb_idle = g_idle_add(thumb_fill_idle, lw);
 
     lw->shown_kind = lw->sel_kind;
     lw->shown_id   = lw->sel_id;
@@ -3952,6 +4081,7 @@ library_free(gpointer data)
     OnLibrary *lw = data;
     if (lw->status_timeout != 0)
         g_source_remove(lw->status_timeout);
+    thumb_pending_clear(lw);
     g_hash_table_destroy(lw->thumb_cache);
     if (lw->notes_press_path != NULL)
         gtk_tree_path_free(lw->notes_press_path);

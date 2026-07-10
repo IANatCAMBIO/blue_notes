@@ -24,8 +24,9 @@ for the database schema and file formats see [Internals](Internals.md).
 - **Ctrl/Cmd+N** creates a note in the selected folder. The vinyl logo
   at the toolbar's right edge opens the About dialog (program info plus
   live database statistics).
-- **Action Items** — a sidebar section (below Pinned Notes, shown while
-  any exist) listing every `!` action item from all your notes, one per
+- **Action Items** — a sidebar section (below the folders and tags,
+  shown while any exist) listing every `!` action item from all your
+  notes, one per
   row: a checkbox, the item text, and its due date. Ticking the
   checkbox marks the item done — its line turns struck-through in the
   note itself (and vice versa: striking the line in the editor checks
@@ -80,7 +81,9 @@ header bars anywhere). The first line of the note becomes its title.
   Display Full Size / as Thumbnail.
 - **Tags** — type `#` and keep typing; a popup suggests existing tags
   (arrows + Enter to pick), space ends the tag, Escape cancels. Tags
-  appear in the sidebar and act like folders.
+  appear in the sidebar and act like folders. Text inside a code block
+  is never a tag: `#` there is comment/preprocessor syntax, and tagged
+  text formatted as (or pasted into) a code block loses its tag.
 - **Action items** — start a line with `!` and the rest of the line
   becomes a follow-up action item, shown in blue (handy for meeting
   notes). End the line with `due` and a date — `! call Bob due

@@ -223,6 +223,8 @@ static void     insert_checkbox_at(OnEditor *ed, gint at);
 static void     editor_search_move(OnEditor *ed,
                                    gboolean forward);
 static void     undo_notify_change(OnEditor *ed);
+static gboolean strip_tags_in_code_blocks(OnEditor *ed, gint start_off,
+                                          gint end_off);
 
 /* ===========================================================================
  * small helpers
@@ -537,6 +539,14 @@ apply_paragraph_format(OnEditor *ed, guint32 flag)
     line_span(ed->buffer, last_line, &rls, &rle);
     action_retag_lines(ed, gtk_text_iter_get_offset(&rs),
                        gtk_text_iter_get_offset(&rle));
+
+    /* Text inside a code block is never a #tag: strip any tag spans the
+     * range carried into the block, and let the queued save drop their
+     * note_tags links.                                                     */
+    if (flag == ON_FMT_CODEBLOCK &&
+        strip_tags_in_code_blocks(ed, gtk_text_iter_get_offset(&rs),
+                                  gtk_text_iter_get_offset(&rle)))
+        ed->tags_modified = TRUE;
 
     editor_queue_autosave(ed);
     /* Code blocks may have appeared or vanished: refresh their buttons.
@@ -2264,6 +2274,55 @@ on_insert_date_clicked(GtkWidget *item, gpointer user_data)
  * =========================================================================== */
 
 /* ---------------------------------------------------------------------------
+ * strip_tags_in_code_blocks() — text inside a code block is never a #tag,
+ * but tag spans still land there: by formatting tagged text as a code
+ * block, or by pasting styled text into one.  Remove the ON_TAGNAME_TAG
+ * styling from every span on a code-block line within [start_off,
+ * end_off).
+ *   ed        — the editor.
+ *   start_off — first buffer offset of the range to scan.
+ *   end_off   — offset just past the range.
+ * Returns TRUE when at least one span was stripped — callers then mark
+ * the tag set modified so the next save rewrites note_tags.
+ * ------------------------------------------------------------------------- */
+static gboolean
+strip_tags_in_code_blocks(OnEditor *ed, gint start_off, gint end_off)
+{
+    GtkTextTag *tag = lookup_tag(ed->buffer, ON_TAGNAME_TAG);
+    if (tag == NULL)
+        return FALSE;
+
+    gboolean stripped = FALSE;       /* removed anything yet?               */
+    GtkTextIter it, limit;           /* walk position / range end           */
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &it, start_off);
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &limit, end_off);
+
+    /* A range boundary can fall mid-span (typing inside a styled tag):
+     * pull the walk back to that span's start so it is seen whole.         */
+    if (gtk_text_iter_has_tag(&it, tag) && !gtk_text_iter_starts_tag(&it, tag))
+        gtk_text_iter_backward_to_tag_toggle(&it, tag);
+
+    /* Jump span to span, as in on_buffer_collect_tags().                   */
+    while (gtk_text_iter_compare(&it, &limit) < 0) {
+        if (!gtk_text_iter_starts_tag(&it, tag)) {
+            if (!gtk_text_iter_forward_to_tag_toggle(&it, tag))
+                break;
+            continue;
+        }
+        GtkTextIter span_end = it;   /* end of this tag span                */
+        gtk_text_iter_forward_to_tag_toggle(&span_end, tag);
+        if (line_para_flags(ed->buffer, &it) & ON_FMT_CODEBLOCK) {
+            ed->internal_change++;
+            gtk_text_buffer_remove_tag(ed->buffer, tag, &it, &span_end);
+            ed->internal_change--;
+            stripped = TRUE;
+        }
+        it = span_end;
+    }
+    return stripped;
+}
+
+/* ---------------------------------------------------------------------------
  * tag_capture_span() — compute the span of the tag currently being typed:
  * from the '#' at ed->tag_start forward across word characters.
  *   ed    — the editor (capture must be active).
@@ -3247,6 +3306,13 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
         }
     }
 
+    /* --- job 1c: pasted text can carry #tag styling onto a code-block
+     * line (same-buffer paste keeps tags), and typing inside a span kept
+     * from before the no-tags-in-code-blocks rule extends it — text in a
+     * code block is never a tag, so strip the styling.                      */
+    if (strip_tags_in_code_blocks(ed, end_off - (gint)n_chars, end_off))
+        ed->tags_modified = TRUE;
+
     /* --- undo group caps: a linebreak closes the pending group at once,
      * and so does the UNDO_MAX_SENTENCES-th sentence ender, so one long
      * unbroken burst can't become a single giant undo step ---------------- */
@@ -3271,10 +3337,14 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
 
     /* --- jobs 2 & 3: tag capture ---------------------------------------- */
     if (ed->tag_start == NULL) {
-        /* Start capture on a freshly typed '#' at a word boundary.         */
+        /* Start capture on a freshly typed '#' at a word boundary — but
+         * never inside a code block, where '#' is comment/preprocessor
+         * syntax, not a tag.                                               */
         if (n_chars == 1 && text[0] == '#') {
             GtkTextIter hash;        /* position of the '#'                 */
             gtk_text_buffer_get_iter_at_offset(buffer, &hash, end_off - 1);
+            if (line_para_flags(buffer, &hash) & ON_FMT_CODEBLOCK)
+                return;
             GtkTextIter before = hash;
             gboolean at_boundary = !gtk_text_iter_backward_char(&before) ||
                 g_unichar_isspace(gtk_text_iter_get_char(&before));

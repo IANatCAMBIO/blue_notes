@@ -45,7 +45,7 @@ sees the new flags.
 | `src/app.[ch]` | Shared `OnApp` context: db handle, open-editors map, per-family toolbar styles, icon loading, toolbar registry + right-click style menu |
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, counts, ordering |
 | `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
-| `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
+| `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup (never inside code blocks — capture is suppressed there, and `strip_tags_in_code_blocks` removes tag spans carried in by code-block formatting or paste), image paste/context menu, floating code-block copy buttons, debounced autosave |
 | `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid (list: Title/Path/Modified/Created, all resizable + sortable, Path and Created hidden by default; Path fed by `on_db_folder_path_map`), notes sorted Modified-newest-first by default (in-list drag reorder is off while sorted — list stores refuse row drops), folder context menu has Sort Subfolders Alphabetically (one level, `on_db_folder_reorder`), DnD (notes→folder incl. multi-select; single folder rows re-nest INTO / reorder BEFORE-AFTER / trash / drag-restore via `on_db_folder_move`+`on_db_folder_reorder`; drag icons: folder.png, file.png for one note, documents.png for 2+), sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; selecting notes posts a transient "N files selected" event from both views' selection signals; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
@@ -181,7 +181,9 @@ sees the new flags.
   findable; export/CLI pass FALSE. CLI note/folder delete TRASHES by
   default (one bulk trash call for notes); `--permanent` deletes
   outright and `note restore` un-trashes — safe for agent use.
-  Sidebar: "All Notes" section on top (`SB_KIND_ALL`,
+  Sidebar: "Pinned Notes" on top (only while any are pinned; the
+  selection-restore fallback reads the FIRST row's kind from the model
+  rather than assuming All Notes), then "All Notes" (`SB_KIND_ALL`,
   newest-first), "Trash" section at the bottom only while non-empty
   (`SB_KIND_TRASH`, trashed folders as `SB_KIND_TRASH_FOLDER` children);
   in trash views the Delete paths turn permanent (with confirm) and the
@@ -388,7 +390,14 @@ sees the new flags.
 - Grid thumbnails render ONLY while grid view is visible (`want_thumbs`
   in refresh_notes; on_view_grid refreshes) — the thumb cache keys on
   updated_at, so without the gate the edited note re-rendered on every
-  autosave.
+  autosave.  And they render ASYNCHRONOUSLY: refresh_notes only sets
+  thumbnails found fresh in the cache; every stale/missing one is queued
+  as a ThumbJob (row reference + id + updated_at) and rendered by
+  `thumb_fill_idle` in 40 ms time slices.  Rendering them inline once
+  hung the GUI ~37 s (measured, 1266 notes / 617 MB): deleting a note's
+  last #tag pruned the orphaned tag, the sidebar selection on that tag
+  row fell back to All Notes, and the grid rendered every thumbnail —
+  every PNG in the DB decoded — in one synchronous pass.
 - Sidebar counts come from two GROUP BY maps (`on_db_note_count_map` /
   `on_db_tag_count_map`), not per-row COUNTs — per-query latency hurts
   on shared/network DBs.  The list view's Path column likewise reads
