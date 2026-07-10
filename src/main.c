@@ -184,10 +184,11 @@ startup_check_db_hash(OnApp *app, gboolean *verified)
     if (stored == NULL)
         return TRUE;    /* no prior hash — first run or feature just enabled  */
 
-    gchar *current = on_app_db_compute_hash(app->db->path);
-    gboolean changed = (current == NULL ||
-                        g_strcmp0(stored, current) != 0);
-    g_free(current);
+    /* Compare against the file as it was FOUND at startup (snapshotted in
+     * main() before on_db_open) — by now our own schema migrations and
+     * backfills may already have rewritten it legitimately.                 */
+    gboolean changed = (app->db_hash_at_open == NULL ||
+                        g_strcmp0(stored, app->db_hash_at_open) != 0);
     g_free(stored);
 
     if (!changed) {
@@ -383,6 +384,16 @@ main(int argc, char *argv[])
         g_free(expected);
     }
 
+    /* Snapshot the file's hash BEFORE opening it: opening runs schema
+     * migrations and backfills, all legitimate self-inflicted writes —
+     * the integrity check must compare the stored hash against the file
+     * as the LAST instance left it, or every upgrade that migrates the
+     * schema false-alarms as "changed since last access".                  */
+    gchar *hash_path = (db_path != NULL) ? g_strdup(db_path)
+                                         : on_db_default_path();
+    gchar *db_hash_at_open = on_app_db_compute_hash(hash_path);
+    g_free(hash_path);
+
     OnDatabase *db = on_db_open(db_path);
     if (db == NULL) {
         g_printerr("blue_notes: could not open the notes database at "
@@ -391,6 +402,7 @@ main(int argc, char *argv[])
                    db_path != NULL ? db_path : "the default location");
         g_free(db_path);
         g_free(db_dir);
+        g_free(db_hash_at_open);
         return 1;
     }
     g_free(db_path);
@@ -411,8 +423,10 @@ main(int argc, char *argv[])
         .toolbars             = { NULL, NULL },
         .icons_dir            = NULL,
         .db_dir               = NULL,
+        .db_hash_at_open      = NULL,
     };
     app.db_dir = db_dir;             /* ownership transferred               */
+    app.db_hash_at_open = db_hash_at_open;   /* ownership transferred       */
     for (gint k = 0; k < ON_TOOLBAR_N_KINDS; k++)
         app.toolbars[k] = g_ptr_array_new();
     on_app_load_toolbar_styles(&app);

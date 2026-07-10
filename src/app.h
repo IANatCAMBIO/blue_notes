@@ -114,6 +114,11 @@ typedef struct OnApp {
     gboolean         compact_editor_toolbar;
     gchar           *db_dir;
     gboolean         db_integrity_check;
+    gchar           *db_hash_at_open;  /* MD5 of the db FILE as found at
+                                        * startup, BEFORE on_db_open's
+                                        * migrations/backfills touched it —
+                                        * what the integrity check compares
+                                        * against (owned, may be NULL)       */
     gboolean         statusbar_db_path;
     gboolean         statusbar_note_id;
     gboolean         show_done_actions;

@@ -1524,6 +1524,20 @@ on_cli_run(int argc, char **argv)
     if (db == NULL)
         return 2;
     rc = on_cli_dispatch_db(db, argc, argv);
+    gboolean mutated = on_cli_command_mutates(argc, argv);
+    gchar *db_file = g_strdup(db->path);   /* survives the close            */
     on_db_close(db);
+
+    /* A headless mutation is a legitimate Blue Notes write: refresh the
+     * integrity snapshot so the next GUI launch doesn't warn that the
+     * database "changed since last access".  (When a GUI instance served
+     * the command over the socket, its own exit rewrites the hash.)         */
+    if (mutated && rc == 0) {
+        gchar *hash = on_app_db_compute_hash(db_file);
+        if (hash != NULL)
+            on_app_config_set("db_hash", hash);
+        g_free(hash);
+    }
+    g_free(db_file);
     return rc;
 }

@@ -99,7 +99,11 @@ sees the new flags.
   `code_line_numbers` (`1|0`), `native_menubar` (`1|0`),
   `db_integrity_check` (`1|0`, default 1 — hash-compare the DB file at
   startup, offering Open Anyway / Run Integrity Check when it changed;
-  `db_hash` is the stored snapshot, written at clean exit),
+  `db_hash` is the stored snapshot, written at clean GUI exit AND after
+  every successful headless CLI mutation.  The startup comparison uses
+  `app->db_hash_at_open`, hashed in main() BEFORE on_db_open — schema
+  migrations and backfills legitimately rewrite the file at open, so
+  hashing afterwards false-alarmed on every upgrading launch),
   `sidebar_counts` (`1|0`, default 0 — folder/tag counts in the
   sidebar), `first_line_h1` (`1|0`, code default 0, but
   blue_notes.ini.defaults seeds it to 1 — auto-style the first
