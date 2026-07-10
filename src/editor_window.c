@@ -35,6 +35,11 @@
 /* Milliseconds of idle time after the last edit before autosaving.         */
 #define AUTOSAVE_DELAY_MS 1200
 
+/* Default size of a new editor window (client area, excluding the
+ * titlebar), used when the ini carries no editor_win_w/editor_win_h.       */
+#define EDITOR_WIN_DEFAULT_W 640
+#define EDITOR_WIN_DEFAULT_H 509
+
 /* Maximum number of suggestions shown in the tag popup.                    */
 #define TAG_POPUP_MAX 8
 
@@ -3920,7 +3925,25 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
 
     /* --- window: a plain GtkWindow, standard titlebar (no HeaderBar) ---- */
     ed->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_default_size(GTK_WINDOW(ed->window), 720, 580);
+
+    /* Open at the configured default size (editor_win_w/editor_win_h in
+     * the ini, fixed — unlike the search window's, these are not written
+     * back on resize).                                                     */
+    gint win_w = EDITOR_WIN_DEFAULT_W;
+    gint win_h = EDITOR_WIN_DEFAULT_H;
+    gchar *w_str = on_app_config_get("editor_win_w");
+    gchar *h_str = on_app_config_get("editor_win_h");
+    if (w_str != NULL && h_str != NULL) {
+        gint w = (gint)g_ascii_strtoll(w_str, NULL, 10);
+        gint h = (gint)g_ascii_strtoll(h_str, NULL, 10);
+        if (w > 0 && h > 0) {
+            win_w = w;
+            win_h = h;
+        }
+    }
+    g_free(w_str);
+    g_free(h_str);
+    gtk_window_set_default_size(GTK_WINDOW(ed->window), win_w, win_h);
     gtk_application_add_window(app->gtk_app, GTK_WINDOW(ed->window));
     {
         gchar *wtitle = g_strdup_printf("Blue Notes - %s", meta->title);

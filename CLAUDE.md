@@ -103,7 +103,7 @@ sees the new flags.
   `sidebar_counts` (`1|0`, default 0 — folder/tag counts in the
   sidebar), `first_line_h1` (`1|0`, code default 0, but
   blue_notes.ini.defaults seeds it to 1 — auto-style the first
-  line of a new note as H1), `compact_editor_toolbar` (`1|0`, default 0
+  line of a new note as H1), `compact_editor_toolbar` (`1|0`, default 1
   — collapse the editor's H1/H2/¶ buttons into an "Aa" Styles menu
   button and the list buttons into a "≡" Lists one; applies live via
   `on_editor_rebuild_toolbars_all`), `touch_assist` (`1|0`, default 0 =
@@ -119,7 +119,10 @@ sees the new flags.
   costs XI2 smooth scrolling; no-op off X11), `image_viewer` (program
   path; unset = system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
-  for the next one), `statusbar_db_path` (`1|0`, default 1 — prefix the
+  for the next one), `editor_win_w`/`editor_win_h` (default editor
+  window CLIENT size, 640×509 when unset — read at editor open only,
+  deliberately NOT written back on resize, unlike the search window's),
+  `statusbar_db_path` (`1|0`, default 1 — prefix the
   folder path in the library/editor status bars with the DB file's path,
   formatted by `on_app_location_text`; applies live from Settings),
   `statusbar_note_id` (`1|0`, default 0 — show "id:N" at the right edge

@@ -427,7 +427,7 @@ main(int argc, char *argv[])
     app.first_line_h1 =
         on_app_config_get_bool("first_line_h1",          FALSE);
     app.compact_editor_toolbar =
-        on_app_config_get_bool("compact_editor_toolbar", FALSE);
+        on_app_config_get_bool("compact_editor_toolbar", TRUE);
     app.db_integrity_check =
         on_app_config_get_bool("db_integrity_check",     TRUE);
     app.statusbar_db_path =
