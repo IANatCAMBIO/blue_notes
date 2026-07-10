@@ -1600,6 +1600,16 @@ attach_checkbox_widget(OnEditor *ed, GtkTextChildAnchor *anchor)
                      G_CALLBACK(on_checkbox_enter), NULL);
     gtk_text_view_add_child_at_anchor(ed->view, btn, anchor);
     gtk_widget_show(btn);
+
+    /* Lower the anchor character with the editor-only negative-rise tag
+     * (created at buffer setup) so the box centers on the line's text.
+     * Tag applies are invisible to the change/autosave machinery.          */
+    GtkTextIter it, next;            /* the anchor's one-char span          */
+    gtk_text_buffer_get_iter_at_child_anchor(ed->buffer, &it, anchor);
+    next = it;
+    gtk_text_iter_forward_char(&next);
+    gtk_text_buffer_apply_tag_by_name(ed->buffer, "on-check-drop",
+                                      &it, &next);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3971,6 +3981,12 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
     /* Editor-only padding around color-emoji glyphs (see is_emoji_char).   */
     gtk_text_buffer_create_tag(ed->buffer, "on-emoji",
                                "letter-spacing", 5 * PANGO_SCALE, NULL);
+    /* Editor-only: drop each task checkbox a few px so its box centers on
+     * the text beside it — anchored children sit with their bottom on the
+     * baseline, which parks the box's center above the text's (see
+     * attach_checkbox_widget).  Never serialized.                          */
+    gtk_text_buffer_create_tag(ed->buffer, "on-check-drop",
+                               "rise", -3 * PANGO_SCALE, NULL);
 
     gtk_text_view_set_editable(ed->view, TRUE);
     gtk_text_view_set_wrap_mode(ed->view, GTK_WRAP_WORD_CHAR);

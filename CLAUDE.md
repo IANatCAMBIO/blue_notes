@@ -309,7 +309,19 @@ sees the new flags.
     usefully, point `gtk_tree_view_set_search_column` at a text column
     (e.g. NL_TITLE) instead.
 
-17. **`notify::cursor-position` fires INSIDE the insert-text class
+17. **Anchored children sit with their BOTTOM on the text baseline**, so
+    a widget taller than the font's ascent (the task checkboxes) rides
+    visually high next to its line's text.  Widget margins cannot be
+    negative and CSS padding on the `check` node can only move the
+    indicator UP relative to the baseline, never down — the working
+    lever is a negative `rise` on a GtkTextTag covering the anchor
+    CHARACTER (editor-only `on-check-drop` tag, −3 px, applied in
+    attach_checkbox_widget): GtkTextView honors Pango rise when placing
+    child segments.  A theme-padding-stripping CSS pin stays on the
+    button itself so the box is the bare indicator on themes that do
+    pad it (macOS Adwaita already doesn't).
+
+18. **`notify::cursor-position` fires INSIDE the insert-text class
     handler** — after the character lands in the buffer but BEFORE any
     after-handlers run.  So a cursor-moved handler that adopts the style
     of the char left of the cursor reads the brand-new, still-untagged
