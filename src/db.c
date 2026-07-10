@@ -42,10 +42,6 @@ static const char *SCHEMA_SQL =
     "  tag_id  INTEGER NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,"
     "  PRIMARY KEY (note_id, tag_id)"
     ");"
-    "CREATE TABLE IF NOT EXISTS settings ("
-    "  key   TEXT PRIMARY KEY,"
-    "  value TEXT NOT NULL"
-    ");"
     "CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id);"
     "CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);"
     "CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);";

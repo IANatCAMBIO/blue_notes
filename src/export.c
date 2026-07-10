@@ -39,18 +39,16 @@ typedef struct {
                             ON_FMT_UNDERLINE | ON_FMT_STRIKE | ON_FMT_TAG)
 
 /* ---------------------------------------------------------------------------
- * line_is_checked() — for a task-list line, whether its leading glyph is
- * the checked one (☑).
+ * line_is_checked() — for a task-list line, the state of its leading
+ * checkbox anchor.
  * ------------------------------------------------------------------------- */
 static gboolean
 line_is_checked(const GtkTextIter *ls)
 {
     gboolean checked = FALSE;        /* the checkbox's state                */
     GtkTextChildAnchor *anchor = gtk_text_iter_get_child_anchor(ls);
-    if (anchor != NULL && on_anchor_is_checkbox(anchor, &checked))
-        return checked;
-    /* Legacy glyph-based notes (not yet re-saved after migration).         */
-    on_char_is_checkbox(gtk_text_iter_get_char(ls), &checked);
+    if (anchor != NULL)
+        on_anchor_is_checkbox(anchor, &checked);
     return checked;
 }
 

@@ -48,7 +48,7 @@
  *   toolbar_style  — how toolbar buttons render (text only, icons only,
  *                    or icons above text), kept separately for library
  *                    toolbars and editor toolbars.  Indexed by
- *                    OnToolbarKind; persisted in the settings table.
+ *                    OnToolbarKind; persisted in the ini.
  *   toolbars       — every live toolbar per kind, so a style change can
  *                    be applied to all open windows at once.  Entries
  *                    remove themselves on destroy.

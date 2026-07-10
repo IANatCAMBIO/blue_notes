@@ -6,8 +6,7 @@
  *
  * BNBF layout (all integers little-endian):
  *
- *   [4 bytes]  magic "BNBF" ("ONBF" from before the rename is
- *              accepted by all readers forever)
+ *   [4 bytes]  magic "BNBF"
  *   [u32]      format version (currently 5; 1–4 are still readable)
  *   ...records...
  *   [u8 0x00]  end marker
@@ -69,13 +68,9 @@ void on_anchor_set_checkbox(GtkTextChildAnchor *anchor, gboolean checked);
 gboolean on_anchor_is_checkbox(GtkTextChildAnchor *anchor,
                                gboolean *out_checked);
 
-/* on_char_is_checkbox() — is `c` one of the checkbox glyphs (⬜/✅/☐/☑)?
- * Used when parsing typed/pasted list prefixes and by the exporters.        */
-gboolean on_char_is_checkbox(gunichar c, gboolean *out_checked);
-
 /* on_list_prefix_chars() — length in CHARACTERS of the literal list
- * prefix at the start of `head` ("\xe2\x80\xa2 " bullet, legacy checkbox
- * glyph + space, or "12. "), or 0 if none.  `head` is a short UTF-8 probe
+ * prefix at the start of `head` ("\xe2\x80\xa2 " bullet or "12. "), or 0
+ * if none.  `head` is a short UTF-8 probe
  * of the line start (callers pass ~7 chars).  The one parser both the
  * editor (prefix stripping) and the exporters use.                          */
 glong on_list_prefix_chars(const gchar *head);

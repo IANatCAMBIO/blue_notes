@@ -16,19 +16,16 @@
 
 #include <string.h>
 
-/* Magic bytes at the start of every BNBF blob.  Blobs written before the
- * Blue Notes rename carry the legacy "ONBF" magic — the readers accept
- * both, forever (existing databases hold thousands of such notes).          */
+/* Magic bytes at the start of every BNBF blob.  (The pre-rename "ONBF"
+ * magic was retired 2026-07 after an offline migration verified zero
+ * such blobs remained in the database.)                                     */
 static const guint8 BNBF_MAGIC[4] = { 'B', 'N', 'B', 'F' };
-static const guint8 ONBF_MAGIC[4] = { 'O', 'N', 'B', 'F' };
 
-/* magic_ok() — does this blob start with the current or legacy magic?       */
+/* magic_ok() — does this blob start with the BNBF magic?                    */
 static gboolean
 magic_ok(const guint8 *data, gsize len)
 {
-    return data != NULL && len >= 8 &&
-           (memcmp(data, BNBF_MAGIC, 4) == 0 ||
-            memcmp(data, ONBF_MAGIC, 4) == 0);
+    return data != NULL && len >= 8 && memcmp(data, BNBF_MAGIC, 4) == 0;
 }
 
 /* Current format version written by on_note_serialize().  Version 2 added
@@ -406,7 +403,7 @@ on_note_deserialize_scaled(GtkTextBuffer *buffer, const guint8 *data,
     on_buffer_ensure_tags(buffer);
     gtk_text_buffer_set_text(buffer, "", -1);
 
-    /* Validate header (current BNBF magic, or legacy ONBF).                */
+    /* Validate header.                                                     */
     if (!magic_ok(data, len)) {
         g_warning("deserialize: bad or missing BNBF header");
         return FALSE;
@@ -556,24 +553,11 @@ on_anchor_is_checkbox(GtkTextChildAnchor *anchor, gboolean *out_checked)
     return v != 0;
 }
 
-gboolean
-on_char_is_checkbox(gunichar c, gboolean *out_checked)
-{
-    gboolean checked = (c == 0x2705 || c == 0x2611);   /* ✅ or legacy ☑    */
-    gboolean is_box  = checked ||
-                       c == 0x2B1C || c == 0x2610;     /* ⬜ or legacy ☐    */
-    if (out_checked != NULL)
-        *out_checked = checked;
-    return is_box;
-}
-
 glong
 on_list_prefix_chars(const gchar *head)
 {
-    if (g_str_has_prefix(head, "\xe2\x80\xa2 ") ||
-        (on_char_is_checkbox(g_utf8_get_char(head), NULL) &&
-         g_utf8_get_char(g_utf8_next_char(head)) == ' '))
-        return 2;                    /* glyph + one space                   */
+    if (g_str_has_prefix(head, "\xe2\x80\xa2 "))
+        return 2;                    /* bullet + one space                  */
 
     glong d = 0;                     /* leading digit characters            */
     while (g_ascii_isdigit(head[d]))

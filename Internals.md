@@ -12,7 +12,7 @@ and the BNBF note format. For everyday use see the
 | `src/main.c`              | GtkApplication entry point; settings/config loading |
 | `src/app.[ch]`            | Shared `OnApp` context, icon loading, toolbar styles, DB switching/restore |
 | `src/cli.[ch]`            | Headless noun-verb command-line interface           |
-| `src/db.[ch]`             | SQLite layer: folders, notes, tags, settings, backup |
+| `src/db.[ch]`             | SQLite layer: folders, notes, tags, backup          |
 | `src/serialize.[ch]`      | BNBF binary format ⇄ GtkTextBuffer conversion       |
 | `src/editor_window.[ch]`  | WYSIWYG editor: formatting, images, tables, tasks, code blocks, find-in-note |
 | `src/library_window.[ch]` | Sidebar, list & grid views, drag & drop, menus, About |
@@ -54,8 +54,6 @@ CREATE TABLE note_tags (note_id INTEGER NOT NULL REFERENCES notes(id)
                         tag_id  INTEGER NOT NULL REFERENCES tags(id)
                           ON DELETE CASCADE,
                         PRIMARY KEY (note_id, tag_id));
-CREATE TABLE settings  (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-
 CREATE INDEX idx_notes_folder   ON notes(folder_id);
 CREATE INDEX idx_folders_parent ON folders(parent_id);
 CREATE INDEX idx_note_tags_tag  ON note_tags(tag_id);
@@ -71,10 +69,6 @@ Semantics worth knowing when querying directly:
   backfills it on first search). Treat it as read-only convenience — the
   `content` blob is authoritative.
 - `tags.name` is stored without the leading `#`.
-- `settings` is legacy-only: nothing writes to it anymore (old versions
-  kept UI preferences and an instance lock there; startup migrates and
-  deletes any leftovers). App preferences live in `blue_notes.ini` next
-  to the binary, not in the database.
 
 Example — every note with its full folder path:
 
@@ -92,8 +86,7 @@ ORDER BY 1;
 ```
 
 `content` is BNBF ("Blue Notes Binary Format"), a simple little-endian
-record stream — 4-byte magic `BNBF` (blobs written before the rename
-carry the legacy `ONBF` magic; readers accept both), a `u32` version
+record stream — 4-byte magic `BNBF`, a `u32` version
 (currently 5), then typed records until a `0x00` end marker:
 
 | Record | Type byte | Payload |

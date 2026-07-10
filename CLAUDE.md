@@ -41,9 +41,9 @@ sees the new flags.
 
 | File | Purpose |
 |---|---|
-| `src/main.c` | GtkApplication entry; config init + settings migration; sets `icons/vinyl.png` as default window icon |
+| `src/main.c` | GtkApplication entry; config init; sets `icons/vinyl.png` as default window icon |
 | `src/app.[ch]` | Shared `OnApp` context: db handle, open-editors map, per-family toolbar styles, icon loading, toolbar registry + right-click style menu |
-| `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, settings (key/value), counts, ordering |
+| `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, counts, ordering |
 | `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup, image paste/context menu, floating code-block copy buttons, debounced autosave |
 | `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid (list: Title/Path/Modified/Created, all resizable + sortable, Path and Created hidden by default; Path fed by `on_db_folder_path_map`), notes sorted Modified-newest-first by default (in-list drag reorder is off while sorted — list stores refuse row drops), folder context menu has Sort Subfolders Alphabetically (one level, `on_db_folder_reorder`), DnD (notes→folder incl. multi-select; single folder rows re-nest INTO / reorder BEFORE-AFTER / trash / drag-restore via `on_db_folder_move`+`on_db_folder_reorder`; drag icons: folder.png, file.png for one note, documents.png for 2+), sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; selecting notes posts a transient "N files selected" event from both views' selection signals; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
@@ -62,7 +62,9 @@ sees the new flags.
   was renamed
   from `orange-notes` pre-release — do NOT rename again once released,
   user data will live there).
-- Note content: **BNBF v5** blobs (magic `BNBF`; the pre-rename `ONBF` magic is accepted forever) (see header comment in `serialize.h`).
+- Note content: **BNBF v5** blobs (magic `BNBF`; the pre-rename `ONBF`
+  magic was retired 2026-07 after an offline scan found zero such blobs)
+  (see header comment in `serialize.h`).
   TEXT records = styled runs (flag bits ↔ named GtkTextTags via one
   shared table); IMAGE = full-resolution PNG + display width; TABLE;
   CHECK. All older versions (1–4) still parse.
@@ -133,10 +135,9 @@ sees the new flags.
   unusable: columns cache resized/requested widths that override it
   (never shrinking back), and ellipsizing renderers report a ~3-char
   minimum so ellipsized columns collapse instead of fitting.  Manual
-  resize grips come back when it's off). The DB settings table is a
-  permanently empty legacy table: nothing reads or writes it (the
-  startup migration of old UI keys was removed 2026-07); it stays in the
-  schema only so old database files open unchanged.
+  resize grips come back when it's off). The old DB settings table is
+  GONE (dropped from the schema and the live DB 2026-07); all
+  preferences live in the ini.
 - **Custom DB location** (shared-folder support) lives in the CONFIG
   FILE `blue_notes.ini` NEXT TO THE BINARY (`[blue-notes] db_dir=`;
   resolved from argv[0] by `on_app_config_init()`, which must run before

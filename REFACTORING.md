@@ -85,8 +85,7 @@ name-only list in the load normalizer). Now there is exactly one:
   one-query `on_db_folder_path_map`; the two identical search-trigger
   wrappers replaced by swapped-signal connects.
 - **export.c + editor_window.c**: the character-identical list-prefix
-  parser now lives once as `on_list_prefix_chars()` in serialize.c (next
-  to `on_char_is_checkbox`, which it uses).
+  parser now lives once as `on_list_prefix_chars()` in serialize.c.
 
 ## Intentional behavior changes
 
@@ -148,11 +147,20 @@ unneeded (and a one-time offline heal made it so):
   them `on_db_setting_get/delete()` (their only callers); and
   `on_db_migrate_legacy_name()` (the pre-1.4 `notes.db` rename) with all
   four call sites plus the first-run chooser's `notes.db` filter.
-- **Kept**: the ONBF magic acceptance (the DB is full of pre-rename
-  blobs), the empty `settings` table in the schema (old files must
-  open), `on_char_is_checkbox()` (still parses typed/pasted glyph
-  prefixes), and the runtime paragraph-continuity fix in the editor
-  (prevents new half-tagged lines from being created at all).
+- **Second round (same day)**: after an offline check found **zero**
+  ONBF-magic blobs in the live DB (every note had long since been
+  re-saved as BNBF), the remaining compat surface went too — the ONBF
+  magic acceptance in `magic_ok()`, the `settings` table (dropped from
+  both the schema DDL and the live DB), `on_char_is_checkbox()` plus the
+  glyph branch in `on_list_prefix_chars()` and export's
+  `line_is_checked()` glyph fallback.  Backup kept as
+  `~/.local/share/blue_notes/pre-onbf-migration-20260709.db`.
+- **Kept**: the runtime paragraph-continuity fix in the editor.  NOT a
+  legacy shim — GtkTextBuffer only gives typed text the tags present on
+  both sides of the insertion point (a permanent GTK behavior), so
+  without this fix, typing on an empty code-block line falls out of the
+  block and new half-tagged lines get created from scratch.
 
 If the app ever gets other users, upgrades from pre-2026-07 builds will
-need these shims restored from git history.
+need the removed shims restored from git history (and pre-rename ONBF
+databases re-migrated).
