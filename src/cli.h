@@ -9,15 +9,24 @@
  * Commands follow a noun-verb structure:
  *
  *   blue_notes tag list
+ *   blue_notes tag notes NAME             (notes labeled with a tag)
  *   blue_notes tag delete NAME
  *   blue_notes folder list
  *   blue_notes folder add PATH            (nested, created like mkdir -p)
- *   blue_notes folder delete PATH
+ *   blue_notes folder delete [--permanent] PATH    (default: to the Trash)
  *   blue_notes note list [PATH|--all]
+ *   blue_notes note cat ID [--md]         (plain text, or Markdown render)
  *   blue_notes note new [--folder PATH] CONTENT|-   (- reads stdin)
- *   blue_notes note delete ID [ID...]
+ *   blue_notes note append ID CONTENT|-   (plain text, on a fresh line)
+ *   blue_notes note set ID CONTENT|-      (REPLACES the note's content)
+ *   blue_notes note delete [--permanent] ID [ID...] (default: to the Trash)
+ *   blue_notes note restore ID [ID...]
  *   blue_notes note move ID [ID...] PATH  (/ = top level)
+ *   blue_notes note tags ID
+ *   blue_notes note tag ID NAME           (appends the literal #NAME token)
+ *   blue_notes note untag ID NAME
  *   blue_notes note open PATH             (id or Folder/Title; uses the GUI)
+ *   blue_notes search TEXT [--regex]      (titles + full text, all notes)
  *   blue_notes quicknote                  (new root note in the running GUI)
  *   blue_notes backup FILE.db
  *   blue_notes export-md DIR

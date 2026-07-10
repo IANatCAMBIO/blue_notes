@@ -82,10 +82,12 @@ header bars anywhere). The first line of the note becomes its title.
 - **Editor** — show/hide the code-block copy button and code-block line
   numbers; auto-style the first line of a new note as Heading 1; a
   compact toolbar that collapses the style and list buttons into menus;
-  re-enable GTK's touch assistance (selection drag handles, magnifier,
-  and the tap cut/copy/paste popup — all off by default; fully applies
-  after a restart); and a custom image-viewer program for opening
-  images.
+  show the note's database id at the right of the editor status bar
+  (off by default — handy with the command line, which addresses notes
+  by id); re-enable GTK's touch assistance (selection drag handles,
+  magnifier, and the tap cut/copy/paste popup — all off by default;
+  fully applies after a restart); and a custom image-viewer program for
+  opening images.
 - **Database** — store the database in a custom folder (see Storage),
   toggle the startup integrity check, and show or hide the database
   path shown before the folder path in each window's status bar (on by
@@ -134,20 +136,123 @@ pipe tables and `- [ ]` task items.
 ## Command-line automation
 
 A recognized subcommand runs headless against the same database (including
-a configured shared location) and exits — no windows:
+a configured shared location) and exits — no windows. While the GUI is
+running the command is forwarded to it over the socket instead, and the
+windows refresh to show what changed.
+
+Reading:
 
 ```
-blue_notes tag list                         blue_notes tag delete NAME
-blue_notes folder list                      blue_notes folder add PATH
-blue_notes folder delete PATH               blue_notes note list [PATH|--all]
-blue_notes note new [--folder PATH] TEXT|-  blue_notes note delete ID [ID...]
-blue_notes note move ID [ID...] PATH        blue_notes note add-image ID FILE
-blue_notes note set-modified ID TIMESTAMP   blue_notes backup FILE.db
-blue_notes export-md DIR                    blue_notes export-html DIR
+blue_notes note list [PATH|--all]     ids, modified dates and titles
+blue_notes note cat ID [--md]         a note's text (--md: Markdown with
+                                      formatting; images as placeholders)
+blue_notes search TEXT [--regex]      case-insensitive, titles + full text;
+                                      prints ID / modified / full path
+blue_notes folder list                folder tree with note counts
+blue_notes tag list                   every tag with its note count
+blue_notes tag notes NAME             the notes labeled with a tag
+blue_notes note tags ID               a note's tags, one per line
 ```
 
-Folders are addressed by path (`"Work/Projects"`, created like `mkdir -p`
-by `folder add`); notes by the ids `note list` prints. `note new` takes
-its content from the argument or stdin (`-`); the first line becomes the
-title. Output is tab-separated for easy scripting; exit codes: 0 success,
-1 usage, 2 failure. `blue_notes help` shows the full reference.
+Writing:
+
+```
+blue_notes note new [--folder PATH] TEXT|-   create (first line = title)
+blue_notes note append ID TEXT|-             add text on a fresh line
+blue_notes note set ID TEXT|-                REPLACE a note's content
+blue_notes note move ID [ID...] PATH         move into a folder ('/' = top)
+blue_notes note tag ID NAME                  add a #tag to the note text
+blue_notes note untag ID NAME                remove a #tag
+blue_notes note add-image ID FILE            append an image file
+blue_notes note set-modified ID TIMESTAMP    set the modified date (UNIX s)
+blue_notes folder add PATH                   create nested, like mkdir -p
+```
+
+Deleting (safe by default — both go to the Trash, restorable in the GUI):
+
+```
+blue_notes note delete [--permanent] ID [ID...]
+blue_notes note restore ID [ID...]
+blue_notes folder delete [--permanent] PATH
+```
+
+GUI and maintenance:
+
+```
+blue_notes note open PATH             open an editor (id or Folder/Title;
+                                      starts Blue Notes if needed)
+blue_notes quicknote                  new note in the root folder + editor
+blue_notes backup FILE.db             snapshot the live database
+blue_notes export-md DIR              export all notes as Markdown
+blue_notes export-html DIR            export all notes as HTML
+```
+
+Folders are addressed by path (`"Work/Projects"`); notes by the ids
+`note list` and `search` print — ids are permanent: they are never
+reused, so a stale id fails cleanly instead of hitting the wrong note.
+`note new`, `note append` and `note set` take their content from the
+argument or stdin (`-`). Plain text goes in; `note set` replaces the
+whole note, so any formatting, images, tables or tags the old content
+had are lost — prefer `note append` for adding to rich notes. Output is
+tab-separated for easy scripting; exit codes: 0 success, 1 usage,
+2 failure. `blue_notes help` shows the full reference.
+
+## Using Blue Notes with an AI agent
+
+The CLI is the intended interface for AI agents: it covers reading,
+searching, writing, tagging and organizing, and because a running GUI
+serves CLI calls over its socket, an agent can work on the database
+while you have Blue Notes open — your windows update live as it works.
+
+**Agents that can run shell commands** (Claude Code, Codex CLI, Cursor,
+and similar) can use the binary directly. Tell the agent where it is
+and how to behave — for Claude Code, drop something like this into the
+project's `CLAUDE.md` (for other tools use `AGENTS.md` or the system
+prompt):
+
+```markdown
+## My notes database
+
+My notes live in Blue Notes; use its CLI: /path/to/blue_notes
+Run "blue_notes help" for the full command list.
+
+- Find notes with `search TEXT` (or `note list --all`), read one with
+  `note cat ID` (`--md` keeps formatting), then act on the id.
+- Add to an existing note with `note append` — `note set` REPLACES the
+  note and destroys images/formatting, so use it only on notes you
+  created yourself.
+- `note delete` only moves to the Trash. NEVER use `--permanent` or
+  `tag delete` unless I explicitly ask.
+- Before any bulk operation, snapshot first: `backup /tmp/pre-agent.db`.
+- Don't edit a note I currently have open in an editor window — my
+  autosave could overwrite your change. Creating new notes is always
+  safe.
+```
+
+A useful pattern is a capture workflow — "summarize this thread and
+save it to my notes" becomes:
+
+```
+blue_notes folder add "Inbox/AI"
+blue_notes note new --folder "Inbox/AI" -   <<'EOF'
+Meeting summary 2026-07-10
+...the agent's text...
+EOF
+blue_notes note tag 42 meeting
+```
+
+**Chat-only assistants** (ChatGPT or Claude in the browser, with no
+shell access) cannot reach the database directly. Two options:
+
+- Export and upload: `blue_notes export-md ~/notes-export` produces a
+  folder of plain Markdown files that any assistant can read; paste the
+  assistant's answers back with `note new -`/`note append -`.
+- Wrap the CLI in an MCP server: each tool call shells out to one
+  `blue_notes` subcommand. Clients that speak MCP (Claude Desktop,
+  Claude in Slack, others) then get live read/write access with the
+  same safety properties as the CLI — the wrapper needs no database
+  code at all.
+
+Whatever the agent, the safety rails are the same ones you use:
+deletes default to the Trash, `--permanent` is the only destructive
+flag, `backup` is cheap, and note ids never lie.

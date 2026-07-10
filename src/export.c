@@ -132,6 +132,10 @@ emit_image(OnExportCtx *ctx, GdkPixbuf *pixbuf)
             "<img src=\"data:image/png;base64,%s\" alt=\"image\">", b64);
         g_free(b64);
         g_free(png);
+    } else if (ctx->note_dir == NULL) {
+        /* String render (on_export_note_markdown): there is no directory
+         * for side-car files — leave a numbered placeholder instead.        */
+        g_string_append_printf(ctx->out, "![image %d]()", ctx->img_count);
     } else {
         gchar *img_name = g_strdup_printf("%s-img%d.png",
                                           ctx->base_name, ctx->img_count);
@@ -665,4 +669,30 @@ on_export_note(OnApp *app, gint64 note_id, const gchar *dest_dir,
     gboolean ok = export_one(app, m, dest_dir, format, NULL);
     on_db_note_meta_free(m);
     return ok;
+}
+
+gchar *
+on_export_note_markdown(OnApp *app, gint64 note_id)
+{
+    /* Load and deserialize into an offscreen buffer (as export_one does;
+     * a missing/empty note renders as an empty string).                     */
+    GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
+    on_buffer_ensure_tags(buffer);
+    gsize   blob_len = 0;            /* stored blob size                    */
+    guint8 *blob = on_db_note_load(app->db, note_id, &blob_len);
+    if (blob != NULL) {
+        on_note_deserialize(buffer, blob, blob_len);
+        g_free(blob);
+    }
+
+    OnExportCtx ctx = {
+        .format    = ON_EXPORT_MARKDOWN,
+        .out       = g_string_new(NULL),
+        .note_dir  = NULL,           /* string render: no image files       */
+        .base_name = NULL,
+        .img_count = 0,
+    };
+    render_note_body(&ctx, buffer);
+    g_object_unref(buffer);
+    return g_string_free(ctx.out, FALSE);
 }

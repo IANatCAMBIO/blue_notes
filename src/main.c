@@ -432,6 +432,8 @@ main(int argc, char *argv[])
         on_app_config_get_bool("db_integrity_check",     TRUE);
     app.statusbar_db_path =
         on_app_config_get_bool("statusbar_db_path",      TRUE);
+    app.statusbar_note_id =
+        on_app_config_get_bool("statusbar_note_id",      FALSE);
 
     app.gtk_app = gtk_application_new("org.example.blue-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);

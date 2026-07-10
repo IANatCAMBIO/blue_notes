@@ -81,6 +81,9 @@
  *                    the folder path with the database file's path;
  *                    persisted as the "statusbar_db_path" setting
  *                    (default on).
+ *   statusbar_note_id — whether each editor's status bar shows the
+ *                    note's database id at the right edge; persisted as
+ *                    the "statusbar_note_id" setting (default off).
  * ------------------------------------------------------------------------- */
 
 /* Which family a toolbar belongs to — each has its own style setting.       */
@@ -109,6 +112,7 @@ typedef struct OnApp {
     gchar           *db_dir;
     gboolean         db_integrity_check;
     gboolean         statusbar_db_path;
+    gboolean         statusbar_note_id;
     gboolean         db_transient;     /* TRUE when the current DB was opened
                                         * for this session only (not default) */
     GtkCssProvider  *touch_css;        /* screen CSS hiding the touch aids

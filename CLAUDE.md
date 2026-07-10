@@ -50,7 +50,7 @@ sees the new flags.
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
-| `src/cli.[ch]` | Headless subcommand interface (runs before GTK in main; tags/folders/notes CRUD, backup, export); folders by path, notes by id |
+| `src/cli.[ch]` | Headless subcommand interface (runs before GTK in main; tags/folders/notes CRUD, backup, export); folders by path, notes by id. Agent-ready surface: `note cat [--md]` (plain text from the body_text cache / Markdown via `on_export_note_markdown`, images as `![image N]()` placeholders), `note append`/`note set` (plain text in; `set` REPLACES content and clears the tag links), `search TEXT [--regex]` (case-insensitive titles+bodies via `on_db_note_body_map`, prints id/modified/path), `note tags`/`tag`/`untag` + `tag notes` (`note tag` appends the literal `#name` span under the on-tag text tag and rewrites note_tags from the buffer, so GUI saves keep it), `note restore`; `note new/append/set` all accept `-` = stdin (shipped over the socket by `on_cli_command_reads_stdin`) |
 | `icons/` | custom PNG toolbar icons + `vinyl.png` app logo (window icon, About button/dialog), loaded by basename; see icons/README.md |
 | `tools/import-apple-notes.sh` | Apple Notes migration (AppleScript export → CLI import; keeps modification dates) |
 
@@ -122,6 +122,9 @@ sees the new flags.
   for the next one), `statusbar_db_path` (`1|0`, default 1 — prefix the
   folder path in the library/editor status bars with the DB file's path,
   formatted by `on_app_location_text`; applies live from Settings),
+  `statusbar_note_id` (`1|0`, default 0 — show "id:N" at the right edge
+  of each editor's status bar; the label is no-show-all so its updater
+  owns visibility; applies live via `on_editor_status_refresh_all`),
   `list_columns` (list-view column layout,
   `key:vis` pairs in display order, default
   `path:0,title:1,modified:1,created:0`
@@ -165,8 +168,10 @@ sees the new flags.
   always clears the flag (drag out of Trash = restore-to-folder). All
   normal listings/counts filter through `NOTE_VISIBLE_SQL`; search's
   All-scope uses `on_db_note_list_all(db, TRUE)` to keep deleted notes
-  findable; export/CLI pass FALSE. CLI note/folder delete remains
-  PERMANENT. Sidebar: "All Notes" section on top (`SB_KIND_ALL`,
+  findable; export/CLI pass FALSE. CLI note/folder delete TRASHES by
+  default (one bulk trash call for notes); `--permanent` deletes
+  outright and `note restore` un-trashes — safe for agent use.
+  Sidebar: "All Notes" section on top (`SB_KIND_ALL`,
   newest-first), "Trash" section at the bottom only while non-empty
   (`SB_KIND_TRASH`, trashed folders as `SB_KIND_TRASH_FOLDER` children);
   in trash views the Delete paths turn permanent (with confirm) and the

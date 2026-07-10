@@ -824,14 +824,12 @@ on_db_tag_delete(OnDatabase *db, gint64 id)
     return stmt_done(db, stmt);
 }
 
-GList *
-on_db_tag_list(OnDatabase *db)
+/* run_tag_query() — step a prepared statement whose result columns are
+ * (id, name) and collect the rows as OnTag structs.  Finalizes `stmt`.
+ * Returns a GList of OnTag*; free with on_db_tag_list_free().               */
+static GList *
+run_tag_query(sqlite3_stmt *stmt)
 {
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT id, name FROM tags ORDER BY name COLLATE NOCASE");
-    if (stmt == NULL)
-        return NULL;
-
     GList *out = NULL;                   /* accumulated OnTag* rows         */
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         OnTag *t = g_new0(OnTag, 1);
@@ -841,6 +839,16 @@ on_db_tag_list(OnDatabase *db)
     }
     sqlite3_finalize(stmt);
     return g_list_reverse(out);
+}
+
+GList *
+on_db_tag_list(OnDatabase *db)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT id, name FROM tags ORDER BY name COLLATE NOCASE");
+    if (stmt == NULL)
+        return NULL;
+    return run_tag_query(stmt);
 }
 
 /* free_tag() — GDestroyNotify for one OnTag.                                */
@@ -916,6 +924,19 @@ on_db_notes_by_tag(OnDatabase *db, gint64 tag_id)
         return NULL;
     sqlite3_bind_int64(stmt, 1, tag_id);
     return run_meta_query(stmt);
+}
+
+GList *
+on_db_note_tag_list(OnDatabase *db, gint64 note_id)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT t.id, t.name FROM tags t "
+        "JOIN note_tags nt ON nt.tag_id = t.id "
+        "WHERE nt.note_id=? ORDER BY t.name COLLATE NOCASE");
+    if (stmt == NULL)
+        return NULL;
+    sqlite3_bind_int64(stmt, 1, note_id);
+    return run_tag_query(stmt);
 }
 
 /* =========================================================================

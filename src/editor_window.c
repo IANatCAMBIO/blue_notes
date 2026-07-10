@@ -107,6 +107,10 @@
  *                     path, same format as the library window's.  Set at
  *                     open and refreshed on window focus-in, so a move
  *                     made in the library shows up on return.
+ *   status_note_id  — status-bar label (bottom right): "id:N", shown
+ *                     only while the statusbar_note_id setting is on
+ *                     (Settings applies it live through
+ *                     on_editor_status_refresh_all).
  *   undo_stack      — past buffer snapshots, oldest first (see the
  *                     undo/redo section for the whole design).
  *   redo_stack      — snapshots undone and re-doable, oldest first.
@@ -157,6 +161,7 @@ typedef struct {
     gboolean        tags_modified;
     gboolean        auto_h1;
     GtkWidget      *status_path;
+    GtkWidget      *status_note_id;
 
     GPtrArray      *undo_stack;
     GPtrArray      *redo_stack;
@@ -3533,13 +3538,42 @@ editor_status_path_update(OnEditor *ed)
 }
 
 /* ---------------------------------------------------------------------------
- * on_editor_status_refresh_all() — re-render the status-bar location of
- * every open editor (Settings toggled the DB-path prefix live).
+ * editor_status_note_id_update() — show the note's database id in the
+ * status bar's right label ("id:N"), or hide the label entirely while
+ * the statusbar_note_id setting is off (the label is no-show-all, so
+ * this function fully owns its visibility).
+ * ------------------------------------------------------------------------- */
+static void
+editor_status_note_id_update(OnEditor *ed)
+{
+    if (ed->status_note_id == NULL)
+        return;
+    if (ed->app->statusbar_note_id) {
+        gchar *text = g_strdup_printf("id:%" G_GINT64_FORMAT, ed->note_id);
+        gtk_label_set_text(GTK_LABEL(ed->status_note_id), text);
+        g_free(text);
+        gtk_widget_show(ed->status_note_id);
+    } else {
+        gtk_widget_hide(ed->status_note_id);
+    }
+}
+
+/* editor_status_update() — re-render both status-bar labels of one editor. */
+static void
+editor_status_update(OnEditor *ed)
+{
+    editor_status_path_update(ed);
+    editor_status_note_id_update(ed);
+}
+
+/* ---------------------------------------------------------------------------
+ * on_editor_status_refresh_all() — re-render the status bar of every open
+ * editor (Settings toggled the DB-path prefix or the note id live).
  * ------------------------------------------------------------------------- */
 void
 on_editor_status_refresh_all(OnApp *app)
 {
-    editors_foreach(app, editor_status_path_update);
+    editors_foreach(app, editor_status_update);
 }
 
 /* on_editor_focus_in() — the window regained focus: re-read the note's
@@ -3933,6 +3967,13 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
     /* A step smaller than the UI font, like the library's labels.          */
     on_app_widget_add_css(ed->status_path, "label { font-size: 85%; }");
 
+    /* Note id (bottom right) — no-show-all: only its updater decides
+     * whether it is visible (the statusbar_note_id setting, default off). */
+    ed->status_note_id = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(ed->status_note_id), 1.0);
+    on_app_widget_add_css(ed->status_note_id, "label { font-size: 85%; }");
+    gtk_widget_set_no_show_all(ed->status_note_id, TRUE);
+
     GtkWidget *status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_widget_set_margin_start(status_bar, 8);
     gtk_widget_set_margin_end(status_bar, 8);
@@ -3940,12 +3981,14 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
     gtk_widget_set_margin_bottom(status_bar, 3);
     gtk_box_pack_start(GTK_BOX(status_bar), ed->status_path,
                        TRUE, TRUE, 0);
+    gtk_box_pack_end(GTK_BOX(status_bar), ed->status_note_id,
+                     FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(vbox),
                        gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
                        FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), status_bar, FALSE, FALSE, 0);
-    editor_status_path_update(ed);
+    editor_status_update(ed);
 
     gtk_container_add(GTK_CONTAINER(ed->window), vbox);
 

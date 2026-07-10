@@ -111,6 +111,7 @@ typedef enum {
     BS_CODE_LINES,
     BS_FIRST_LINE_H1,
     BS_COMPACT_TOOLBAR,
+    BS_STATUSBAR_NOTE_ID,
     BS_DB_INTEGRITY,                 /* Database                            */
     BS_STATUSBAR_DB_PATH,
 } BoolSettingId;
@@ -142,11 +143,15 @@ static const BoolSetting BOOL_SETTINGS[] = {
         "Compact toolbar (group paragraph styles and lists into menus)",
         "compact_editor_toolbar", offsetof(OnApp, compact_editor_toolbar),
         on_editor_rebuild_toolbars_all },
+    [BS_STATUSBAR_NOTE_ID] = {
+        "Show note id in the editor status bar",
+        "statusbar_note_id", offsetof(OnApp, statusbar_note_id),
+        on_editor_status_refresh_all },
     [BS_DB_INTEGRITY] = {
         "Check database integrity on startup (detect external changes)",
         "db_integrity_check", offsetof(OnApp, db_integrity_check), NULL },
     [BS_STATUSBAR_DB_PATH] = {
-        "Show database path in the status bar",
+        "Show database path prefix in status bar",
         "statusbar_db_path", offsetof(OnApp, statusbar_db_path),
         apply_statusbar_db_path },
 };
@@ -442,9 +447,10 @@ on_settings_window_open(OnApp *app)
     gtk_box_pack_start(GTK_BOX(vbox), section_label("Editor"),
                        FALSE, FALSE, 0);
 
-    /* The four table-driven editor checkboxes, in display order.           */
+    /* The five table-driven editor checkboxes, in display order.           */
     static const BoolSettingId EDITOR_CHECKS[] = {
         BS_CODE_COPY, BS_CODE_LINES, BS_FIRST_LINE_H1, BS_COMPACT_TOOLBAR,
+        BS_STATUSBAR_NOTE_ID,
     };
     for (gsize i = 0; i < G_N_ELEMENTS(EDITOR_CHECKS); i++)
         gtk_box_pack_start(GTK_BOX(vbox),

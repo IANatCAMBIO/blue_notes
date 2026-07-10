@@ -272,6 +272,10 @@ gboolean on_db_note_set_tags(OnDatabase *db, gint64 note_id, GList *tag_names);
  * Returns a GList of OnNoteMeta*; free with on_db_note_list_free().         */
 GList *on_db_notes_by_tag(OnDatabase *db, gint64 tag_id);
 
+/* List the tags labeling note `note_id`, ordered by name.
+ * Returns a GList of OnTag*; free with on_db_tag_list_free().               */
+GList *on_db_note_tag_list(OnDatabase *db, gint64 note_id);
+
 /* ----------------------------- trash ------------------------------------ */
 
 /* Move `n` notes to the Trash in one transaction (trashed=1; folder_id is
