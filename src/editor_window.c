@@ -3457,8 +3457,35 @@ editor_queue_autosave(OnEditor *ed)
 }
 
 /* ---------------------------------------------------------------------------
- * on_editor_destroy() — the window is going away: flush a final save,
- * drop the editor from the open-editors table, and free everything.
+ * buffer_is_blank() — TRUE when the buffer holds no content: nothing but
+ * whitespace and no embedded objects.  Anchors (images, tables, task
+ * checkboxes) appear as U+FFFC in the slice, which is not whitespace,
+ * so a note holding only an image or an unticked checkbox is NOT blank.
+ * ------------------------------------------------------------------------- */
+static gboolean
+buffer_is_blank(GtkTextBuffer *buffer)
+{
+    if (gtk_text_buffer_get_char_count(buffer) == 0)
+        return TRUE;
+
+    GtkTextIter start, end;          /* whole-buffer bounds                 */
+    gtk_text_buffer_get_bounds(buffer, &start, &end);
+    gchar *slice = gtk_text_buffer_get_slice(buffer, &start, &end, TRUE);
+    gboolean blank = TRUE;           /* nothing but whitespace so far?      */
+    for (const gchar *p = slice; *p != '\0'; p = g_utf8_next_char(p)) {
+        if (!g_unichar_isspace(g_utf8_get_char(p))) {
+            blank = FALSE;
+            break;
+        }
+    }
+    g_free(slice);
+    return blank;
+}
+
+/* ---------------------------------------------------------------------------
+ * on_editor_destroy() — the window is going away: flush a final save (or
+ * delete the note outright when it was left with no content), drop the
+ * editor from the open-editors table, and free everything.
  * ------------------------------------------------------------------------- */
 static void
 on_editor_destroy(GtkWidget *widget, gpointer user_data)
@@ -3492,11 +3519,21 @@ on_editor_destroy(GtkWidget *widget, gpointer user_data)
     ed->code_buttons = NULL;
 
     ed->window = NULL;               /* don't touch the dying window        */
-    if (ed->dirty)
+    if (buffer_is_blank(ed->buffer)) {
+        /* A note closed with no content is discarded — permanently, an
+         * empty note in the Trash would be clutter — so a Ctrl+N or
+         * quicknote window closed without typing leaves nothing behind.
+         * Deletion can change folder counts: full library notify.         */
+        on_db_notes_delete(ed->app->db, &ed->note_id, 1);
+        on_app_status(ed->app, "Deleted empty note");
+        if (ed->app->notify_notes_changed != NULL)
+            ed->app->notify_notes_changed(ed->app);
+    } else if (ed->dirty) {
         editor_save(ed);             /* flush edits the autosave missed
                                         (buffer kept alive by our ref);
                                         a clean note closes instantly —
                                         no serialize, no PNG encoding      */
+    }
 
     if (ed->tag_popup != NULL)
         gtk_widget_destroy(ed->tag_popup);
