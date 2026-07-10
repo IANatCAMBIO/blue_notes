@@ -77,6 +77,10 @@
  *   db_integrity_check — when TRUE, the MD5 of the database file is
  *                    written to the ini on exit and verified on the next
  *                    launch; a mismatch triggers a warning dialog.
+ *   statusbar_db_path — whether the library/editor status bars prefix
+ *                    the folder path with the database file's path;
+ *                    persisted as the "statusbar_db_path" setting
+ *                    (default on).
  * ------------------------------------------------------------------------- */
 
 /* Which family a toolbar belongs to — each has its own style setting.       */
@@ -104,6 +108,7 @@ typedef struct OnApp {
     gboolean         compact_editor_toolbar;
     gchar           *db_dir;
     gboolean         db_integrity_check;
+    gboolean         statusbar_db_path;
     gboolean         db_transient;     /* TRUE when the current DB was opened
                                         * for this session only (not default) */
     GtkCssProvider  *touch_css;        /* screen CSS hiding the touch aids
@@ -119,6 +124,18 @@ typedef struct OnApp {
  *   fmt — printf-style format for the message.
  * ------------------------------------------------------------------------- */
 void on_app_status(OnApp *app, const gchar *fmt, ...) G_GNUC_PRINTF(2, 3);
+
+/* ---------------------------------------------------------------------------
+ * on_app_location_text() — format a folder path for a status bar's left
+ * label: when the statusbar_db_path setting is on, the database file's
+ * path is prepended as one continuous path ("<db path><location>", a
+ * "/" inserted for the non-path views); otherwise the location is
+ * returned as-is.
+ *   app      — the application context.
+ *   location — the folder-path part (e.g. "/Work/Projects", "#tag").
+ * Returns a newly allocated string; free with g_free().
+ * ------------------------------------------------------------------------- */
+gchar *on_app_location_text(OnApp *app, const gchar *location);
 
 /* ---------------------------------------------------------------------------
  * on_app_init_icons_dir() — locate the icons/ folder next to the

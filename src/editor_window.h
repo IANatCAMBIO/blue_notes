@@ -67,4 +67,11 @@ void on_editor_apply_line_numbers_all(OnApp *app);
  * ------------------------------------------------------------------------- */
 void on_editor_rebuild_toolbars_all(OnApp *app);
 
+/* ---------------------------------------------------------------------------
+ * on_editor_status_refresh_all() — re-render the status-bar location of
+ * every open editor window.  Called by the settings window when the
+ * DB-path-prefix preference changes (applies live).
+ * ------------------------------------------------------------------------- */
+void on_editor_status_refresh_all(OnApp *app);
+
 #endif /* BLUE_EDITOR_WINDOW_H */

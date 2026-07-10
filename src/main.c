@@ -486,6 +486,11 @@ main(int argc, char *argv[])
     app.db_integrity_check = g_strcmp0(dic, "0") != 0;
     g_free(dic);
 
+    /* Status-bar DB-path prefix is shown unless explicitly disabled.       */
+    gchar *sdp = on_app_config_get("statusbar_db_path");
+    app.statusbar_db_path = g_strcmp0(sdp, "0") != 0;
+    g_free(sdp);
+
     app.gtk_app = gtk_application_new("org.example.blue-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app.gtk_app, "activate",

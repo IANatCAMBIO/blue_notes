@@ -34,6 +34,20 @@ on_app_status(OnApp *app, const gchar *fmt, ...)
     g_free(message);
 }
 
+gchar *
+on_app_location_text(OnApp *app, const gchar *location)
+{
+    if (!app->statusbar_db_path || app->db == NULL ||
+        app->db->path == NULL)
+        return g_strdup(location);
+    /* One continuous path: folder locations already start with "/"; the
+     * non-path views ("#tag", "Pinned Notes", …) get one inserted.        */
+    return g_strdup_printf("%s%s%s", app->db->path,
+                           location != NULL && location[0] == '/' ? ""
+                                                                  : "/",
+                           location);
+}
+
 /* ---------------------------------------------------------------------------
  * exe_dir_from_argv0() — the directory containing the executable; when
  * launched via a bare name from PATH there is no directory part, so fall

@@ -118,7 +118,10 @@ sees the new flags.
   costs XI2 smooth scrolling; no-op off X11), `image_viewer` (program
   path; unset = system default),
   `search_win_w`/`search_win_h` (last search-window size, the default
-  for the next one), `list_columns` (list-view column layout,
+  for the next one), `statusbar_db_path` (`1|0`, default 1 — prefix the
+  folder path in the library/editor status bars with the DB file's path,
+  formatted by `on_app_location_text`; applies live from Settings),
+  `list_columns` (list-view column layout,
   `key:vis` pairs in display order, default
   `path:0,title:1,modified:1,created:0`
   — written on every header drag/toggle, applied at window

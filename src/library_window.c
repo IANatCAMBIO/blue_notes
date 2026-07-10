@@ -2779,7 +2779,9 @@ status_path_update(OnLibrary *lw)
         g_free(path);
     }
 
-    gtk_label_set_text(GTK_LABEL(lw->status_path), text);
+    gchar *full = on_app_location_text(lw->app, text);
+    gtk_label_set_text(GTK_LABEL(lw->status_path), full);
+    g_free(full);
     g_free(text);
 }
 

@@ -311,6 +311,20 @@ on_touch_assist_toggled(GtkToggleButton *check, gpointer user_data)
     on_app_status(app, "Touch assistance fully applies after a restart");
 }
 
+/* on_statusbar_db_path_toggled() — show/hide the database file's path in
+ * front of the folder path in every status bar, live.                       */
+static void
+on_statusbar_db_path_toggled(GtkToggleButton *check, gpointer user_data)
+{
+    OnApp *app = user_data;          /* application context                 */
+    app->statusbar_db_path = gtk_toggle_button_get_active(check);
+    on_app_config_set("statusbar_db_path",
+                      app->statusbar_db_path ? "1" : "0");
+    if (app->notify_notes_changed != NULL)
+        app->notify_notes_changed(app);  /* re-renders the library's path   */
+    on_editor_status_refresh_all(app);
+}
+
 /* on_db_integrity_check_toggled() — enable/disable the startup hash check.  */
 static void
 on_db_integrity_check_toggled(GtkToggleButton *check, gpointer user_data)
@@ -554,6 +568,15 @@ on_settings_window_open(OnApp *app)
     g_signal_connect(hash_check, "toggled",
                      G_CALLBACK(on_db_integrity_check_toggled), app);
     gtk_box_pack_start(GTK_BOX(vbox), hash_check, FALSE, FALSE, 0);
+
+    GtkWidget *sdp_check = gtk_check_button_new_with_label(
+        "Show database path in the status bar");
+    gtk_widget_set_margin_start(sdp_check, 12);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sdp_check),
+                                 app->statusbar_db_path);
+    g_signal_connect(sdp_check, "toggled",
+                     G_CALLBACK(on_statusbar_db_path_toggled), app);
+    gtk_box_pack_start(GTK_BOX(vbox), sdp_check, FALSE, FALSE, 0);
 
     /* --- close button ---------------------------------------------------------*/
     GtkWidget *close_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);

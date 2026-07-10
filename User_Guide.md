@@ -86,8 +86,10 @@ header bars anywhere). The first line of the note becomes its title.
   and the tap cut/copy/paste popup — all off by default; fully applies
   after a restart); and a custom image-viewer program for opening
   images.
-- **Database** — store the database in a custom folder (see Storage)
-  and toggle the startup integrity check.
+- **Database** — store the database in a custom folder (see Storage),
+  toggle the startup integrity check, and show or hide the database
+  path shown before the folder path in each window's status bar (on by
+  default — handy when you juggle more than one database).
 
 All changes apply live and persist (in `blue_notes.ini` next to the
 binary). Toolbar icons are PNGs bundled in `icons/` — replaceable by

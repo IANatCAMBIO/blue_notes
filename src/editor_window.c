@@ -3312,6 +3312,23 @@ on_view_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
         case GDK_KEY_m:
             toggle_paragraph_format(ed, ON_FMT_CODEBLOCK);
             return TRUE;
+        case GDK_KEY_n: {
+            /* New note in this note's folder, opened in its own editor.
+             * The library (if open) refreshes via the full notify — the
+             * folder's count just grew.                                   */
+            OnNoteMeta *meta = on_db_note_get(ed->app->db, ed->note_id);
+            if (meta != NULL) {
+                gint64 id = on_db_note_create(ed->app->db,
+                                              meta->folder_id);
+                on_db_note_meta_free(meta);
+                if (id != 0) {
+                    if (ed->app->notify_notes_changed != NULL)
+                        ed->app->notify_notes_changed(ed->app);
+                    on_editor_window_open(ed->app, id);
+                }
+            }
+            return TRUE;
+        }
         default:
             break;
         }
@@ -3651,10 +3668,30 @@ editor_status_path_update(OnEditor *ed)
 
     gchar *path = on_db_folder_path(ed->app->db, meta->folder_id);
     gchar *text = g_strdup_printf("/%s", path);
-    gtk_label_set_text(GTK_LABEL(ed->status_path), text);
+    gchar *full = on_app_location_text(ed->app, text);
+    gtk_label_set_text(GTK_LABEL(ed->status_path), full);
+    g_free(full);
     g_free(text);
     g_free(path);
     on_db_note_meta_free(meta);
+}
+
+/* ---------------------------------------------------------------------------
+ * on_editor_status_refresh_all() — re-render the status-bar location of
+ * every open editor (Settings toggled the DB-path prefix live).
+ * ------------------------------------------------------------------------- */
+void
+on_editor_status_refresh_all(OnApp *app)
+{
+    GHashTableIter iter;             /* walk of the open-editors table      */
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, app->editors);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        OnEditor *ed =               /* editor state stashed on its window  */
+            g_object_get_data(G_OBJECT(value), "on-editor");
+        if (ed != NULL)
+            editor_status_path_update(ed);
+    }
 }
 
 /* on_editor_focus_in() — the window regained focus: re-read the note's
