@@ -1583,6 +1583,14 @@ attach_checkbox_widget(OnEditor *ed, GtkTextChildAnchor *anchor)
 
     GtkWidget *btn = gtk_check_button_new();
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), checked);
+    /* Anchored children sit with their BOTTOM on the text baseline, so
+     * theme padding above/below the indicator lifts the box's center
+     * above the text's optical center.  Strip it (pinned for all states,
+     * like the code copy button — quirk of themed sizes) so the widget
+     * is just the bare indicator.                                          */
+    on_app_widget_add_css(btn,
+        "checkbutton, checkbutton:hover, checkbutton:active "
+        "{ padding: 0; min-height: 0; } check { margin: 0; }");
     /* Keyboard focus stays in the text; the box is mouse-only.             */
     gtk_widget_set_can_focus(btn, FALSE);
     g_object_set_data(G_OBJECT(btn), "on-anchor", anchor);
