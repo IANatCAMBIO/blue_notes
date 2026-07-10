@@ -50,7 +50,7 @@ sees the new flags.
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
-| `src/cli.[ch]` | Headless subcommand interface (runs before GTK in main; tags/folders/notes CRUD, backup, export); folders by path, notes by id. Agent-ready surface: `note cat [--md]` (plain text from the body_text cache / Markdown via `on_export_note_markdown`, images as `![image N]()` placeholders), `note append`/`note set` (plain text in; `set` REPLACES content and clears the tag links), `search TEXT [--regex]` (case-insensitive titles+bodies via `on_db_note_body_map`, prints id/modified/path), `note tags`/`tag`/`untag` + `tag notes` (`note tag` appends the literal `#name` span under the on-tag text tag and rewrites note_tags from the buffer, so GUI saves keep it), `note restore`; `note new/append/set` all accept `-` = stdin (shipped over the socket by `on_cli_command_reads_stdin`) |
+| `src/cli.[ch]` | Headless subcommand interface (runs before GTK in main; tags/folders/notes CRUD, backup, export); folders by path, notes by id. Agent-ready surface: `note cat [--md]` (plain text from the body_text cache / Markdown via `on_export_note_markdown`, images as `![image N]()` placeholders), `note append`/`note set` (plain text in; `set` REPLACES content and clears the tag links), `search TEXT [--regex]` (case-insensitive titles+bodies via `on_db_note_body_map`, prints id/modified/path), `note tags`/`tag`/`untag` + `tag notes` (`note tag` appends the literal `#name` span under the on-tag text tag and rewrites note_tags from the buffer, so GUI saves keep it), `note restore`, `action list/done/undone/due` (items addressed `NOTEID:ORD`; done/due rewrite the '!' line via the on_editor_action_* helpers — headless OnApp has editors==NULL so they take the offscreen path); `note new/append/set` all accept `-` = stdin (shipped over the socket by `on_cli_command_reads_stdin`) |
 | `icons/` | custom PNG toolbar icons + `vinyl.png` app logo (window icon, About button/dialog), loaded by basename; see icons/README.md |
 | `tools/import-apple-notes.sh` | Apple Notes migration (AppleScript export → CLI import; keeps modification dates) |
 
@@ -128,6 +128,9 @@ sees the new flags.
   `statusbar_note_id` (`1|0`, default 0 — show "id:N" at the right edge
   of each editor's status bar; the label is no-show-all so its updater
   owns visibility; applies live via `on_editor_status_refresh_all`),
+  `show_done_actions` (`1|0`, default 1 — list completed items in the
+  library's Action Items view; hidden mode also drops a row the moment
+  its checkbox is ticked; applies live via the full notify),
   `list_columns` (list-view column layout,
   `key:vis` pairs in display order, default
   `path:0,title:1,modified:1,created:0`
@@ -180,6 +183,50 @@ sees the new flags.
   in trash views the Delete paths turn permanent (with confirm) and the
   note menu becomes Open/Restore/Delete Permanently; GUI note/folder
   deletes elsewhere just trash with a status message, no dialog.
+- **Action items are '!' lines**: a line whose FIRST character is '!'
+  (outside code blocks; anchors occupy the first slot like a character)
+  is an action item — text = rest of line trimmed, DONE = the whole rest
+  struck through (ON_FMT_STRIKE, which serializes; that is the persisted
+  state).  The one definition lives in `on_note_extract_actions`
+  (serialize.c, a cheap record walk like body_text extraction).  The
+  editor tints action lines blue via the derived, editor-only
+  `on-action` tag (priority 0 so #tags keep their orange; re-derived on
+  insert/delete/paragraph-format/load/undo like the emoji padding) —
+  nothing about "actionness" is stored in BNBF.  The `action_items`
+  table (note_id/ord/text/done, ON DELETE CASCADE) is a queryable
+  mirror like note_tags: editor_save rewrites it only when the
+  extracted set differs from `ed->last_actions` (full library notify
+  then, light otherwise); CLI saves sync unconditionally; a one-time
+  backfill for pre-feature notes is gated by `PRAGMA user_version`
+  (`on_app_actions_backfill`, run after every long-lived `on_db_open` —
+  GUI start, CLI, db switch/restore).  Library: "Action Items" sidebar
+  row under Pinned Notes (visible while items exist; optional count =
+  OPEN items) shows a third notes-pane stack child ("actions"): untitled
+  checkbox column + "Action" text column (done rows struck).  Toggling
+  writes the db row, then `on_editor_action_set_done` strikes/un-strikes
+  the '!' line's text — in the live buffer + autosave when the note is
+  open, offscreen blob rewrite otherwise (ord = position among the
+  note's REAL action lines; bare "!" lines don't count).  DUE DATES live
+  in the line text as a trailing "due <date>" — ISO "YYYY-MM-DD" is the
+  written form, the parser (`on_action_split_due`, shared by extractor
+  and editor like on_list_prefix_chars) also reads "M/D/YY[YY]"; the
+  LAST word-boundary "due" that parses wins, so "send due diligence
+  report due 12/31/26" keeps its text.  A line that is only "! due X"
+  is no item.  Double-clicking the Due Date CELL opens a GtkCalendar
+  dialog → `on_editor_action_set_due` rewrites the suffix (appended
+  text inherits the item's strike state so done items stay done);
+  double-clicking elsewhere opens the owning note.  The view follows
+  the notes list's column conventions — the layout machinery is
+  view-generic (`view_columns_persist/apply`, config key + count +
+  default carried as object data on the VIEW, header buttons carry
+  "on-view"); `action_columns` ini key, default `done:1,action:1,due:1`;
+  headers sort (Action alpha, Due soonest-first with undated last, Done
+  by state).  The Due Date cell is tinted by urgency via a cell data
+  func (draw-time, so it rolls over at midnight): overdue red, today
+  dark yellow, ahead green — darkened for the striped row backgrounds;
+  no-due rows must reset "foreground-set" (shared renderer).
+  `action_items.due` column added by a guarded ALTER migration.
+  `grid_pref` restores list/grid when leaving the view.
 - **Backup/Restore** (File menu): `on_db_backup_to()` uses SQLite's
   online backup API on the live DB; `on_app_restore_database()` closes
   editors, keeps the old file as `blue_notes.db.pre-restore`, copies the

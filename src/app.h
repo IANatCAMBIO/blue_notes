@@ -84,6 +84,9 @@
  *   statusbar_note_id — whether each editor's status bar shows the
  *                    note's database id at the right edge; persisted as
  *                    the "statusbar_note_id" setting (default off).
+ *   show_done_actions — whether the library's Action Items view lists
+ *                    completed (struck-through) items too; persisted as
+ *                    the "show_done_actions" setting (default on).
  * ------------------------------------------------------------------------- */
 
 /* Which family a toolbar belongs to — each has its own style setting.       */
@@ -113,6 +116,7 @@ typedef struct OnApp {
     gboolean         db_integrity_check;
     gboolean         statusbar_db_path;
     gboolean         statusbar_note_id;
+    gboolean         show_done_actions;
     gboolean         db_transient;     /* TRUE when the current DB was opened
                                         * for this session only (not default) */
     GtkCssProvider  *touch_css;        /* screen CSS hiding the touch aids
@@ -339,6 +343,16 @@ gboolean on_app_switch_database(OnApp *app, const gchar *new_dir);
  * still in place and reopened).
  * ------------------------------------------------------------------------- */
 gboolean on_app_restore_database(OnApp *app, const gchar *backup_path);
+
+/* ---------------------------------------------------------------------------
+ * on_app_actions_backfill() — one-time population of the action_items
+ * table from pre-existing note content (gated by PRAGMA user_version, so
+ * repeat calls cost a single PRAGMA read).  Run after EVERY on_db_open
+ * that yields a long-lived handle: GUI startup, the headless CLI path,
+ * and database switch/restore (an adopted or restored file may predate
+ * the feature).  NULL-safe.
+ * ------------------------------------------------------------------------- */
+void on_app_actions_backfill(OnDatabase *db);
 
 /* ---------------------------------------------------------------------------
  * on_app_db_compute_hash() — compute the MD5 hex digest of the database

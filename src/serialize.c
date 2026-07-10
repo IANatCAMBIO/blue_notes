@@ -724,9 +724,63 @@ on_note_extract_text(const guint8 *data, gsize len)
 }
 
 /* ---------------------------------------------------------------------------
+ * parse_due_date() — parse one date string: ISO "YYYY-MM-DD" (the form
+ * the app writes) or the shorthand "M/D/YY" / "M/D/YYYY".  On success
+ * *out_ts receives local midnight of that day as a UNIX timestamp.
+ * ------------------------------------------------------------------------- */
+static gboolean
+parse_due_date(const gchar *s, gint64 *out_ts)
+{
+    gint y = 0, m = 0, d = 0;        /* parsed components                   */
+    gchar tail;                      /* catches trailing garbage            */
+    if (sscanf(s, "%d-%d-%d%c", &y, &m, &d, &tail) != 3 &&
+        sscanf(s, "%d/%d/%d%c", &m, &d, &y, &tail) != 3)
+        return FALSE;
+    if (y < 100)
+        y += 2000;                   /* "26" means 2026                     */
+    if (!g_date_valid_dmy((GDateDay)d, (GDateMonth)m, (GDateYear)y))
+        return FALSE;
+
+    GDateTime *dt = g_date_time_new_local(y, m, d, 0, 0, 0);
+    if (dt == NULL)
+        return FALSE;
+    *out_ts = g_date_time_to_unix(dt);
+    g_date_time_unref(dt);
+    return TRUE;
+}
+
+gboolean
+on_action_split_due(const gchar *rest, gsize *due_start, gint64 *due)
+{
+    /* The LAST word-boundary "due" whose remainder parses as a date wins
+     * ("send due diligence report due 2026-07-07" keeps its text).         */
+    const gchar *limit = rest + strlen(rest);   /* scan window end          */
+    while (limit > rest) {
+        const gchar *p = g_strrstr_len(rest, limit - rest, "due");
+        if (p == NULL)
+            return FALSE;
+        gboolean word = (p == rest ||
+                         g_ascii_isspace((guchar)p[-1])) &&
+                        g_ascii_isspace((guchar)p[3]);
+        if (word) {
+            gchar *date = g_strstrip(g_strdup(p + 3));
+            gboolean ok = parse_due_date(date, due);
+            g_free(date);
+            if (ok) {
+                *due_start = (gsize)(p - rest);
+                return TRUE;
+            }
+        }
+        limit = p;                   /* keep scanning leftward              */
+    }
+    return FALSE;
+}
+
+/* ---------------------------------------------------------------------------
  * action_finish_line() — helper for on_note_extract_actions(): if the
  * line just ended was an action line with real text, append it to *items
- * (text trimmed, ord = list position); either way reset the line state.
+ * (text trimmed, any trailing "due <date>" split off into `due`,
+ * ord = list position); either way reset the line state.
  * ------------------------------------------------------------------------- */
 typedef struct {
     gboolean at_start;               /* cursor sits at a line start         */
@@ -740,11 +794,22 @@ static void
 action_finish_line(ActionScan *s, GList **items, gint *ord)
 {
     if (s->is_action && s->have_rest) {
-        OnActionItem *it = g_new0(OnActionItem, 1);
-        it->text = g_strstrip(g_strdup(s->text->str));
-        it->done = s->struck;
-        it->ord  = (*ord)++;
-        *items = g_list_prepend(*items, it);
+        gchar *text = g_strdup(s->text->str);
+        gsize  due_start;            /* where the text part ends            */
+        gint64 due = 0;              /* parsed due date, 0 = none           */
+        if (on_action_split_due(text, &due_start, &due))
+            text[due_start] = '\0';
+        g_strstrip(text);
+        if (*text != '\0') {         /* a bare "! due 7/7/26" is no item    */
+            OnActionItem *it = g_new0(OnActionItem, 1);
+            it->text = text;
+            it->done = s->struck;
+            it->due  = due;
+            it->ord  = (*ord)++;
+            *items = g_list_prepend(*items, it);
+        } else {
+            g_free(text);
+        }
     }
     g_string_truncate(s->text, 0);
     s->at_start  = TRUE;

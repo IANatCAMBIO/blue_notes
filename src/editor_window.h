@@ -74,4 +74,34 @@ void on_editor_rebuild_toolbars_all(OnApp *app);
  * ------------------------------------------------------------------------- */
 void on_editor_status_refresh_all(OnApp *app);
 
+/* ---------------------------------------------------------------------------
+ * on_editor_action_set_done() — reflect an action item's done state into
+ * its note CONTENT: the '!' line's text is struck through (done) or
+ * un-struck (reopened).  With the note open in an editor the live buffer
+ * is edited and autosave persists it (including the action_items rows);
+ * otherwise the stored blob is rewritten offscreen (cached PNG bytes keep
+ * images from being re-encoded) and the table refreshed immediately.
+ * Called by the library's Action Items checkbox column.
+ *   app     — global application context.
+ *   note_id — the note holding the item.
+ *   ord     — the item's position among the note's action lines.
+ *   done    — the new state.
+ * Returns TRUE when the item was found and updated.
+ * ------------------------------------------------------------------------- */
+gboolean on_editor_action_set_done(OnApp *app, gint64 note_id, gint ord,
+                                   gboolean done);
+
+/* ---------------------------------------------------------------------------
+ * on_editor_action_set_due() — rewrite an action item's due date in its
+ * note CONTENT: the '!' line's trailing "due <date>" is replaced (or
+ * appended; `due` = 0 removes it).  The written form is ISO
+ * ("due 2026-07-07"); appended text inherits the item's strike state.
+ * Live-buffer + autosave when the note is open, offscreen rewrite
+ * otherwise — same contract as on_editor_action_set_done.
+ *   due — local-midnight UNIX timestamp, or 0 to clear.
+ * Returns TRUE when the item was found and updated.
+ * ------------------------------------------------------------------------- */
+gboolean on_editor_action_set_due(OnApp *app, gint64 note_id, gint ord,
+                                  gint64 due);
+
 #endif /* BLUE_EDITOR_WINDOW_H */

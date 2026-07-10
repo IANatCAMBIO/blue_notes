@@ -47,6 +47,7 @@ static const char *SCHEMA_SQL =
     "  ord     INTEGER NOT NULL,"
     "  text    TEXT NOT NULL,"
     "  done    INTEGER NOT NULL DEFAULT 0,"
+    "  due     INTEGER NOT NULL DEFAULT 0,"
     "  PRIMARY KEY (note_id, ord)"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id);"
@@ -233,6 +234,10 @@ on_db_open(const gchar *path_override)
                  NULL, NULL, NULL);
     sqlite3_exec(db->handle,
                  "ALTER TABLE folders ADD COLUMN trashed INTEGER "
+                 "NOT NULL DEFAULT 0",
+                 NULL, NULL, NULL);
+    sqlite3_exec(db->handle,
+                 "ALTER TABLE action_items ADD COLUMN due INTEGER "
                  "NOT NULL DEFAULT 0",
                  NULL, NULL, NULL);
 
@@ -969,8 +974,8 @@ on_db_note_set_actions(OnDatabase *db, gint64 note_id, GList *items)
 
     if (ok && items != NULL) {
         stmt = prepare(db,
-            "INSERT INTO action_items (note_id, ord, text, done) "
-            "VALUES (?,?,?,?)");
+            "INSERT INTO action_items (note_id, ord, text, done, due) "
+            "VALUES (?,?,?,?,?)");
         ok = stmt != NULL;
         gint ord = 0;                    /* row position, list order        */
         for (GList *l = items; ok && l != NULL; l = l->next, ord++) {
@@ -979,6 +984,7 @@ on_db_note_set_actions(OnDatabase *db, gint64 note_id, GList *items)
             sqlite3_bind_int(stmt, 2, ord);
             sqlite3_bind_text(stmt, 3, it->text, -1, SQLITE_TRANSIENT);
             sqlite3_bind_int(stmt, 4, it->done ? 1 : 0);
+            sqlite3_bind_int64(stmt, 5, it->due);
             ok = sqlite3_step(stmt) == SQLITE_DONE;
             sqlite3_reset(stmt);
         }
@@ -994,7 +1000,7 @@ GList *
 on_db_action_list(OnDatabase *db)
 {
     sqlite3_stmt *stmt = prepare(db,
-        "SELECT a.note_id, a.ord, a.text, a.done "
+        "SELECT a.note_id, a.ord, a.text, a.done, a.due "
         "FROM action_items a JOIN notes n ON n.id = a.note_id "
         "WHERE n." NOTE_VISIBLE_SQL " "
         "ORDER BY n.updated_at DESC, a.ord");
@@ -1008,6 +1014,7 @@ on_db_action_list(OnDatabase *db)
         it->ord     = sqlite3_column_int(stmt, 1);
         it->text    = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
         it->done    = sqlite3_column_int(stmt, 3) != 0;
+        it->due     = sqlite3_column_int64(stmt, 4);
         out = g_list_prepend(out, it);
     }
     sqlite3_finalize(stmt);

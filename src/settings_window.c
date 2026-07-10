@@ -107,6 +107,7 @@ apply_statusbar_db_path(OnApp *app)
  * ------------------------------------------------------------------------- */
 typedef enum {
     BS_SIDEBAR_COUNTS,               /* Appearance                          */
+    BS_SHOW_DONE_ACTIONS,
     BS_CODE_COPY,                    /* Editor                              */
     BS_CODE_LINES,
     BS_FIRST_LINE_H1,
@@ -127,6 +128,10 @@ static const BoolSetting BOOL_SETTINGS[] = {
     [BS_SIDEBAR_COUNTS] = {
         "Show note counts next to folders and tags",
         "sidebar_counts", offsetof(OnApp, sidebar_counts),
+        apply_notes_changed },
+    [BS_SHOW_DONE_ACTIONS] = {
+        "Show completed action items",
+        "show_done_actions", offsetof(OnApp, show_done_actions),
         apply_notes_changed },
     [BS_CODE_COPY] = {
         "Show copy button on code blocks",
@@ -402,6 +407,9 @@ on_settings_window_open(OnApp *app)
 
     gtk_box_pack_start(GTK_BOX(vbox),
                        bool_check_new(app, BS_SIDEBAR_COUNTS),
+                       FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox),
+                       bool_check_new(app, BS_SHOW_DONE_ACTIONS),
                        FALSE, FALSE, 0);
 
 #ifdef __APPLE__

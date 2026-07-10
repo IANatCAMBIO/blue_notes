@@ -26,6 +26,9 @@
  *   blue_notes note tag ID NAME           (appends the literal #NAME token)
  *   blue_notes note untag ID NAME
  *   blue_notes note open PATH             (id or Folder/Title; uses the GUI)
+ *   blue_notes action list [--open|--done]  ('!' items; NOTEID:ORD ids)
+ *   blue_notes action done|undone NOTEID:ORD
+ *   blue_notes action due NOTEID:ORD DATE|-  (rewrites the note line)
  *   blue_notes search TEXT [--regex]      (titles + full text, all notes)
  *   blue_notes quicknote                  (new root note in the running GUI)
  *   blue_notes backup FILE.db

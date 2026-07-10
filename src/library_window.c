@@ -57,6 +57,7 @@ enum {
     SB_KIND_ALL,                     /* the "All Notes" section             */
     SB_KIND_TRASH,                   /* the "Trash" section                 */
     SB_KIND_TRASH_FOLDER,            /* a trashed folder under Trash        */
+    SB_KIND_ACTIONS,                 /* the "Action Items" section          */
 };
 
 /* Sidebar GtkTreeStore columns.                                             */
@@ -80,6 +81,22 @@ enum {
     NL_CREATED_RAW,                  /* gint64: raw created_at (sort key)   */
     NL_N_COLS
 };
+
+/* Columns of the Action Items list model (the third notes-pane view).       */
+enum {
+    AL_NOTE_ID,                      /* gint64: owning note id              */
+    AL_ORD,                          /* gint: position among the note's
+                                        action lines (addresses the item)   */
+    AL_DONE,                         /* gboolean: checkbox state            */
+    AL_TEXT,                         /* gchar*: the item text               */
+    AL_DUE,                          /* gchar*: formatted due date ("")     */
+    AL_DUE_RAW,                      /* gint64: due timestamp (sort key;
+                                        0 = none, sorts after any date)     */
+    AL_N_COLS
+};
+
+/* How many columns the Action Items list owns (done, Action, Due Date).    */
+#define N_ACTION_COLUMNS 3
 
 /* Drag-and-drop target shared by the notes views (sources) and the
  * sidebar (destination).  GTK_TREE_MODEL_ROW is the built-in target used
@@ -133,6 +150,11 @@ typedef struct {
     GtkListStore *notes_store;
     GtkTreeView  *notes_list;
     GtkIconView  *notes_grid;
+    GtkListStore *actions_store;         /* Action Items model (AL_*)      */
+    GtkTreeView  *actions_view;          /* Action Items list view         */
+    gboolean      grid_pref;             /* the user's list/grid choice, so
+                                            leaving the Action Items view
+                                            restores the right mode        */
     GtkWidget    *stack;
     gint          sel_kind;
     gint64        sel_id;
@@ -292,7 +314,8 @@ sb_kind_is_section(gint kind)
            kind == SB_KIND_TAGS_HEADER ||
            kind == SB_KIND_PINNED ||
            kind == SB_KIND_ALL ||
-           kind == SB_KIND_TRASH;
+           kind == SB_KIND_TRASH ||
+           kind == SB_KIND_ACTIONS;
 }
 
 static void
@@ -480,6 +503,26 @@ refresh_sidebar(OnLibrary *lw)
                            SB_ID,   (gint64)0,
                            SB_NAME, label,
                            SB_RAW,  "Pinned Notes",
+                           -1);
+        g_free(label);
+    }
+
+    /* "Action Items" under Pinned Notes — every '!' line across the
+     * visible notes (mirrored into the action_items table by saves).
+     * Shown only while any exist; the optional count is the OPEN ones.     */
+    gint n_actions = 0, n_open = 0;  /* all items / unchecked items         */
+    on_db_action_counts(lw->app->db, &n_actions, &n_open);
+    if (n_actions > 0) {
+        gchar *label = lw->app->sidebar_counts
+            ? g_strdup_printf("Action Items (%d)", n_open)
+            : g_strdup("Action Items");
+        GtkTreeIter iter;
+        gtk_tree_store_append(lw->sidebar_store, &iter, NULL);
+        gtk_tree_store_set(lw->sidebar_store, &iter,
+                           SB_KIND, SB_KIND_ACTIONS,
+                           SB_ID,   (gint64)0,
+                           SB_NAME, label,
+                           SB_RAW,  "Action Items",
                            -1);
         g_free(label);
     }
@@ -763,6 +806,59 @@ get_note_thumb(OnLibrary *lw, OnNoteMeta *m)
 }
 
 /* ---------------------------------------------------------------------------
+ * refresh_actions() — repopulate the Action Items model (the notes
+ * pane's third view) and show it: one row per '!' line across every
+ * visible note, newest note first.  Same scroll-keeping contract as
+ * refresh_notes.
+ * ------------------------------------------------------------------------- */
+static void
+refresh_actions(OnLibrary *lw)
+{
+    gboolean keep_scroll = lw->shown_kind == lw->sel_kind;
+    GtkWidget *sw =                  /* the view's scrolled window          */
+        gtk_widget_get_parent(GTK_WIDGET(lw->actions_view));
+    GtkAdjustment *vadj = GTK_IS_SCROLLED_WINDOW(sw)
+        ? gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(sw))
+        : NULL;
+    gdouble scroll_pos = vadj ? gtk_adjustment_get_value(vadj) : 0.0;
+
+    lw->populating++;
+    gtk_list_store_clear(lw->actions_store);
+    GList *items = on_db_action_list(lw->app->db);
+    for (GList *l = items; l != NULL; l = l->next) {
+        OnActionItem *it = l->data;  /* one action item                     */
+        if (it->done && !lw->app->show_done_actions)
+            continue;                /* Settings: hide completed items      */
+        gchar *when = NULL;          /* formatted due date, or NULL         */
+        if (it->due != 0) {
+            GDateTime *dt = g_date_time_new_from_unix_local(it->due);
+            when = g_date_time_format(dt, "%b %e, %Y");
+            g_date_time_unref(dt);
+        }
+        GtkTreeIter iter;
+        gtk_list_store_append(lw->actions_store, &iter);
+        gtk_list_store_set(lw->actions_store, &iter,
+                           AL_NOTE_ID, it->note_id,
+                           AL_ORD,     it->ord,
+                           AL_DONE,    it->done,
+                           AL_TEXT,    it->text,
+                           AL_DUE,     when != NULL ? when : "",
+                           AL_DUE_RAW, it->due,
+                           -1);
+        g_free(when);
+    }
+    on_db_action_list_free(items);
+    lw->populating--;
+
+    gtk_stack_set_visible_child_name(GTK_STACK(lw->stack), "actions");
+    lw->shown_kind = lw->sel_kind;
+    lw->shown_id   = lw->sel_id;
+    if (keep_scroll && scroll_pos > 0)
+        scroll_keep_queue(vadj, scroll_pos);
+    status_path_update(lw);
+}
+
+/* ---------------------------------------------------------------------------
  * refresh_notes() — repopulate the notes model from the current sidebar
  * selection (a folder's notes, or a tag's notes).  When the selection is
  * the same one already shown — a content refresh (autosave, editor
@@ -771,6 +867,18 @@ get_note_thumb(OnLibrary *lw, OnNoteMeta *m)
 static void
 refresh_notes(OnLibrary *lw)
 {
+    /* The Action Items selection swaps in its own view and model.          */
+    if (lw->sel_kind == SB_KIND_ACTIONS) {
+        refresh_actions(lw);
+        return;
+    }
+    /* Leaving the actions view: restore the user's list/grid mode BEFORE
+     * the thumbnail decision below reads the visible child.                */
+    if (g_strcmp0(gtk_stack_get_visible_child_name(GTK_STACK(lw->stack)),
+                  "actions") == 0)
+        gtk_stack_set_visible_child_name(GTK_STACK(lw->stack),
+                                         lw->grid_pref ? "grid" : "list");
+
     /* Thumbnails are only rendered while the grid is showing: list mode
      * never pays for them (they used to be regenerated for the edited
      * note on EVERY autosave), and switching to grid refreshes.            */
@@ -930,7 +1038,8 @@ persist_note_order(OnLibrary *lw)
      * and trash views are assembled from elsewhere (persisting a drag in
      * All Notes would scramble every folder's internal order).             */
     if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED ||
-        lw->sel_kind == SB_KIND_ALL || in_trash_view(lw))
+        lw->sel_kind == SB_KIND_ALL || lw->sel_kind == SB_KIND_ACTIONS ||
+        in_trash_view(lw))
         return;
 
     GArray *ids = g_array_new(FALSE, FALSE, sizeof(gint64));
@@ -1049,6 +1158,152 @@ on_note_grid_activated(GtkIconView *view, GtkTreePath *path,
 {
     (void)view;
     open_note_at_path(user_data, path);
+}
+
+/* ---------------------------------------------------------------------------
+ * on_action_toggled() — the Action Items checkbox column: flip the item's
+ * done state everywhere — the model row (instant feedback), its
+ * action_items row, and the note text itself (strikethrough) via
+ * on_editor_action_set_done.
+ * ------------------------------------------------------------------------- */
+static void
+on_action_toggled(GtkCellRendererToggle *cell, gchar *path_str,
+                  gpointer user_data)
+{
+    (void)cell;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    GtkTreeIter iter;                /* the clicked row                     */
+    if (!gtk_tree_model_get_iter_from_string(
+            GTK_TREE_MODEL(lw->actions_store), &iter, path_str))
+        return;
+
+    gint64   note_id;                /* the item's address                  */
+    gint     ord;
+    gboolean done;
+    gtk_tree_model_get(GTK_TREE_MODEL(lw->actions_store), &iter,
+                       AL_NOTE_ID, &note_id,
+                       AL_ORD,     &ord,
+                       AL_DONE,    &done,
+                       -1);
+    done = !done;
+
+    /* A just-completed item disappears immediately when completed items
+     * are hidden; otherwise the row simply re-renders checked + struck.    */
+    if (done && !lw->app->show_done_actions)
+        gtk_list_store_remove(lw->actions_store, &iter);
+    else
+        gtk_list_store_set(lw->actions_store, &iter, AL_DONE, done, -1);
+    on_db_action_set_done(lw->app->db, note_id, ord, done);
+    on_editor_action_set_done(lw->app, note_id, ord, done);
+    if (lw->app->sidebar_counts)
+        refresh_sidebar(lw);         /* the section's open count changed    */
+}
+
+/* ---------------------------------------------------------------------------
+ * action_due_dialog() — modal calendar for one action item's due date.
+ * Set rewrites the "due YYYY-MM-DD" suffix of the '!' line in the note
+ * text (on_editor_action_set_due), Clear removes it; the store row
+ * updates immediately, the durable action_items row follows from the
+ * content rewrite.
+ * ------------------------------------------------------------------------- */
+static void
+action_due_dialog(OnLibrary *lw, GtkTreeIter *iter)
+{
+    gint64 note_id, due;             /* the item's address + current due    */
+    gint   ord;
+    gtk_tree_model_get(GTK_TREE_MODEL(lw->actions_store), iter,
+                       AL_NOTE_ID, &note_id,
+                       AL_ORD,     &ord,
+                       AL_DUE_RAW, &due,
+                       -1);
+
+    GtkWidget *dlg = gtk_dialog_new_with_buttons(
+        "Blue Notes - Due Date", GTK_WINDOW(lw->window), GTK_DIALOG_MODAL,
+        "_Clear",  1,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Set",    GTK_RESPONSE_OK,
+        NULL);
+    gtk_dialog_set_default_response(GTK_DIALOG(dlg), GTK_RESPONSE_OK);
+
+    GtkWidget *cal = gtk_calendar_new();
+    if (due != 0) {                  /* open on the current due date        */
+        GDateTime *dt = g_date_time_new_from_unix_local(due);
+        gtk_calendar_select_month(GTK_CALENDAR(cal),
+                                  (guint)(g_date_time_get_month(dt) - 1),
+                                  (guint)g_date_time_get_year(dt));
+        gtk_calendar_select_day(GTK_CALENDAR(cal),
+                                (guint)g_date_time_get_day_of_month(dt));
+        g_date_time_unref(dt);
+    }
+    /* GtkCalendar is a plain widget, not a container: use margins.         */
+    gtk_widget_set_margin_start(cal, 8);
+    gtk_widget_set_margin_end(cal, 8);
+    gtk_widget_set_margin_top(cal, 8);
+    gtk_widget_set_margin_bottom(cal, 8);
+    gtk_box_pack_start(
+        GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dlg))),
+        cal, TRUE, TRUE, 0);
+    gtk_widget_show_all(cal);
+
+    gint response = gtk_dialog_run(GTK_DIALOG(dlg));
+    gint64 new_due = -1;             /* -1 = leave unchanged                */
+    if (response == GTK_RESPONSE_OK) {
+        guint y, m, d;               /* calendar month is 0-based           */
+        gtk_calendar_get_date(GTK_CALENDAR(cal), &y, &m, &d);
+        GDateTime *dt = g_date_time_new_local((gint)y, (gint)m + 1,
+                                              (gint)d, 0, 0, 0);
+        if (dt != NULL) {
+            new_due = g_date_time_to_unix(dt);
+            g_date_time_unref(dt);
+        }
+    } else if (response == 1) {
+        new_due = 0;                 /* Clear                               */
+    }
+    gtk_widget_destroy(dlg);
+    if (new_due < 0)
+        return;
+
+    if (on_editor_action_set_due(lw->app, note_id, ord, new_due)) {
+        gchar *when = NULL;          /* formatted for the Due Date cell     */
+        if (new_due != 0) {
+            GDateTime *dt = g_date_time_new_from_unix_local(new_due);
+            when = g_date_time_format(dt, "%b %e, %Y");
+            g_date_time_unref(dt);
+        }
+        gtk_list_store_set(lw->actions_store, iter,
+                           AL_DUE,     when != NULL ? when : "",
+                           AL_DUE_RAW, new_due,
+                           -1);
+        g_free(when);
+    }
+}
+
+/* on_action_row_activated() — double-click: the Due Date cell opens the
+ * date selector; any other cell opens the item's note.                      */
+static void
+on_action_row_activated(GtkTreeView *view, GtkTreePath *path,
+                        GtkTreeViewColumn *column, gpointer user_data)
+{
+    (void)view;
+    OnLibrary *lw = user_data;       /* owning library window               */
+    GtkTreeIter iter;                /* the activated row                   */
+    if (!gtk_tree_model_get_iter(GTK_TREE_MODEL(lw->actions_store),
+                                 &iter, path))
+        return;
+
+    if (column != NULL &&
+        g_strcmp0(g_object_get_data(G_OBJECT(column), "on-colkey"),
+                  "due") == 0) {
+        action_due_dialog(lw, &iter);
+        return;
+    }
+
+    gint64 note_id;                  /* owning note                         */
+    gtk_tree_model_get(GTK_TREE_MODEL(lw->actions_store), &iter,
+                       AL_NOTE_ID, &note_id, -1);
+    GtkWidget *win = on_editor_window_open(lw->app, note_id);
+    if (win != NULL)
+        gtk_window_present(GTK_WINDOW(win));
 }
 
 /* ===========================================================================
@@ -2324,12 +2579,18 @@ on_sidebar_button_press(GtkWidget *widget, GdkEventButton *event,
  * view mode & export
  * =========================================================================== */
 
-/* on_view_list() / on_view_grid() — flip the stack between the modes.       */
+/* on_view_list() / on_view_grid() — flip the stack between the modes.
+ * Both record the choice in grid_pref so leaving the Action Items view
+ * restores it; while that view is showing they only set the preference
+ * (refresh_notes keeps the actions child on top for that selection).       */
 static void
 on_view_list(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
+    lw->grid_pref = FALSE;
+    if (lw->sel_kind == SB_KIND_ACTIONS)
+        return;
     gtk_stack_set_visible_child_name(GTK_STACK(lw->stack), "list");
     if (lw->list_autofit)
         refresh_notes(lw);           /* re-measure the widths grid skipped  */
@@ -2340,6 +2601,9 @@ on_view_grid(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
+    lw->grid_pref = TRUE;
+    if (lw->sel_kind == SB_KIND_ACTIONS)
+        return;
     gtk_stack_set_visible_child_name(GTK_STACK(lw->stack), "grid");
     refresh_notes(lw);               /* fill the thumbnails list mode skips */
 }
@@ -2786,7 +3050,8 @@ status_path_update(OnLibrary *lw)
 
     gchar *text;                     /* the location part                   */
     if (lw->sel_kind == SB_KIND_TAG || lw->sel_kind == SB_KIND_PINNED ||
-        lw->sel_kind == SB_KIND_ALL || lw->sel_kind == SB_KIND_TRASH) {
+        lw->sel_kind == SB_KIND_ALL || lw->sel_kind == SB_KIND_TRASH ||
+        lw->sel_kind == SB_KIND_ACTIONS) {
         text = g_strdup(lw->sel_name != NULL ? lw->sel_name : "");
     } else if (lw->sel_kind == SB_KIND_TRASH_FOLDER) {
         text = g_strdup_printf("Trash/%s",
@@ -2977,8 +3242,11 @@ sort_by_title(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
  *
  * Headers drag to reorder (GtkTreeViewColumn reorderable) and right-click
  * for a show/hide menu.  The layout persists in the ini as
- * "list_columns=key:vis,key:vis,..." in display order; each column
- * carries its stable key as object data ("on-colkey").
+ * "<cfgkey>=key:vis,key:vis,..." in display order; each column carries
+ * its stable key as object data ("on-colkey").  The machinery is shared
+ * by the notes list and the Action Items list: each VIEW carries its ini
+ * key ("on-colcfg"), its expected column count ("on-ncols") and its
+ * default layout ("on-coldefault") as object data.
  * =========================================================================== */
 
 /* How many columns the notes list owns (Title, Path, Modified, Created) —
@@ -2986,15 +3254,19 @@ sort_by_title(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
 #define N_LIST_COLUMNS 4
 
 /* ---------------------------------------------------------------------------
- * list_columns_persist() — write the list view's current column order and
+ * view_columns_persist() — write a list view's current column order and
  * visibility to the ini.  A partial column list (the view tearing down
  * removes columns one by one) is never persisted.
  * ------------------------------------------------------------------------- */
 static void
-list_columns_persist(OnLibrary *lw)
+view_columns_persist(GtkTreeView *view)
 {
-    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
-    if (g_list_length(cols) != N_LIST_COLUMNS) {
+    const gchar *cfg_key =           /* the view's ini key                  */
+        g_object_get_data(G_OBJECT(view), "on-colcfg");
+    gint n_cols =                    /* the view's full column count        */
+        GPOINTER_TO_INT(g_object_get_data(G_OBJECT(view), "on-ncols"));
+    GList *cols = gtk_tree_view_get_columns(view);
+    if (cfg_key == NULL || g_list_length(cols) != (guint)n_cols) {
         g_list_free(cols);
         return;
     }
@@ -3010,16 +3282,16 @@ list_columns_persist(OnLibrary *lw)
             gtk_tree_view_column_get_visible(l->data) ? 1 : 0);
     }
     g_list_free(cols);
-    on_app_config_set("list_columns", s->str);
+    on_app_config_set(cfg_key, s->str);
     g_string_free(s, TRUE);
 }
 
-/* list_column_by_key() — the list-view column carrying `key`, or NULL.      */
+/* view_column_by_key() — the view's column carrying `key`, or NULL.         */
 static GtkTreeViewColumn *
-list_column_by_key(OnLibrary *lw, const gchar *key)
+view_column_by_key(GtkTreeView *view, const gchar *key)
 {
     GtkTreeViewColumn *found = NULL;
-    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
+    GList *cols = gtk_tree_view_get_columns(view);
     for (GList *l = cols; l != NULL && found == NULL; l = l->next)
         if (g_strcmp0(g_object_get_data(G_OBJECT(l->data), "on-colkey"),
                       key) == 0)
@@ -3028,20 +3300,29 @@ list_column_by_key(OnLibrary *lw, const gchar *key)
     return found;
 }
 
+/* list_column_by_key() — notes-list shorthand (autofit uses it a lot).      */
+static GtkTreeViewColumn *
+list_column_by_key(OnLibrary *lw, const gchar *key)
+{
+    return view_column_by_key(lw->notes_list, key);
+}
+
 /* ---------------------------------------------------------------------------
- * list_columns_apply() — put the saved column order and visibility back
- * (default: Path and Created hidden, Title and Modified visible).
- * Unknown keys are skipped, missing ones keep their built order and
- * visibility, and at least one column is forced visible (a hand-edited
- * ini can't blank the view).
+ * view_columns_apply() — put a view's saved column order and visibility
+ * back (falling back to its "on-coldefault" layout).  Unknown keys are
+ * skipped, missing ones keep their built order and visibility, and at
+ * least one column is forced visible (a hand-edited ini can't blank the
+ * view).
  * ------------------------------------------------------------------------- */
 static void
-list_columns_apply(OnLibrary *lw)
+view_columns_apply(GtkTreeView *view)
 {
-    gchar *cfg = on_app_config_get("list_columns");
+    const gchar *cfg_key =           /* the view's ini key                  */
+        g_object_get_data(G_OBJECT(view), "on-colcfg");
+    gchar *cfg = cfg_key != NULL ? on_app_config_get(cfg_key) : NULL;
     if (cfg == NULL || *cfg == '\0') {
         g_free(cfg);
-        cfg = g_strdup("path:0,title:1,modified:1,created:0");
+        cfg = g_strdup(g_object_get_data(G_OBJECT(view), "on-coldefault"));
     }
 
     GtkTreeViewColumn *prev = NULL;  /* each entry moves after the last     */
@@ -3049,9 +3330,9 @@ list_columns_apply(OnLibrary *lw)
     for (gsize i = 0; entries[i] != NULL; i++) {
         gchar **kv = g_strsplit(entries[i], ":", 2);
         GtkTreeViewColumn *c =
-            kv[0] != NULL ? list_column_by_key(lw, kv[0]) : NULL;
+            kv[0] != NULL ? view_column_by_key(view, kv[0]) : NULL;
         if (c != NULL) {
-            gtk_tree_view_move_column_after(lw->notes_list, c, prev);
+            gtk_tree_view_move_column_after(view, c, prev);
             gtk_tree_view_column_set_visible(
                 c, kv[1] == NULL || g_strcmp0(kv[1], "0") != 0);
             prev = c;
@@ -3061,7 +3342,7 @@ list_columns_apply(OnLibrary *lw)
     g_strfreev(entries);
     g_free(cfg);
 
-    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
+    GList *cols = gtk_tree_view_get_columns(view);
     gboolean any_visible = FALSE;    /* is at least one column shown?       */
     for (GList *l = cols; l != NULL; l = l->next)
         any_visible |= gtk_tree_view_column_get_visible(l->data);
@@ -3070,15 +3351,16 @@ list_columns_apply(OnLibrary *lw)
     g_list_free(cols);
 }
 
-/* on_notes_columns_changed() — a header drag reordered the columns:
+/* on_view_columns_changed() — a header drag reordered the columns:
  * persist the new layout.  Fires per-column during teardown too, when
  * the library state may already be gone — bail out then.                    */
 static void
-on_notes_columns_changed(GtkTreeView *view, gpointer user_data)
+on_view_columns_changed(GtkTreeView *view, gpointer user_data)
 {
+    (void)user_data;
     if (gtk_widget_in_destruction(GTK_WIDGET(view)))
         return;
-    list_columns_persist(user_data);
+    view_columns_persist(view);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3180,36 +3462,43 @@ on_autofit_toggled(GtkCheckMenuItem *item, gpointer user_data)
 }
 
 /* on_column_toggled() — a check item in the header menu flipped:
- * show/hide that column and persist.                                        */
+ * show/hide that column and persist.  Autofit re-measuring applies to
+ * the notes list only (the Action Items list doesn't autofit).             */
 static void
 on_column_toggled(GtkCheckMenuItem *item, gpointer user_data)
 {
     OnLibrary *lw = user_data;       /* owning library window               */
     GtkTreeViewColumn *c = g_object_get_data(G_OBJECT(item), "on-column");
+    GtkTreeView *view = GTK_TREE_VIEW(gtk_tree_view_column_get_tree_view(c));
     gtk_tree_view_column_set_visible(
         c, gtk_check_menu_item_get_active(item));
-    list_columns_persist(lw);
-    if (lw->list_autofit)
+    view_columns_persist(view);
+    if (view == lw->notes_list && lw->list_autofit)
         refresh_notes(lw);           /* a re-shown column needs its width   */
 }
 
 /* ---------------------------------------------------------------------------
  * on_column_header_press() — right click on a list-view column header:
- * a menu of check items showing/hiding each column.  The only remaining
- * visible column's item is disabled so the view can't go empty.
+ * a menu of check items showing/hiding each column of the header's view
+ * (the button carries its view as "on-view").  The only remaining
+ * visible column's item is disabled so the view can't go empty; the
+ * notes list's menu also offers the autofit toggle.
  * ------------------------------------------------------------------------- */
 static gboolean
 on_column_header_press(GtkWidget *button, GdkEventButton *event,
                        gpointer user_data)
 {
-    (void)button;
     OnLibrary *lw = user_data;       /* owning library window               */
     if (event->button != GDK_BUTTON_SECONDARY)
+        return FALSE;
+    GtkTreeView *view =              /* the view this header belongs to     */
+        g_object_get_data(G_OBJECT(button), "on-view");
+    if (view == NULL)
         return FALSE;
 
     GtkWidget *menu = menu_new_transient(lw);
 
-    GList *cols = gtk_tree_view_get_columns(lw->notes_list);
+    GList *cols = gtk_tree_view_get_columns(view);
     gint n_visible = 0;              /* how many columns are shown          */
     for (GList *l = cols; l != NULL; l = l->next)
         if (gtk_tree_view_column_get_visible(l->data))
@@ -3218,8 +3507,12 @@ on_column_header_press(GtkWidget *button, GdkEventButton *event,
     for (GList *l = cols; l != NULL; l = l->next) {
         GtkTreeViewColumn *c = l->data;  /* one column                      */
         gboolean visible = gtk_tree_view_column_get_visible(c);
-        GtkWidget *item = gtk_check_menu_item_new_with_label(
-            gtk_tree_view_column_get_title(c));
+        const gchar *label =         /* a titleless column (the checkbox
+                                        one) still needs a menu label       */
+            g_object_get_data(G_OBJECT(c), "on-collabel");
+        if (label == NULL)
+            label = gtk_tree_view_column_get_title(c);
+        GtkWidget *item = gtk_check_menu_item_new_with_label(label);
         gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), visible);
         if (visible && n_visible == 1)
             gtk_widget_set_sensitive(item, FALSE);
@@ -3230,15 +3523,17 @@ on_column_header_press(GtkWidget *button, GdkEventButton *event,
     }
     g_list_free(cols);
 
-    gtk_menu_shell_append(GTK_MENU_SHELL(menu),
-                          gtk_separator_menu_item_new());
-    GtkWidget *fit = gtk_check_menu_item_new_with_label(
-        "Autofit Column Widths");
-    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(fit),
-                                   lw->list_autofit);
-    g_signal_connect(fit, "toggled",
-                     G_CALLBACK(on_autofit_toggled), lw);
-    gtk_menu_shell_append(GTK_MENU_SHELL(menu), fit);
+    if (view == lw->notes_list) {
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu),
+                              gtk_separator_menu_item_new());
+        GtkWidget *fit = gtk_check_menu_item_new_with_label(
+            "Autofit Column Widths");
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(fit),
+                                       lw->list_autofit);
+        g_signal_connect(fit, "toggled",
+                         G_CALLBACK(on_autofit_toggled), lw);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), fit);
+    }
 
     menu_popup(menu, event);
     return TRUE;
@@ -3276,6 +3571,76 @@ sort_by_time(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
     gtk_tree_model_get(model, a, col, &ta, -1);
     gtk_tree_model_get(model, b, col, &tb, -1);
     return (tb > ta) - (tb < ta);
+}
+
+/* sort_actions_by_text() — alphabetical sort for the Action header.         */
+static gint
+sort_actions_by_text(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
+                     gpointer user_data)
+{
+    (void)user_data;
+    gchar *ta, *tb;                  /* the two item texts                  */
+    gtk_tree_model_get(model, a, AL_TEXT, &ta, -1);
+    gtk_tree_model_get(model, b, AL_TEXT, &tb, -1);
+    gint result = utf8_casecmp(ta, tb);
+    g_free(ta); g_free(tb);
+    return result;
+}
+
+/* ---------------------------------------------------------------------------
+ * action_due_color_func() — cell data function tinting the Due Date cell
+ * by urgency: already passed = red, today = yellow, still ahead = green
+ * (each darkened enough to read on the white/light-blue row stripes).
+ * Runs at draw time, so the colors roll over at midnight without a
+ * refresh.  Rows without a due date reset to the theme color — the
+ * renderer is shared, so a stale "foreground" would leak across rows.
+ * ------------------------------------------------------------------------- */
+static void
+action_due_color_func(GtkTreeViewColumn *col, GtkCellRenderer *cell,
+                      GtkTreeModel *model, GtkTreeIter *iter,
+                      gpointer user_data)
+{
+    (void)col; (void)user_data;
+    gint64 due;                      /* the row's due timestamp             */
+    gtk_tree_model_get(model, iter, AL_DUE_RAW, &due, -1);
+    if (due == 0) {
+        g_object_set(cell, "foreground-set", FALSE, NULL);
+        return;
+    }
+
+    /* Compare calendar DAYS in local time (the stored value is already
+     * local midnight, but day-level compare keeps this DST-proof).         */
+    GDateTime *now = g_date_time_new_now_local();
+    GDateTime *dt  = g_date_time_new_from_unix_local(due);
+    gint today = g_date_time_get_year(now) * 10000 +
+                 g_date_time_get_month(now) * 100 +
+                 g_date_time_get_day_of_month(now);
+    gint day   = g_date_time_get_year(dt) * 10000 +
+                 g_date_time_get_month(dt) * 100 +
+                 g_date_time_get_day_of_month(dt);
+    g_date_time_unref(now);
+    g_date_time_unref(dt);
+
+    const gchar *color = day < today   ? "#c01c28"   /* overdue: red       */
+                       : day == today  ? "#d19a00"   /* today: gold        */
+                                       : "#26a269";  /* ahead: green       */
+    g_object_set(cell, "foreground", color, NULL);
+}
+
+/* sort_actions_by_due() — Due Date header: the first click shows the
+ * soonest deadline on top; items without a due date sort after every
+ * dated one.                                                                */
+static gint
+sort_actions_by_due(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b,
+                    gpointer user_data)
+{
+    (void)user_data;
+    gint64 da, db;                   /* the two due timestamps              */
+    gtk_tree_model_get(model, a, AL_DUE_RAW, &da, -1);
+    gtk_tree_model_get(model, b, AL_DUE_RAW, &db, -1);
+    if (da == 0) da = G_MAXINT64;    /* undated: always last                */
+    if (db == 0) db = G_MAXINT64;
+    return (da > db) - (da < db);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3925,12 +4290,19 @@ on_library_window_create(OnApp *app)
             g_object_set_data(G_OBJECT(COLS[i].col), "on-cell",
                               COLS[i].cell);
             gtk_tree_view_column_set_reorderable(COLS[i].col, TRUE);
-            g_signal_connect(gtk_tree_view_column_get_button(COLS[i].col),
-                             "button-press-event",
+            GtkWidget *btn = gtk_tree_view_column_get_button(COLS[i].col);
+            g_object_set_data(G_OBJECT(btn), "on-view", lw->notes_list);
+            g_signal_connect(btn, "button-press-event",
                              G_CALLBACK(on_column_header_press), lw);
         }
     }
-    list_columns_apply(lw);          /* saved order + visibility            */
+    g_object_set_data(G_OBJECT(lw->notes_list), "on-colcfg",
+                      (gpointer)"list_columns");
+    g_object_set_data(G_OBJECT(lw->notes_list), "on-ncols",
+                      GINT_TO_POINTER(N_LIST_COLUMNS));
+    g_object_set_data(G_OBJECT(lw->notes_list), "on-coldefault",
+                      (gpointer)"path:0,title:1,modified:1,created:0");
+    view_columns_apply(lw->notes_list);  /* saved order + visibility        */
     {
         /* Autofit is the default; only an explicit "0" turns it off.       */
         lw->list_autofit = on_app_config_get_bool("list_autofit", TRUE);
@@ -3940,7 +4312,7 @@ on_library_window_create(OnApp *app)
     /* Connected only now, so applying the saved layout doesn't re-persist
      * it; from here on every header drag writes the ini.                   */
     g_signal_connect(lw->notes_list, "columns-changed",
-                     G_CALLBACK(on_notes_columns_changed), lw);
+                     G_CALLBACK(on_view_columns_changed), lw);
     gtk_tree_selection_set_mode(
         gtk_tree_view_get_selection(lw->notes_list),
         GTK_SELECTION_MULTIPLE);
@@ -4020,10 +4392,111 @@ on_library_window_create(OnApp *app)
     gtk_container_add(GTK_CONTAINER(grid_scroll),
                       GTK_WIDGET(lw->notes_grid));
 
-    /* --- stack: list <-> grid ----------------------------------------------*/
+    /* --- action items view (third stack child) -----------------------------*/
+    lw->actions_store = gtk_list_store_new(AL_N_COLS,
+                                           G_TYPE_INT64,   /* AL_NOTE_ID   */
+                                           G_TYPE_INT,     /* AL_ORD       */
+                                           G_TYPE_BOOLEAN, /* AL_DONE      */
+                                           G_TYPE_STRING,  /* AL_TEXT      */
+                                           G_TYPE_STRING,  /* AL_DUE       */
+                                           G_TYPE_INT64);  /* AL_DUE_RAW   */
+    lw->actions_view = GTK_TREE_VIEW(gtk_tree_view_new_with_model(
+        GTK_TREE_MODEL(lw->actions_store)));
+    gtk_tree_view_set_enable_search(lw->actions_view, FALSE); /* quirk 16   */
+    {
+        /* Untitled checkbox column + the item text + the due date; done
+         * rows also render struck through, matching the editor.            */
+        GtkCellRenderer *tog = gtk_cell_renderer_toggle_new();
+        g_signal_connect(tog, "toggled",
+                         G_CALLBACK(on_action_toggled), lw);
+        GtkTreeViewColumn *cd = gtk_tree_view_column_new_with_attributes(
+            "", tog, "active", AL_DONE, NULL);
+        gtk_tree_view_append_column(lw->actions_view, cd);
+
+        GtkCellRenderer *txt = gtk_cell_renderer_text_new();
+        g_object_set(txt, "ellipsize", PANGO_ELLIPSIZE_END, "xpad", 10,
+                     NULL);
+        GtkTreeViewColumn *ca = gtk_tree_view_column_new_with_attributes(
+            "Action", txt,
+            "text",          AL_TEXT,
+            "strikethrough", AL_DONE,
+            NULL);
+        gtk_tree_view_column_set_expand(ca, TRUE);
+        gtk_tree_view_column_set_resizable(ca, TRUE);
+        gtk_tree_view_append_column(lw->actions_view, ca);
+
+        GtkCellRenderer *rdue = gtk_cell_renderer_text_new();
+        g_object_set(rdue, "xpad", 10, NULL);
+        GtkTreeViewColumn *cdue = gtk_tree_view_column_new_with_attributes(
+            "Due Date", rdue,
+            "text",          AL_DUE,
+            "strikethrough", AL_DONE,
+            NULL);
+        gtk_tree_view_column_set_cell_data_func(cdue, rdue,
+            action_due_color_func, NULL, NULL);
+        gtk_tree_view_column_set_resizable(cdue, TRUE);
+        gtk_tree_view_append_column(lw->actions_view, cdue);
+
+        /* Clickable headers, notes-list style.  AL_DONE sorts with the
+         * default boolean compare.                                         */
+        gtk_tree_sortable_set_sort_func(
+            GTK_TREE_SORTABLE(lw->actions_store), AL_TEXT,
+            sort_actions_by_text, NULL, NULL);
+        gtk_tree_sortable_set_sort_func(
+            GTK_TREE_SORTABLE(lw->actions_store), AL_DUE_RAW,
+            sort_actions_by_due, NULL, NULL);
+        gtk_tree_view_column_set_sort_column_id(cd, AL_DONE);
+        gtk_tree_view_column_set_sort_column_id(ca, AL_TEXT);
+        gtk_tree_view_column_set_sort_column_id(cdue, AL_DUE_RAW);
+
+        /* Column layout: the notes list's conventions — drag a header to
+         * reorder, right-click for show/hide; persists per view.           */
+        struct { GtkTreeViewColumn *col; const gchar *key;
+                 const gchar *label; } ACOLS[N_ACTION_COLUMNS] = {
+            { cd,   "done",   "Done" },   /* titleless: needs a menu label */
+            { ca,   "action", NULL },
+            { cdue, "due",    NULL },
+        };
+        for (gsize i = 0; i < G_N_ELEMENTS(ACOLS); i++) {
+            g_object_set_data(G_OBJECT(ACOLS[i].col), "on-colkey",
+                              (gpointer)ACOLS[i].key);
+            if (ACOLS[i].label != NULL)
+                g_object_set_data(G_OBJECT(ACOLS[i].col), "on-collabel",
+                                  (gpointer)ACOLS[i].label);
+            gtk_tree_view_column_set_reorderable(ACOLS[i].col, TRUE);
+            GtkWidget *btn =
+                gtk_tree_view_column_get_button(ACOLS[i].col);
+            g_object_set_data(G_OBJECT(btn), "on-view", lw->actions_view);
+            g_signal_connect(btn, "button-press-event",
+                             G_CALLBACK(on_column_header_press), lw);
+        }
+    }
+    g_object_set_data(G_OBJECT(lw->actions_view), "on-colcfg",
+                      (gpointer)"action_columns");
+    g_object_set_data(G_OBJECT(lw->actions_view), "on-ncols",
+                      GINT_TO_POINTER(N_ACTION_COLUMNS));
+    g_object_set_data(G_OBJECT(lw->actions_view), "on-coldefault",
+                      (gpointer)"done:1,action:1,due:1");
+    view_columns_apply(lw->actions_view);
+    g_signal_connect(lw->actions_view, "columns-changed",
+                     G_CALLBACK(on_view_columns_changed), lw);
+    g_signal_connect(lw->actions_view, "row-activated",
+                     G_CALLBACK(on_action_row_activated), lw);
+
+    GtkWidget *actions_scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(actions_scroll),
+                                   GTK_POLICY_AUTOMATIC,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_overlay_scrolling(
+        GTK_SCROLLED_WINDOW(actions_scroll), FALSE);
+    gtk_container_add(GTK_CONTAINER(actions_scroll),
+                      GTK_WIDGET(lw->actions_view));
+
+    /* --- stack: list <-> grid <-> action items ------------------------------*/
     lw->stack = gtk_stack_new();
     gtk_stack_add_named(GTK_STACK(lw->stack), list_scroll, "list");
     gtk_stack_add_named(GTK_STACK(lw->stack), grid_scroll, "grid");
+    gtk_stack_add_named(GTK_STACK(lw->stack), actions_scroll, "actions");
     gtk_stack_set_visible_child_name(GTK_STACK(lw->stack), "list");
 
     /* --- status bar: selection path (left) + latest event (right) ----------*/

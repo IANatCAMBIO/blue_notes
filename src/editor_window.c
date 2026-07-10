@@ -167,6 +167,13 @@ typedef struct {
     gboolean        auto_h1;
     GtkWidget      *status_path;
     GtkWidget      *status_note_id;
+    GList          *last_actions;    /* the action-item set last synced to
+                                        the action_items table (OnActionItem
+                                        list) — editor_save rewrites the
+                                        table only when the freshly
+                                        extracted set differs, so ordinary
+                                        saves do no action work (same idea
+                                        as tags_modified)                    */
 
     GPtrArray      *undo_stack;
     GPtrArray      *redo_stack;
@@ -202,6 +209,8 @@ static const struct {
 static void     editor_save(OnEditor *ed);
 static void     editor_queue_autosave(OnEditor *ed);
 static void     tag_capture_end(OnEditor *ed, gboolean apply);
+static void     action_retag_lines(OnEditor *ed, gint start_off,
+                                   gint end_off);
 static void     tag_popup_update(OnEditor *ed);
 static void     renumber_list_block(OnEditor *ed, gint line);
 static gboolean line_strip_list_prefix(OnEditor *ed, GtkTextIter *line_start);
@@ -520,6 +529,14 @@ apply_paragraph_format(OnEditor *ed, guint32 flag)
 
     if (flag == ON_FMT_LIST_NUMBER)
         renumber_list_block(ed, first_line);
+
+    /* Becoming (or ceasing to be) a code block flips whether a '!' line
+     * counts as an action item — re-derive the tint for the range.         */
+    GtkTextIter rs, rls, rle;        /* range bounds                        */
+    gtk_text_buffer_get_iter_at_line(ed->buffer, &rs, first_line);
+    line_span(ed->buffer, last_line, &rls, &rle);
+    action_retag_lines(ed, gtk_text_iter_get_offset(&rs),
+                       gtk_text_iter_get_offset(&rle));
 
     editor_queue_autosave(ed);
     /* Code blocks may have appeared or vanished: refresh their buttons.
@@ -1522,6 +1539,287 @@ on_insert_image_clicked(GtkToolButton *btn, gpointer user_data)
         g_free(path);
     }
     gtk_widget_destroy(dialog);
+}
+
+/* ===========================================================================
+ * action items
+ *
+ * A line whose first character is '!' (outside code blocks) is an action
+ * item; the rest of the line is its text (see on_note_extract_actions in
+ * serialize.c — the one definition both this styling pass and the
+ * library's Action Items view derive from).  The editor tints such lines
+ * blue with the editor-only "on-action" tag — never serialized, always
+ * re-derived from the text, exactly like the emoji padding.  A DONE item
+ * is one whose text is struck through (ON_TAGNAME_STRIKE), which DOES
+ * serialize — that is how the checked state persists in the note.
+ * =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * action_line_rest() — is buffer line `line` an action line?  On TRUE,
+ * *ls and *le hold the whole line span (newline excluded) and *rs the
+ * first character after the '!'.
+ * ------------------------------------------------------------------------- */
+static gboolean
+action_line_rest(GtkTextBuffer *buffer, gint line, GtkTextIter *ls,
+                 GtkTextIter *rs, GtkTextIter *le)
+{
+    gtk_text_buffer_get_iter_at_line(buffer, ls, line);
+    if (gtk_text_iter_get_char(ls) != '!')
+        return FALSE;                /* anchors read as U+FFFC: never '!'   */
+    if (on_flags_at_iter(buffer, ls, ON_FMT_PARA_MASK) & ON_FMT_CODEBLOCK)
+        return FALSE;                /* '!' inside code is just code        */
+    *le = *ls;
+    if (!gtk_text_iter_ends_line(le))
+        gtk_text_iter_forward_to_line_end(le);
+    *rs = *ls;
+    gtk_text_iter_forward_char(rs);
+    return TRUE;
+}
+
+/* ---------------------------------------------------------------------------
+ * action_retag_lines() — re-derive the blue on-action styling for every
+ * line between the two buffer OFFSETS (their lines, inclusive).  Cheap
+ * enough to run per edit: the affected range is normally one line.
+ * ------------------------------------------------------------------------- */
+static void
+action_retag_lines(OnEditor *ed, gint start_off, gint end_off)
+{
+    GtkTextIter it;                  /* offset → line resolution            */
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &it, start_off);
+    gint first = gtk_text_iter_get_line(&it);
+    gtk_text_buffer_get_iter_at_offset(ed->buffer, &it, end_off);
+    gint last = gtk_text_iter_get_line(&it);
+
+    for (gint line = first; line <= last; line++) {
+        GtkTextIter ls, rs, le;      /* line span (+ rest start)            */
+        gboolean is = action_line_rest(ed->buffer, line, &ls, &rs, &le);
+        if (!is) {
+            gtk_text_buffer_get_iter_at_line(ed->buffer, &ls, line);
+            le = ls;
+            if (!gtk_text_iter_ends_line(&le))
+                gtk_text_iter_forward_to_line_end(&le);
+        }
+        if (is)
+            gtk_text_buffer_apply_tag_by_name(ed->buffer, "on-action",
+                                              &ls, &le);
+        else
+            gtk_text_buffer_remove_tag_by_name(ed->buffer, "on-action",
+                                               &ls, &le);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * action_rest_real() — does an action line's rest-of-line text hold a
+ * REAL item?  Bare "!" lines and lines that are nothing but a
+ * "due <date>" suffix don't count — matching the extractor, so ord
+ * numbering stays aligned between the table and the buffer walks.
+ * ------------------------------------------------------------------------- */
+static gboolean
+action_rest_real(const gchar *rest)
+{
+    gchar *t = g_strdup(rest);
+    gsize  due_start;                /* where the text part ends            */
+    gint64 due;
+    if (on_action_split_due(t, &due_start, &due))
+        t[due_start] = '\0';
+    gboolean real = *g_strstrip(t) != '\0';
+    g_free(t);
+    return real;
+}
+
+/* ---------------------------------------------------------------------------
+ * action_strike_ord() — strike (or un-strike) the text of the `ord`-th
+ * REAL action line of `buffer` (see action_rest_real).  Works on any
+ * buffer that has been through on_buffer_ensure_tags — live editors and
+ * offscreen loads alike.  Returns TRUE when the line was found.
+ * ------------------------------------------------------------------------- */
+static gboolean
+action_strike_ord(GtkTextBuffer *buffer, gint ord, gboolean done)
+{
+    gint n_lines = gtk_text_buffer_get_line_count(buffer);
+    gint seen = 0;                   /* real action lines passed so far     */
+    for (gint line = 0; line < n_lines; line++) {
+        GtkTextIter ls, rs, le;      /* line span (+ rest start)            */
+        if (!action_line_rest(buffer, line, &ls, &rs, &le))
+            continue;
+        gchar *t = gtk_text_buffer_get_text(buffer, &rs, &le, FALSE);
+        gboolean real = action_rest_real(t);
+        g_free(t);
+        if (!real)
+            continue;
+        if (seen++ == ord) {
+            if (done)
+                gtk_text_buffer_apply_tag_by_name(
+                    buffer, ON_TAGNAME_STRIKE, &rs, &le);
+            else
+                gtk_text_buffer_remove_tag_by_name(
+                    buffer, ON_TAGNAME_STRIKE, &rs, &le);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* ---------------------------------------------------------------------------
+ * action_due_ord() — rewrite the "due <date>" suffix of the `ord`-th
+ * REAL action line: any existing suffix is removed, then " due
+ * YYYY-MM-DD" is appended for a non-zero `due` (ISO — the canonical
+ * written form; the parser also reads M/D/YY).  Appended text inherits
+ * the strike state of the item text so a done item stays done.
+ * Returns TRUE when the line was found.
+ * ------------------------------------------------------------------------- */
+static gboolean
+action_due_ord(GtkTextBuffer *buffer, gint ord, gint64 due)
+{
+    gint n_lines = gtk_text_buffer_get_line_count(buffer);
+    gint seen = 0;                   /* real action lines passed so far     */
+    for (gint line = 0; line < n_lines; line++) {
+        GtkTextIter ls, rs, le;      /* line span (+ rest start)            */
+        if (!action_line_rest(buffer, line, &ls, &rs, &le))
+            continue;
+        gchar *rest = gtk_text_buffer_get_text(buffer, &rs, &le, FALSE);
+        if (!action_rest_real(rest)) {
+            g_free(rest);
+            continue;
+        }
+        if (seen++ != ord) {
+            g_free(rest);
+            continue;
+        }
+
+        /* Byte length of the item text: everything up to an existing
+         * "due <date>" (or the whole rest), trailing whitespace dropped.   */
+        gsize  text_bytes;
+        gsize  due_start;
+        gint64 old_due;
+        text_bytes = on_action_split_due(rest, &due_start, &old_due)
+                     ? due_start : strlen(rest);
+        while (text_bytes > 0 &&
+               g_ascii_isspace((guchar)rest[text_bytes - 1]))
+            text_bytes--;
+        glong text_chars = g_utf8_strlen(rest, (gssize)text_bytes);
+
+        /* Does the item text end struck through?  The new suffix must
+         * match, or setting a due date would "reopen" a done item.         */
+        GtkTextIter del_s = rs;      /* everything after the text goes      */
+        gtk_text_iter_forward_chars(&del_s, (gint)text_chars);
+        gboolean struck = FALSE;
+        if (text_chars > 0) {
+            GtkTextIter probe = del_s;
+            gtk_text_iter_backward_char(&probe);
+            struck = (on_flags_at_iter(buffer, &probe, ON_FMT_INLINE_MASK) &
+                      ON_FMT_STRIKE) != 0;
+        }
+
+        gtk_text_buffer_delete(buffer, &del_s, &le);
+        if (due != 0) {
+            GDateTime *dt = g_date_time_new_from_unix_local(due);
+            gchar *suffix = g_date_time_format(dt, " due %Y-%m-%d");
+            g_date_time_unref(dt);
+            if (struck)
+                gtk_text_buffer_insert_with_tags_by_name(
+                    buffer, &del_s, suffix, -1, ON_TAGNAME_STRIKE, NULL);
+            else
+                gtk_text_buffer_insert(buffer, &del_s, suffix, -1);
+            g_free(suffix);
+        }
+        g_free(rest);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* ---------------------------------------------------------------------------
+ * action_lists_equal() — same items, same order, same done flags, same
+ * due dates?  Every OnActionItem field the table mirrors must be
+ * compared here, or edits to that field never reach the library.
+ * ------------------------------------------------------------------------- */
+static gboolean
+action_lists_equal(GList *a, GList *b)
+{
+    for (; a != NULL && b != NULL; a = a->next, b = b->next) {
+        OnActionItem *x = a->data, *y = b->data;
+        if (x->done != y->done || x->due != y->due ||
+            g_strcmp0(x->text, y->text) != 0)
+            return FALSE;
+    }
+    return a == NULL && b == NULL;
+}
+
+/* ---------------------------------------------------------------------------
+ * action_apply_to_note() — run one buffer edit (strike or due rewrite)
+ * against note `note_id`: on the live buffer + autosave when an editor
+ * is open (the save's extract-and-compare refreshes action_items), else
+ * on an offscreen load with an immediate save + action_items resync
+ * (images keep their cached PNG bytes, so nothing is re-encoded).
+ *   edit — the line edit; receives (buffer, ord, arg).
+ * Returns TRUE when the item was found and updated.
+ * ------------------------------------------------------------------------- */
+typedef gboolean (*ActionEdit)(GtkTextBuffer *buffer, gint ord, gint64 arg);
+
+static gboolean
+action_apply_to_note(OnApp *app, gint64 note_id, ActionEdit edit,
+                     gint ord, gint64 arg)
+{
+    /* Headless callers (the CLI) have no open-editors table at all.        */
+    GtkWidget *win = app->editors != NULL
+        ? g_hash_table_lookup(app->editors, &note_id) : NULL;
+    OnEditor  *ed  = win != NULL
+        ? g_object_get_data(G_OBJECT(win), "on-editor") : NULL;
+    if (ed != NULL) {
+        if (!edit(ed->buffer, ord, arg))
+            return FALSE;
+        editor_queue_autosave(ed);
+        return TRUE;
+    }
+
+    gsize   blob_len = 0;            /* stored blob size                    */
+    guint8 *blob = on_db_note_load(app->db, note_id, &blob_len);
+    if (blob == NULL)
+        return FALSE;
+
+    GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
+    on_buffer_ensure_tags(buffer);
+    on_note_deserialize(buffer, blob, blob_len);
+    g_free(blob);
+
+    gboolean ok = edit(buffer, ord, arg);
+    if (ok) {
+        gsize   out_len;             /* re-serialized blob size             */
+        guint8 *out = on_note_serialize(buffer, &out_len);
+        gchar  *title = on_buffer_first_line(buffer);
+        gchar  *body = on_note_extract_text(out, out_len);
+        GList  *actions = on_note_extract_actions(out, out_len);
+        ok = on_db_note_save(app->db, note_id, title, out, out_len, body) &&
+             on_db_note_set_actions(app->db, note_id, actions);
+        on_db_action_list_free(actions);
+        g_free(body);
+        g_free(title);
+        g_free(out);
+    }
+    g_object_unref(buffer);
+    return ok;
+}
+
+/* action_strike_edit() — ActionEdit adapter for action_strike_ord.          */
+static gboolean
+action_strike_edit(GtkTextBuffer *buffer, gint ord, gint64 arg)
+{
+    return action_strike_ord(buffer, ord, arg != 0);
+}
+
+gboolean
+on_editor_action_set_done(OnApp *app, gint64 note_id, gint ord,
+                          gboolean done)
+{
+    return action_apply_to_note(app, note_id, action_strike_edit,
+                                ord, done ? 1 : 0);
+}
+
+gboolean
+on_editor_action_set_due(OnApp *app, gint64 note_id, gint ord, gint64 due)
+{
+    return action_apply_to_note(app, note_id, action_due_ord, ord, due);
 }
 
 /* ===========================================================================
@@ -2717,6 +3015,8 @@ undo_restore(OnEditor *ed, const UndoSnap *from, const UndoSnap *to)
         gtk_text_buffer_remove_tag_by_name(ed->buffer, "on-emoji",
                                            &es, &ee);
         tag_emoji_in_range(ed, emo_s, emo_e);
+        /* The action-line tint is derived, not snapshotted, either.        */
+        action_retag_lines(ed, emo_s, emo_e);
     }
 
     GtkTextIter cur;                 /* restored cursor position            */
@@ -2852,8 +3152,11 @@ on_buffer_insert_text_after(GtkTextBuffer *buffer, GtkTextIter *location,
     glong n_chars = g_utf8_strlen(text, len);
     gint  end_off = gtk_text_iter_get_offset(location);
 
-    /* Pad any emoji in the insertion so they don't overlap neighbours.     */
+    /* Pad any emoji in the insertion so they don't overlap neighbours,
+     * and re-derive the action-line tint for every line the insertion
+     * touched (a paste can create or split '!' lines anywhere).            */
     tag_emoji_in_range(ed, end_off - (gint)n_chars, end_off);
+    action_retag_lines(ed, end_off - (gint)n_chars, end_off);
     gtk_text_buffer_get_iter_at_offset(ed->buffer, location, end_off);
 
     /* Auto-H1: while the first line of a brand-new note is being typed,
@@ -3036,18 +3339,26 @@ on_buffer_delete_range_before(GtkTextBuffer *buffer, GtkTextIter *start,
 }
 
 /* ---------------------------------------------------------------------------
- * on_buffer_delete_range_after() — after a deletion, cancel any active tag
- * capture whose '#' was removed, or refresh the popup otherwise.
+ * on_buffer_delete_range_after() — after a deletion, re-derive the action
+ * tint of the merged line (removing a '!' or a newline can create or
+ * destroy an action line), then cancel any active tag capture whose '#'
+ * was removed, or refresh the popup otherwise.
  * ------------------------------------------------------------------------- */
 static void
 on_buffer_delete_range_after(GtkTextBuffer *buffer, GtkTextIter *start,
                              GtkTextIter *end, gpointer user_data)
 {
-    (void)buffer; (void)start; (void)end;
+    (void)buffer; (void)end;
     OnEditor *ed = user_data;        /* owning editor                       */
-    if (ed->internal_change > 0 || ed->tag_start == NULL)
+    if (ed->internal_change > 0)
         return;
 
+    /* start == end after the deletion: retag the collapse-point line.      */
+    gint off = gtk_text_iter_get_offset(start);
+    action_retag_lines(ed, off, off);
+
+    if (ed->tag_start == NULL)
+        return;
     GtkTextIter s, e;                /* revalidated capture span            */
     if (!tag_capture_span(ed, &s, &e))
         tag_capture_end(ed, FALSE);  /* '#' itself was deleted              */
@@ -3432,6 +3743,20 @@ editor_save(OnEditor *ed)
         g_list_free_full(tags, g_free);
         ed->tags_modified = FALSE;
     }
+
+    /* Mirror the '!' action lines into action_items only when they
+     * changed since the last sync (cheap blob walk, no images decoded) —
+     * the common save writes no action rows at all.                        */
+    GList *actions = on_note_extract_actions(blob, blob_len);
+    gboolean actions_changed = !action_lists_equal(actions,
+                                                   ed->last_actions);
+    if (actions_changed) {
+        on_db_note_set_actions(ed->app->db, ed->note_id, actions);
+        on_db_action_list_free(ed->last_actions);
+        ed->last_actions = actions;
+    } else {
+        on_db_action_list_free(actions);
+    }
     ed->dirty = FALSE;
 
     /* Window title mirrors the note title.                                 */
@@ -3444,7 +3769,10 @@ editor_save(OnEditor *ed)
     g_free(title);
     g_free(blob);
 
-    if (tags_changed) {
+    /* Tag-set and action-set changes touch the sidebar (tag rows, the
+     * Action Items section/count): full refresh.  Plain saves take the
+     * light notes-pane-only path.                                          */
+    if (tags_changed || actions_changed) {
         if (ed->app->notify_notes_changed != NULL)
             ed->app->notify_notes_changed(ed->app);
     } else {
@@ -3564,6 +3892,7 @@ on_editor_destroy(GtkWidget *widget, gpointer user_data)
     ed->tag_choices = NULL;
 
     g_hash_table_remove(ed->app->editors, &ed->note_id);
+    on_db_action_list_free(ed->last_actions);
     g_object_unref(ed->buffer);
     g_free(ed);
 }
@@ -3987,6 +4316,15 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
      * attach_checkbox_widget).  Never serialized.                          */
     gtk_text_buffer_create_tag(ed->buffer, "on-check-drop",
                                "rise", -3 * PANGO_SCALE, NULL);
+    /* Editor-only tint for '!' action lines (see the action items
+     * section) — blue, mirroring the tags' orange.  Lowest priority so a
+     * #tag span inside an action line keeps its own color.                 */
+    GtkTextTag *action_tag = gtk_text_buffer_create_tag(
+        ed->buffer, "on-action",
+        "foreground", "#1a5fb4",
+        "weight",     PANGO_WEIGHT_SEMIBOLD,
+        NULL);
+    gtk_text_tag_set_priority(action_tag, 0);
 
     gtk_text_view_set_editable(ed->view, TRUE);
     gtk_text_view_set_wrap_mode(ed->view, GTK_WRAP_WORD_CHAR);
@@ -4008,10 +4346,16 @@ editor_window_open_full(OnApp *app, gint64 note_id, const gchar *search_term)
         ed->internal_change++;
         on_note_deserialize(ed->buffer, blob, blob_len);
         editor_attach_image_widgets(ed);
-        /* Re-apply the (unserialized) emoji padding to loaded content.     */
+        /* Re-apply the (unserialized) emoji padding and the action-line
+         * tint to loaded content — both are derived, never stored.         */
         tag_emoji_in_range(ed, 0,
                            gtk_text_buffer_get_char_count(ed->buffer));
+        action_retag_lines(ed, 0,
+                           gtk_text_buffer_get_char_count(ed->buffer));
         ed->internal_change--;
+        /* The loaded blob defines the action set already in the table —
+         * editor_save only rewrites rows when the set drifts from this.    */
+        ed->last_actions = on_note_extract_actions(blob, blob_len);
         g_free(blob);
     }
     /* A brand-new (empty) note gets its first line auto-styled as H1

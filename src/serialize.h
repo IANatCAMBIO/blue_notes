@@ -193,6 +193,21 @@ gchar *on_note_extract_text(const guint8 *data, gsize len);
 GList *on_note_extract_actions(const guint8 *data, gsize len);
 
 /* ---------------------------------------------------------------------------
+ * on_action_split_due() — locate a trailing "due <date>" in an action
+ * item's rest-of-line text.  The date is ISO "YYYY-MM-DD" (what the app
+ * writes) or "M/D/YY" / "M/D/YYYY"; the last word-boundary "due" whose
+ * remainder parses wins.  The one parser both the extractor and the
+ * editor's due-date rewriting use (like on_list_prefix_chars).
+ *   rest      — the text after the line's '!' (NUL-terminated).
+ *   due_start — receives the BYTE offset in `rest` of the "due" word
+ *               (the item text ends before it, whitespace-trimmed).
+ *   due       — receives local midnight of the date as a UNIX timestamp.
+ * Returns TRUE when a due date was found and parsed.
+ * ------------------------------------------------------------------------- */
+gboolean on_action_split_due(const gchar *rest, gsize *due_start,
+                             gint64 *due);
+
+/* ---------------------------------------------------------------------------
  * on_buffer_first_line() — extract the note title: the text of the first
  * non-empty line, or "New Note" if the buffer is empty.
  *   buffer — buffer to inspect.

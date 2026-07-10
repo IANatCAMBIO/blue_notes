@@ -394,6 +394,7 @@ main(int argc, char *argv[])
         return 1;
     }
     g_free(db_path);
+    on_app_actions_backfill(db);     /* one-time '!'-line index (gated)     */
 
     /* The shared context handed to every window.                           */
     OnApp app = {
@@ -434,6 +435,8 @@ main(int argc, char *argv[])
         on_app_config_get_bool("statusbar_db_path",      TRUE);
     app.statusbar_note_id =
         on_app_config_get_bool("statusbar_note_id",      FALSE);
+    app.show_done_actions =
+        on_app_config_get_bool("show_done_actions",      TRUE);
 
     app.gtk_app = gtk_application_new("org.example.blue-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);

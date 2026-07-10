@@ -24,6 +24,21 @@ for the database schema and file formats see [Internals](Internals.md).
 - **Ctrl/Cmd+N** creates a note in the selected folder. The vinyl logo
   at the toolbar's right edge opens the About dialog (program info plus
   live database statistics).
+- **Action Items** — a sidebar section (below Pinned Notes, shown while
+  any exist) listing every `!` action item from all your notes, one per
+  row: a checkbox, the item text, and its due date. Ticking the
+  checkbox marks the item done — its line turns struck-through in the
+  note itself (and vice versa: striking the line in the editor checks
+  it here). Due dates are color-coded: green while the date is still
+  ahead, yellow on the day itself, red once it has passed.
+  Double-click the Due Date cell to pick a date from a
+  calendar (it's written into the note line as `due YYYY-MM-DD`;
+  Clear removes it); double-click anywhere else to open the note the
+  item came from. The columns work like the notes list's: click a
+  header to sort (due dates put the soonest first, undated items last),
+  drag headers to reorder, right-click one to show/hide columns. With
+  sidebar counts enabled, the section shows how many items are still
+  open, and *Settings → Appearance* can hide completed items.
 
 ## Search
 
@@ -66,6 +81,13 @@ header bars anywhere). The first line of the note becomes its title.
 - **Tags** — type `#` and keep typing; a popup suggests existing tags
   (arrows + Enter to pick), space ends the tag, Escape cancels. Tags
   appear in the sidebar and act like folders.
+- **Action items** — start a line with `!` and the rest of the line
+  becomes a follow-up action item, shown in blue (handy for meeting
+  notes). End the line with `due` and a date — `! call Bob due
+  2026-07-15` or `due 7/15/26` — to give it a due date. Every action
+  item across all notes is collected in the library's **Action Items**
+  view; completed items show struck through in the note. Lines inside
+  code blocks don't count.
 - **Find in note** — the search box at the toolbar's right (Ctrl/Cmd+F)
   highlights every match as you type; Enter or the ↑/↓ buttons jump
   between matches with wrap-around.
@@ -77,6 +99,7 @@ header bars anywhere). The first line of the note becomes its title.
 - **Appearance** — toolbar button style (text / icons / icons above
   text), set separately for library and editor windows (also available
   by right-clicking any toolbar); note counts next to folders and tags;
+  whether the Action Items view lists completed items (on by default);
   and — when built with gtk-mac-integration — a native macOS menu bar
   option.
 - **Editor** — show/hide the code-block copy button and code-block line
@@ -176,6 +199,18 @@ blue_notes note restore ID [ID...]
 blue_notes folder delete [--permanent] PATH
 ```
 
+Action items (see the editor's `!` lines; items are addressed by the
+`NOTEID:ORD` ids the list prints):
+
+```
+blue_notes action list [--open|--done]   every action item: NOTEID:ORD,
+                                         [x]/[ ], due date, text
+blue_notes action done NOTEID:ORD        mark done (strikes the note line)
+blue_notes action undone NOTEID:ORD      reopen a completed item
+blue_notes action due NOTEID:ORD DATE|-  set/clear the due date (rewrites
+                                         the line's "due DATE" suffix)
+```
+
 GUI and maintenance:
 
 ```
@@ -228,6 +263,13 @@ Run "blue_notes help" for the full command list.
   autosave could overwrite your change. Creating new notes is always
   safe.
 ```
+
+The `action` commands make **task-manager sync** straightforward:
+`action list --open` is the export side (stable `NOTEID:ORD` ids, ISO
+due dates, tab-separated), and `action done` / `action due` are the
+import side when something is completed or rescheduled in the other
+tool. An agent can diff the two systems and reconcile in either
+direction without touching note content by hand.
 
 A useful pattern is a capture workflow — "summarize this thread and
 save it to my notes" becomes:

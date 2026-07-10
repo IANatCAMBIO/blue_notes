@@ -100,14 +100,18 @@ typedef struct {
  * Fields:
  *   note_id — owning note (0 when coming straight from the extractor).
  *   ord     — the item's position among the note's action lines.
- *   text    — item text: the '!' line's remainder, trimmed (owned).
+ *   text    — item text: the '!' line's remainder, trimmed, without any
+ *             trailing "due <date>" (owned).
  *   done    — completed: the whole text is struck through in the note.
+ *   due     — due date as a UNIX timestamp (local midnight), parsed from
+ *             the line's trailing "due <date>"; 0 = no due date.
  * ------------------------------------------------------------------------- */
 typedef struct {
     gint64   note_id;
     gint     ord;
     gchar   *text;
     gboolean done;
+    gint64   due;
 } OnActionItem;
 
 /* --------------------------- lifecycle ---------------------------------- */

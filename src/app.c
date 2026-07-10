@@ -8,6 +8,7 @@
  * =========================================================================== */
 
 #include "app.h"
+#include "serialize.h"               /* on_note_extract_actions (backfill)  */
 
 #include <glib/gstdio.h>
 #include <stdio.h>
@@ -534,6 +535,38 @@ copy_file(const gchar *src, const gchar *dest)
     return ok;
 }
 
+/* The user_version that says the action_items table has been backfilled
+ * from pre-existing note content.  2: re-indexed once after the
+ * due-date-blind change comparison left due-only edits stale in the
+ * table (2026-07).                                                          */
+#define DB_VERSION_ACTIONS 2
+
+void
+on_app_actions_backfill(OnDatabase *db)
+{
+    if (db == NULL || on_db_user_version(db) >= DB_VERSION_ACTIONS)
+        return;
+
+    /* Trashed notes are included so a later restore is already indexed;
+     * the library's queries filter them out.  Same cheap record walk as
+     * the body_text extraction (image payloads skipped) — one-time cost.   */
+    GList *notes = on_db_note_list_all(db, TRUE);
+    for (GList *l = notes; l != NULL; l = l->next) {
+        OnNoteMeta *m = l->data;     /* one note                            */
+        gsize   blob_len = 0;        /* stored blob size                    */
+        guint8 *blob = on_db_note_load(db, m->id, &blob_len);
+        if (blob == NULL)
+            continue;
+        GList *actions = on_note_extract_actions(blob, blob_len);
+        if (actions != NULL)         /* empty sets have no rows to write    */
+            on_db_note_set_actions(db, m->id, actions);
+        on_db_action_list_free(actions);
+        g_free(blob);
+    }
+    on_db_note_list_free(notes);
+    on_db_set_user_version(db, DB_VERSION_ACTIONS);
+}
+
 gboolean
 on_app_switch_database(OnApp *app, const gchar *new_dir)
 {
@@ -597,6 +630,7 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
     }
 
     app->db = on_db_open(target);
+    on_app_actions_backfill(app->db);   /* adopted dbs may predate actions  */
     gboolean ok = app->db != NULL;   /* did the new location work?          */
 
     if (!ok) {
@@ -655,6 +689,7 @@ on_app_restore_database(OnApp *app, const gchar *backup_path)
         app->db = on_db_open(db_path);
         ok = FALSE;
     }
+    on_app_actions_backfill(app->db);   /* backups may predate actions      */
 
     on_app_config_set("db_hash", NULL);   /* stale hash; recompute on exit  */
     g_free(safety);

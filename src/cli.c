@@ -15,6 +15,7 @@
 #include "cli.h"
 #include "app.h"
 #include "db.h"
+#include "editor_window.h"           /* action done/due content rewrites    */
 #include "export.h"
 #include "ipc.h"
 #include "serialize.h"
@@ -52,6 +53,7 @@ cli_open_db(void)
     }
     g_free(path);
     g_free(db_dir);
+    on_app_actions_backfill(db);     /* one-time '!'-line index (gated)     */
     return db;
 }
 
@@ -196,6 +198,13 @@ note_buffer_save(OnDatabase *db, gint64 id, GtkTextBuffer *buffer)
     gchar *title = on_buffer_first_line(buffer);
     gchar *body = on_note_extract_text(blob, blob_len);
     gboolean ok = on_db_note_save(db, id, title, blob, blob_len, body);
+    /* CLI saves are rare enough to sync the '!' action-item mirror
+     * unconditionally (the editor compares against its last set instead). */
+    if (ok) {
+        GList *actions = on_note_extract_actions(blob, blob_len);
+        on_db_note_set_actions(db, id, actions);
+        on_db_action_list_free(actions);
+    }
     g_free(body);
     g_free(title);
     g_free(blob);
@@ -930,6 +939,141 @@ cmd_set_modified(OnDatabase *db, const gchar *id_str, const gchar *ts_str)
     return 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * action_token_parse() — split a "NOTEID:ORD" item address (the first
+ * column of `action list`).  Validates that the note exists.
+ * Returns TRUE on success; prints an error otherwise.
+ * ------------------------------------------------------------------------- */
+static gboolean
+action_token_parse(OnDatabase *db, const gchar *token,
+                   gint64 *note_id, gint *ord)
+{
+    gchar *colon = strchr(token, ':');
+    if (colon == NULL || colon == token || colon[1] == '\0') {
+        fprintf(stderr, "error: bad action item id: %s "
+                        "(expected NOTEID:ORD, see 'action list')\n", token);
+        return FALSE;
+    }
+    gchar *id_part = g_strndup(token, (gsize)(colon - token));
+    OnNoteMeta *meta = note_from_arg(db, id_part);
+    g_free(id_part);
+    if (meta == NULL)
+        return FALSE;
+    *note_id = meta->id;
+    on_db_note_meta_free(meta);
+
+    gchar *endp = NULL;              /* end of the parsed ordinal           */
+    gint64 o = g_ascii_strtoll(colon + 1, &endp, 10);
+    if (o < 0 || endp == NULL || *endp != '\0') {
+        fprintf(stderr, "error: bad action item id: %s\n", token);
+        return FALSE;
+    }
+    *ord = (gint)o;
+    return TRUE;
+}
+
+/* ---------------------------------------------------------------------------
+ * cmd_action_list() — every action item across the visible notes, newest
+ * note first: "NOTEID:ORD<TAB>[x]/[ ]<TAB>due-date<TAB>text" ('-' = no
+ * due date).  `filter` narrows to open or done items.
+ * ------------------------------------------------------------------------- */
+typedef enum { ACTION_ALL, ACTION_OPEN, ACTION_DONE } ActionFilter;
+
+static int
+cmd_action_list(OnDatabase *db, ActionFilter filter)
+{
+    GList *items = on_db_action_list(db);
+    for (GList *l = items; l != NULL; l = l->next) {
+        OnActionItem *it = l->data;  /* one action item                     */
+        if ((filter == ACTION_OPEN && it->done) ||
+            (filter == ACTION_DONE && !it->done))
+            continue;
+        gchar *when = NULL;          /* ISO due date, or NULL               */
+        if (it->due != 0) {
+            GDateTime *dt = g_date_time_new_from_unix_local(it->due);
+            when = g_date_time_format(dt, "%Y-%m-%d");
+            g_date_time_unref(dt);
+        }
+        printf("%" G_GINT64_FORMAT ":%d\t%s\t%s\t%s\n",
+               it->note_id, it->ord,
+               it->done ? "[x]" : "[ ]",
+               when != NULL ? when : "-",
+               it->text);
+        g_free(when);
+    }
+    on_db_action_list_free(items);
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * cmd_action_done() — mark one item done (strike its text in the note)
+ * or reopen it.  The note content is authoritative: the rewrite resyncs
+ * the action_items mirror.  NOTE: with the GUI running and that note
+ * open in an editor, the editor's next autosave can overwrite this —
+ * same caveat as `note append`/`note set`.
+ * ------------------------------------------------------------------------- */
+static int
+cmd_action_done(OnDatabase *db, const gchar *token, gboolean done)
+{
+    gint64 note_id;                  /* the item's address                  */
+    gint   ord;
+    if (!action_token_parse(db, token, &note_id, &ord))
+        return 2;
+    if (!cli_require_gtk())
+        return 2;
+
+    OnApp app = { 0 };               /* headless context: db only           */
+    app.db = db;
+    if (!on_editor_action_set_done(&app, note_id, ord, done)) {
+        fprintf(stderr, "error: no such action item: %s\n", token);
+        return 2;
+    }
+    printf("%s action item %s\n", done ? "completed" : "reopened", token);
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * cmd_action_due() — set or clear one item's due date: the "due <date>"
+ * suffix of its '!' line is rewritten in the note text.
+ *   date_arg — "YYYY-MM-DD" (or M/D/YY), or "-" to clear.
+ * ------------------------------------------------------------------------- */
+static int
+cmd_action_due(OnDatabase *db, const gchar *token, const gchar *date_arg)
+{
+    gint64 due = 0;                  /* parsed date, 0 = clear              */
+    if (g_strcmp0(date_arg, "-") != 0) {
+        /* Reuse the one due-date parser via a synthesized "due X" text.    */
+        gchar *probe = g_strdup_printf("due %s", date_arg);
+        gsize  off;
+        gboolean ok = on_action_split_due(probe, &off, &due);
+        g_free(probe);
+        if (!ok) {
+            fprintf(stderr, "error: bad date: %s (use YYYY-MM-DD, or '-' "
+                            "to clear)\n", date_arg);
+            return 2;
+        }
+    }
+
+    gint64 note_id;                  /* the item's address                  */
+    gint   ord;
+    if (!action_token_parse(db, token, &note_id, &ord))
+        return 2;
+    if (!cli_require_gtk())
+        return 2;
+
+    OnApp app = { 0 };               /* headless context: db only           */
+    app.db = db;
+    if (!on_editor_action_set_due(&app, note_id, ord, due)) {
+        fprintf(stderr, "error: no such action item: %s\n", token);
+        return 2;
+    }
+    if (due != 0)
+        printf("set due date of action item %s\t%s\n", token, date_arg);
+    else
+        printf("cleared due date of action item %s\n", token);
+    return 0;
+}
+
 /* cmd_backup() — snapshot the database to a file.                           */
 static int
 cmd_backup(OnDatabase *db, const gchar *dest)
@@ -1074,6 +1218,16 @@ usage(FILE *out)
 "                                    instance (PATH = id or Folder/Title);\n"
 "                                    starts Blue Notes if it is not running\n"
 "\n"
+"  action list [--open|--done]       print every '!' action item across\n"
+"                                    the notes: NOTEID:ORD, [x]/[ ],\n"
+"                                    due date ('-' = none), text\n"
+"  action done NOTEID:ORD            mark an item done (strikes its line\n"
+"                                    in the note text)\n"
+"  action undone NOTEID:ORD          reopen a completed item\n"
+"  action due NOTEID:ORD DATE|-      set the item's due date (written\n"
+"                                    into the note line as 'due DATE';\n"
+"                                    '-' clears it)\n"
+"\n"
 "  search TEXT [--regex]             case-insensitive search of all note\n"
 "                                    titles + text; prints one\n"
 "                                    ID/modified/path line per hit\n"
@@ -1123,6 +1277,27 @@ dispatch_folder(OnDatabase *db, const char *verb, char **argv, int argc)
             return cmd_delete_folder(db, argv[0], TRUE);
         return usage(stderr);
     }
+    return usage(stderr);
+}
+
+static int
+dispatch_action(OnDatabase *db, const char *verb, char **argv, int argc)
+{
+    if (g_strcmp0(verb, "list") == 0) {
+        if (argc == 0)
+            return cmd_action_list(db, ACTION_ALL);
+        if (argc == 1 && g_strcmp0(argv[0], "--open") == 0)
+            return cmd_action_list(db, ACTION_OPEN);
+        if (argc == 1 && g_strcmp0(argv[0], "--done") == 0)
+            return cmd_action_list(db, ACTION_DONE);
+        return usage(stderr);
+    }
+    if (g_strcmp0(verb, "done") == 0 && argc == 1)
+        return cmd_action_done(db, argv[0], TRUE);
+    if (g_strcmp0(verb, "undone") == 0 && argc == 1)
+        return cmd_action_done(db, argv[0], FALSE);
+    if (g_strcmp0(verb, "due") == 0 && argc == 2)
+        return cmd_action_due(db, argv[0], argv[1]);
     return usage(stderr);
 }
 
@@ -1238,6 +1413,10 @@ on_cli_command_mutates(int argc, char **argv)
         return g_strcmp0(verb, "delete") == 0;
     if (g_strcmp0(cmd, "folder") == 0)
         return g_strcmp0(verb, "add") == 0 || g_strcmp0(verb, "delete") == 0;
+    if (g_strcmp0(cmd, "action") == 0)
+        return g_strcmp0(verb, "done") == 0 ||
+               g_strcmp0(verb, "undone") == 0 ||
+               g_strcmp0(verb, "due") == 0;
     if (g_strcmp0(cmd, "note") == 0)
         return g_strcmp0(verb, "new") == 0 ||
                g_strcmp0(verb, "append") == 0 ||
@@ -1260,7 +1439,8 @@ on_cli_dispatch_db(OnDatabase *db, int argc, char **argv)
     /* Noun groups need a verb.                                             */
     gboolean is_noun = g_strcmp0(cmd, "tag") == 0 ||
                        g_strcmp0(cmd, "folder") == 0 ||
-                       g_strcmp0(cmd, "note") == 0;
+                       g_strcmp0(cmd, "note") == 0 ||
+                       g_strcmp0(cmd, "action") == 0;
     if (is_noun && argc < 3)
         return usage(stderr);
 
@@ -1270,6 +1450,8 @@ on_cli_dispatch_db(OnDatabase *db, int argc, char **argv)
         return dispatch_folder(db, argv[2], argv + 3, argc - 3);
     if (g_strcmp0(cmd, "note") == 0)
         return dispatch_note(db, argv[2], argv + 3, argc - 3);
+    if (g_strcmp0(cmd, "action") == 0)
+        return dispatch_action(db, argv[2], argv + 3, argc - 3);
     if (g_strcmp0(cmd, "search") == 0) {
         if (argc == 3)
             return cmd_search(db, argv[2], FALSE);
@@ -1321,7 +1503,8 @@ on_cli_run(int argc, char **argv)
      * (which has its own option handling for things like --display).       */
     gboolean is_noun = g_strcmp0(cmd, "tag") == 0 ||
                        g_strcmp0(cmd, "folder") == 0 ||
-                       g_strcmp0(cmd, "note") == 0;
+                       g_strcmp0(cmd, "note") == 0 ||
+                       g_strcmp0(cmd, "action") == 0;
     gboolean is_flat = g_strcmp0(cmd, "search") == 0 ||
                        g_strcmp0(cmd, "backup") == 0 ||
                        g_strcmp0(cmd, "export-md") == 0 ||
