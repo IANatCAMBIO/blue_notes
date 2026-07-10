@@ -541,7 +541,6 @@ on_app_switch_database(OnApp *app, const gchar *new_dir)
     gchar *target;                   /* path of the db at the new home      */
     if (new_dir != NULL) {
         g_mkdir_with_parents(new_dir, 0755);
-        on_db_migrate_legacy_name(new_dir);  /* pre-1.4 name: notes.db      */
         target = g_build_filename(new_dir, ON_DB_FILENAME, NULL);
     } else {
         target = on_db_default_path();

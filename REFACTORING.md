@@ -116,10 +116,8 @@ name-only list in the load normalizer). Now there is exactly one:
 - **CLI command table** (noun/verb/argc/mutates/handler) — machinery
   costs ~30 lines against ~60 saved; only pays if more commands are
   coming.
-- **Settings-table migration in main.c** (+ `on_db_setting_get/delete`,
-  ~55 lines) — this is the pre-ini upgrade path; tagged conceptually with
-  the serialize.c "LEGACY LOAD FIXUP" items. Remove once pre-1.4-era
-  installs are presumed gone.
+- ~~**Settings-table migration in main.c**~~ — **removed 2026-07-09**
+  along with the other legacy shims; see "Legacy-shim removal" below.
 - **export.c folder-path map swap** — its `dirs` cache already runs one
   query per *unique* folder and additionally caches the mkdir; churn
   outweighed the gain.
@@ -127,3 +125,34 @@ name-only list in the load normalizer). Now there is exactly one:
   walks; merging would obfuscate.
 - **`on_editor_window_open` / `_open_search` unification** — optional
   API cleanup touching 6 call sites for ~15 lines; low value.
+
+## Legacy-shim removal (2026-07-09, follow-up)
+
+With a single known user, the upgrade shims were retired after a
+read-only scan of every BNBF blob in the live database proved them
+unneeded (and a one-time offline heal made it so):
+
+- **Blob scan**: zero notes with pre-v5 glyph checkboxes; 8 notes with
+  half-tagged paragraph lines (styled text, untagged newline — the state
+  `normalize_paragraph_tags` repaired on every load but that only
+  persisted on re-save).
+- **One-time heal**: after `blue_notes backup` (kept as
+  `~/.local/share/blue_notes/pre-heal-backup-20260709.db`) and a clean
+  GUI shutdown, the 8 blobs were rewritten offline, extending each
+  line's start style over the whole line — a byte-level mirror of the
+  load pass, verified by re-parse (text and record streams identical)
+  and a clean re-scan.
+- **Removed**: `migrate_legacy_checkboxes()` and
+  `normalize_paragraph_tags()` (serialize.c, the "LEGACY LOAD FIXUP"
+  pair); the main.c settings-table migration + `in_use` purge and with
+  them `on_db_setting_get/delete()` (their only callers); and
+  `on_db_migrate_legacy_name()` (the pre-1.4 `notes.db` rename) with all
+  four call sites plus the first-run chooser's `notes.db` filter.
+- **Kept**: the ONBF magic acceptance (the DB is full of pre-rename
+  blobs), the empty `settings` table in the schema (old files must
+  open), `on_char_is_checkbox()` (still parses typed/pasted glyph
+  prefixes), and the runtime paragraph-continuity fix in the editor
+  (prevents new half-tagged lines from being created at all).
+
+If the app ever gets other users, upgrades from pre-2026-07 builds will
+need these shims restored from git history.

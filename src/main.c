@@ -144,13 +144,11 @@ startup_first_run(const gchar *expected, gchar **db_dir, gchar **db_path)
         gtk_window_set_title(GTK_WINDOW(chooser),
                              "Blue Notes - Open Database");
         /* The app's model is a directory + the fixed name blue_notes.db
-         * (the ini stores db_dir only), so only that name — or the
-         * pre-1.4 "notes.db", renamed on selection — is openable.          */
+         * (the ini stores db_dir only), so only that name is openable.     */
         GtkFileFilter *ff = gtk_file_filter_new();
         gtk_file_filter_add_pattern(ff, ON_DB_FILENAME);
-        gtk_file_filter_add_pattern(ff, "notes.db");
         gtk_file_filter_set_name(ff,
-            "Notes Database (" ON_DB_FILENAME ", notes.db)");
+            "Notes Database (" ON_DB_FILENAME ")");
         gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), ff);
 
         gchar *file_path = NULL;     /* the chosen database file            */
@@ -163,7 +161,6 @@ startup_first_run(const gchar *expected, gchar **db_dir, gchar **db_path)
 
         gchar *dir = g_path_get_dirname(file_path);
         g_free(file_path);
-        on_db_migrate_legacy_name(dir);       /* legacy pick → new name     */
         on_app_config_set("db_dir",  dir);
         on_app_config_set("db_hash", NULL);   /* stale for this file        */
         g_free(*db_dir);   *db_dir  = dir;
@@ -363,7 +360,6 @@ main(int argc, char *argv[])
      * instance's shutdown flush).  One configured database, or a clear
      * error.                                                               */
     gchar *db_dir = on_app_config_load_db_dir();
-    on_db_migrate_legacy_name(db_dir);   /* pre-1.4 name: notes.db          */
     gchar *db_path = (db_dir != NULL)
                      ? g_build_filename(db_dir, ON_DB_FILENAME, NULL)
                      : NULL;
@@ -398,29 +394,6 @@ main(int argc, char *argv[])
         return 1;
     }
     g_free(db_path);
-
-    /* One-time migration: UI settings used to live in the database's
-     * settings table; move any leftovers into the ini (existing ini
-     * values win) and purge them.                                          */
-    static const gchar *MIGRATE_KEYS[] = {
-        "toolbar_style_library", "toolbar_style_editor",
-        "code_copy_button", "code_line_numbers", "native_menubar",
-        "sidebar_counts", "image_viewer", "search_win_w", "search_win_h",
-    };
-    for (gsize i = 0; i < G_N_ELEMENTS(MIGRATE_KEYS); i++) {
-        gchar *old = on_db_setting_get(db, MIGRATE_KEYS[i]);
-        if (old == NULL)
-            continue;
-        gchar *cur = on_app_config_get(MIGRATE_KEYS[i]);
-        if (cur == NULL)
-            on_app_config_set(MIGRATE_KEYS[i], old);
-        g_free(cur);
-        on_db_setting_delete(db, MIGRATE_KEYS[i]);
-        g_free(old);
-    }
-
-    /* Remove any legacy "in_use" instance lock left by an older version.   */
-    on_db_setting_delete(db, "in_use");
 
     /* The shared context handed to every window.                           */
     OnApp app = {

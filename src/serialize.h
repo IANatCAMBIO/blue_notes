@@ -60,9 +60,7 @@ typedef enum {
 } OnFormatFlags;
 
 /* Task checkboxes are child anchors carrying their state as object data;
- * the editor attaches a native GtkCheckButton at each.  Notes saved by
- * older builds used literal glyphs instead — those are migrated to
- * anchors while loading (see on_note_deserialize).                          */
+ * the editor attaches a native GtkCheckButton at each.                      */
 
 /* on_anchor_set_checkbox() — mark an anchor as a task checkbox with the
  * given state.  on_anchor_is_checkbox() reads it back (returns FALSE for
@@ -71,8 +69,8 @@ void on_anchor_set_checkbox(GtkTextChildAnchor *anchor, gboolean checked);
 gboolean on_anchor_is_checkbox(GtkTextChildAnchor *anchor,
                                gboolean *out_checked);
 
-/* on_char_is_checkbox() — is `c` one of the legacy checkbox glyphs
- * (⬜/✅/☐/☑)?  Used by the load-time migration.                            */
+/* on_char_is_checkbox() — is `c` one of the checkbox glyphs (⬜/✅/☐/☑)?
+ * Used when parsing typed/pasted list prefixes and by the exporters.        */
 gboolean on_char_is_checkbox(gunichar c, gboolean *out_checked);
 
 /* on_list_prefix_chars() — length in CHARACTERS of the literal list

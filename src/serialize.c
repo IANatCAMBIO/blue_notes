@@ -375,94 +375,6 @@ insert_with_flags(GtkTextBuffer *buffer, const gchar *text, gssize n,
 }
 
 /* ---------------------------------------------------------------------------
- * migrate_legacy_checkboxes() — LEGACY LOAD FIXUP, remove eventually:
- * only safe once every note in every user's DB has been re-saved by a
- * build with this pass (a note is only healed on disk when its next
- * save rewrites the blob; until then it is re-fixed on every load).
- *
- * Notes saved by older builds carried task state as literal glyphs
- * (⬜/✅/☐/☑) at the start of check-list lines; replace each with a
- * checkbox anchor so the editor shows native GtkCheckButtons.  Runs
- * once per successful load.
- * ------------------------------------------------------------------------- */
-static void
-migrate_legacy_checkboxes(GtkTextBuffer *buffer)
-{
-    GtkTextTag *tag = gtk_text_tag_table_lookup(
-        gtk_text_buffer_get_tag_table(buffer), ON_TAGNAME_LIST_CHECK);
-    if (tag == NULL)
-        return;
-
-    gint n_lines = gtk_text_buffer_get_line_count(buffer);
-    for (gint line = 0; line < n_lines; line++) {
-        GtkTextIter ls;              /* line start                          */
-        gtk_text_buffer_get_iter_at_line(buffer, &ls, line);
-        if (!gtk_text_iter_has_tag(&ls, tag))
-            continue;
-
-        gboolean checked;            /* the glyph's state                   */
-        if (!on_char_is_checkbox(gtk_text_iter_get_char(&ls), &checked))
-            continue;
-
-        /* Swap the glyph character for a checkbox anchor.                  */
-        gint at = gtk_text_iter_get_offset(&ls);
-        GtkTextIter ge = ls;         /* just past the glyph                 */
-        gtk_text_iter_forward_char(&ge);
-        gtk_text_buffer_delete(buffer, &ls, &ge);
-
-        gtk_text_buffer_get_iter_at_offset(buffer, &ls, at);
-        GtkTextChildAnchor *anchor =
-            gtk_text_buffer_create_child_anchor(buffer, &ls);
-        on_anchor_set_checkbox(anchor, checked);
-
-        /* Keep the line uniformly tagged (anchor char included).           */
-        GtkTextIter ts, te;          /* the anchor's single character       */
-        gtk_text_buffer_get_iter_at_offset(buffer, &ts, at);
-        gtk_text_buffer_get_iter_at_offset(buffer, &te, at + 1);
-        gtk_text_buffer_apply_tag(buffer, tag, &ts, &te);
-    }
-}
-
-/* ---------------------------------------------------------------------------
- * normalize_paragraph_tags() — LEGACY LOAD FIXUP, remove eventually:
- * only safe once every note in every user's DB has been re-saved by a
- * build with this pass (a note is only healed on disk when its next
- * save rewrites the blob; until then it is re-fixed on every load).
- *
- * Paragraph styles are line-granular and must cover the trailing
- * newline (typing at line end only inherits a tag present on BOTH
- * sides of the insertion point).  Notes saved by older builds can
- * carry half-tagged lines — styled text but a bare newline — where
- * Enter at line end silently dropped out of the style (visible on
- * code blocks).  Extend each line's start style over the whole line.
- * Runs once per successful load.
- * ------------------------------------------------------------------------- */
-static void
-normalize_paragraph_tags(GtkTextBuffer *buffer)
-{
-    GtkTextTagTable *table = gtk_text_buffer_get_tag_table(buffer);
-    gint n_lines = gtk_text_buffer_get_line_count(buffer);
-    for (gint line = 0; line < n_lines; line++) {
-        GtkTextIter ls;              /* line start                          */
-        gtk_text_buffer_get_iter_at_line(buffer, &ls, line);
-        if (gtk_text_iter_ends_line(&ls))
-            continue;                /* empty line: nothing to extend       */
-        GtkTextIter le = ls;         /* line span incl. trailing newline    */
-        gtk_text_iter_forward_to_line_end(&le);
-        if (!gtk_text_iter_is_end(&le))
-            gtk_text_iter_forward_char(&le);
-        for (gsize i = 0; i < on_n_flag_tags; i++) {
-            if ((on_flag_tags[i].flag & ON_FMT_PARA_MASK) == 0)
-                continue;
-            GtkTextTag *tag =
-                gtk_text_tag_table_lookup(table, on_flag_tags[i].tag_name);
-            if (tag != NULL && gtk_text_iter_has_tag(&ls, tag))
-                gtk_text_buffer_apply_tag(buffer, tag, &ls, &le);
-        }
-    }
-}
-
-/* ---------------------------------------------------------------------------
  * on_size_prepared() — GdkPixbufLoader callback capping decode size:
  * shrink to at most `max_px` (passed via user_data) on the longest side,
  * preserving aspect ratio.  Never upscales.
@@ -509,11 +421,8 @@ on_note_deserialize_scaled(GtkTextBuffer *buffer, const guint8 *data,
 
     while (pos < len) {
         guint8 rec = data[pos++];    /* record type byte                    */
-        if (rec == REC_END) {
-            migrate_legacy_checkboxes(buffer);
-            normalize_paragraph_tags(buffer);
+        if (rec == REC_END)
             return TRUE;
-        }
 
         if (rec == REC_TEXT) {
             guint32 flags, n;        /* run formatting and byte length      */

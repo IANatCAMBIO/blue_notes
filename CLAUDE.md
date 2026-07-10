@@ -57,10 +57,9 @@ sees the new flags.
 ## Data & formats
 
 - DB: `~/.local/share/blue_notes/blue_notes.db` (GLib user-data dir; the
-  filename is `ON_DB_FILENAME` in db.h — a legacy `notes.db` (pre-1.4) is
-  renamed in place by `on_db_migrate_legacy_name()`, called before every
-  directory-level open: GUI/CLI startup, db switch, first-run chooser;
-  the dir was renamed
+  filename is `ON_DB_FILENAME` in db.h.  The pre-1.4 `notes.db` rename
+  shim was removed 2026-07 (sole user's DB verified migrated); the dir
+  was renamed
   from `orange-notes` pre-release — do NOT rename again once released,
   user data will live there).
 - Note content: **BNBF v5** blobs (magic `BNBF`; the pre-rename `ONBF` magic is accepted forever) (see header comment in `serialize.h`).
@@ -70,10 +69,10 @@ sees the new flags.
 - **Task checkboxes are GtkTextChildAnchors** carrying their state as
   object data (`on_anchor_set/is_checkbox`), rendered as native
   GtkCheckButtons (BNBF v5 CHECK records).  A task line = anchor + space
-  + text under the on-list-check paragraph tag.  Legacy glyph-based
-  notes (⬜/✅/☐/☑ prefixes) are migrated to anchors on load
-  (`migrate_legacy_checkboxes`).  Like all anchors, copy/paste within a
-  note drops the widget/state.
+  + text under the on-list-check paragraph tag.  (The pre-v5 glyph
+  format and its load-time migration were removed 2026-07 after a blob
+  scan verified zero glyph notes remained.)  Like all anchors,
+  copy/paste within a note drops the widget/state.
 - **Images are GtkTextChildAnchors**, not pixbufs: the anchor carries the
   original pixbuf + display width as object data
   (`on_anchor_set_image/get_image`). The editor attaches a HiDPI-aware
@@ -134,9 +133,10 @@ sees the new flags.
   unusable: columns cache resized/requested widths that override it
   (never shrinking back), and ellipsizing renderers report a ~3-char
   minimum so ellipsized columns collapse instead of fitting.  Manual
-  resize grips come back when it's off). The DB settings table is legacy-only: main.c
-  migrates any old UI keys out of it and deletes the retired `in_use`
-  lock key at startup; nothing writes to it anymore.
+  resize grips come back when it's off). The DB settings table is a
+  permanently empty legacy table: nothing reads or writes it (the
+  startup migration of old UI keys was removed 2026-07); it stays in the
+  schema only so old database files open unchanged.
 - **Custom DB location** (shared-folder support) lives in the CONFIG
   FILE `blue_notes.ini` NEXT TO THE BINARY (`[blue-notes] db_dir=`;
   resolved from argv[0] by `on_app_config_init()`, which must run before
@@ -151,9 +151,8 @@ sees the new flags.
   the dying instance's final flush past the 5 s busy timeout). One
   configured database, or a clear error. When no blue_notes.db EXISTS at
   the expected location (first launch / emptied dir),
-  `startup_first_run()` asks — "Open a blue_notes.db File" (chooser also
-  accepts a legacy notes.db, renamed on selection; persists the new
-  db_dir) or "Create a New blue_notes.db" — instead of silently creating
+  `startup_first_run()` asks — "Open a blue_notes.db File" (persists the
+  new db_dir) or "Create a New blue_notes.db" — instead of silently creating
   an empty DB; both paths clear any stale db_hash.
 - **Trash is a soft-delete flag, not a folder**: `notes.trashed` /
   `folders.trashed` columns + the `trash_folder_ids` view (recursive
@@ -181,7 +180,7 @@ sees the new flags.
   the two never write the DB concurrently. The old in-DB `in_use`
   instance lock and the read-only mode (`app->read_only`, `PRAGMA
   query_only`, `on_app_db_acquire/release`) were REMOVED with that
-  change; main.c deletes any leftover `in_use` key at startup. SIGTERM
+  change. SIGTERM
   (pkill) destroys all windows so editor autosaves flush and the loop
   ends cleanly.
 

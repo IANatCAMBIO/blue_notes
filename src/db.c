@@ -188,25 +188,6 @@ on_db_default_path(void)
     return path;
 }
 
-void
-on_db_migrate_legacy_name(const gchar *dir)
-{
-    gchar *d = (dir != NULL)         /* directory holding the database      */
-               ? g_strdup(dir)
-               : g_build_filename(g_get_user_data_dir(), "blue_notes",
-                                  NULL);
-    gchar *old_path = g_build_filename(d, "notes.db", NULL);
-    gchar *new_path = g_build_filename(d, ON_DB_FILENAME, NULL);
-    if (!g_file_test(new_path, G_FILE_TEST_EXISTS) &&
-        g_file_test(old_path, G_FILE_TEST_EXISTS) &&
-        g_rename(old_path, new_path) != 0)
-        g_warning("db: cannot rename legacy %s: %s", old_path,
-                  g_strerror(errno));
-    g_free(old_path);
-    g_free(new_path);
-    g_free(d);
-}
-
 OnDatabase *
 on_db_open(const gchar *path_override)
 {
@@ -1189,34 +1170,6 @@ on_db_note_body_map(OnDatabase *db)
     }
     sqlite3_finalize(stmt);
     return map;
-}
-
-/* =========================================================================
- * settings
- * ========================================================================= */
-
-gchar *
-on_db_setting_get(OnDatabase *db, const gchar *key)
-{
-    sqlite3_stmt *stmt = prepare(db,
-        "SELECT value FROM settings WHERE key=?");
-    if (stmt == NULL)
-        return NULL;
-    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-    gchar *value = NULL;             /* stored value, NULL if unset         */
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        value = g_strdup((const gchar *)sqlite3_column_text(stmt, 0));
-    sqlite3_finalize(stmt);
-    return value;
-}
-
-gboolean
-on_db_setting_delete(OnDatabase *db, const gchar *key)
-{
-    sqlite3_stmt *stmt = prepare(db, "DELETE FROM settings WHERE key=?");
-    if (stmt != NULL)
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-    return stmt_done(db, stmt);
 }
 
 /* =========================================================================
