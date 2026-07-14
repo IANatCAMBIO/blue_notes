@@ -3904,7 +3904,7 @@ build_action_bar(OnLibrary *lw)
                               GTK_ICON_SIZE_SMALL_TOOLBAR);
 
     /* --- folder area ---------------------------------------------------- */
-    add_tool_button(lw, toolbar, "web", "\xe2\x97\xa7",
+    add_tool_button(lw, toolbar, "sidebar", "\xe2\x97\xa7",
                     "Folders", "Show or hide the folder pane",
                     G_CALLBACK(on_toggle_sidebar));
     add_tool_button(lw, toolbar, "new-folder", "+\xf0\x9f\x93\x81",
