@@ -46,7 +46,7 @@ sees the new flags.
 | `src/db.[ch]` | SQLite: folders (nested), notes (content BLOB), tags, note_tags, counts, ordering |
 | `src/serialize.[ch]` | BNBF binary format ⇄ GtkTextBuffer; image anchors; shared GtkTextTag set (`on_buffer_ensure_tags`) |
 | `src/editor_window.[ch]` | WYSIWYG editor: inline/paragraph formatting, list continuation, #tag autocomplete popup (never inside code blocks — capture is suppressed there, and `strip_tags_in_code_blocks` removes tag spans carried in by code-block formatting or paste), image paste/context menu, floating code-block copy buttons, debounced autosave |
-| `src/library_window.[ch]` | Sidebar (folders+counts, tags+counts), notes list/grid (list: Title/Path/Modified/Created, all resizable + sortable, Path and Created hidden by default; Path fed by `on_db_folder_path_map`), notes sorted Modified-newest-first by default (in-list drag reorder is off while sorted — list stores refuse row drops), folder context menu has Sort Subfolders Alphabetically (one level, `on_db_folder_reorder`), DnD (notes→folder incl. multi-select; single folder rows re-nest INTO / reorder BEFORE-AFTER / trash / drag-restore via `on_db_folder_move`+`on_db_folder_reorder`; drag icons: folder.png, file.png for one note, documents.png for 2+), sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; selecting notes posts a transient "N files selected" event from both views' selection signals; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
+| `src/library_window.[ch]` | Sidebar (folders+counts+emoji prefix, tags+counts), notes list/grid (list: Title/Path/Modified/Created, all resizable + sortable, Path and Created hidden by default; Path fed by `on_db_folder_path_map`), notes sorted Modified-newest-first by default (in-list drag reorder is off while sorted — list stores refuse row drops), folder context menu has Sort Subfolders Alphabetically (one level, `on_db_folder_reorder`), DnD (notes→folder incl. multi-select; single folder rows re-nest INTO / reorder BEFORE-AFTER / trash / drag-restore via `on_db_folder_move`+`on_db_folder_reorder`; drag icons: folder.png, file.png for one note, documents.png for 2+), sortable headers, context menus, one unified toolbar (folder area \| notes area \| Search … About), menubar (File/View), native-menubar hook, bottom status bar (left: selection path; selecting notes posts a transient "N files selected" event from both views' selection signals; right: latest event — post from anywhere via `on_app_status()`, printf-style, no-op until the library installs `app->notify_status`) |
 | `src/search_window.[ch]` | Search over titles + full text on a worker thread (spinner while running); scope = All Notes / live library selection; case + regex options |
 | `src/settings_window.[ch]` | Toolbar styles, sidebar counts, code copy/line-number toggles, first-line-H1, image viewer, native macOS menubar, database location |
 | `src/export.[ch]` | HTML + Markdown export (all notes mirroring folder tree, or single note) |
@@ -143,7 +143,7 @@ sees the new flags.
   `list_autofit` (`1|0`, default 1 — same header menu: Path/Modified/Created always show
   their FULL content, Title takes the ellipsis + expand and is the one
   column that truncates.  Implemented by MEASURING content with a
-  PangoLayout after every refresh (`list_autofit_now`) and setting
+  PangoLayout after every refresh (`list_autofit_apply`) and setting
   FIXED widths — NOT with GTK_TREE_VIEW_COLUMN_AUTOSIZE, which is
   unusable: columns cache resized/requested widths that override it
   (never shrinking back), and ellipsizing renderers report a ~3-char
@@ -168,6 +168,15 @@ sees the new flags.
   `startup_first_run()` asks — "Open a blue_notes.db File" (persists the
   new db_dir) or "Create a New blue_notes.db" — instead of silently creating
   an empty DB; both paths clear any stale db_hash.
+- **Folder emoji** (`folders.emoji` TEXT, default `''`): each folder
+  can have an optional emoji set via its Info dialog (right-click a
+  folder → Info, or via New Folder). GTK's built-in emoji chooser opens
+  on click; the chosen emoji is stored in the DB and displayed as a
+  sidebar prefix with a two-space separator (`🎉  Folder Name`).
+  `on_db_folder_get/set_emoji` in db.c read/write the column;
+  `add_folder_rows()` in library_window.c builds the display string.
+  A migration (`ALTER TABLE folders ADD COLUMN emoji TEXT NOT NULL
+  DEFAULT ''`) backfills existing databases transparently.
 - **Trash is a soft-delete flag, not a folder**: `notes.trashed` /
   `folders.trashed` columns + the `trash_folder_ids` view (recursive
   closure — only the TOP deleted folder is flagged; its subtree stays
@@ -199,16 +208,17 @@ sees the new flags.
   `on-action` tag (priority 0 so #tags keep their orange; re-derived on
   insert/delete/paragraph-format/load/undo like the emoji padding) —
   nothing about "actionness" is stored in BNBF.  The `action_items`
-  table (note_id/ord/text/done, ON DELETE CASCADE) is a queryable
+  table (note_id/ord/text/done/due, ON DELETE CASCADE) is a queryable
   mirror like note_tags: editor_save rewrites it only when the
   extracted set differs from `ed->last_actions` (full library notify
   then, light otherwise); CLI saves sync unconditionally; a one-time
   backfill for pre-feature notes is gated by `PRAGMA user_version`
   (`on_app_actions_backfill`, run after every long-lived `on_db_open` —
   GUI start, CLI, db switch/restore).  Library: "Action Items" sidebar
-  row under Pinned Notes (visible while items exist; optional count =
-  OPEN items) shows a third notes-pane stack child ("actions"): untitled
-  checkbox column + "Action" text column (done rows struck).  Toggling
+  row below the folder tree and Tags section, above Trash (visible while
+  items exist; optional count = OPEN items) shows a third notes-pane
+  stack child ("actions"): untitled checkbox column + "Action" text
+  column (done rows struck).  Toggling
   writes the db row, then `on_editor_action_set_done` strikes/un-strikes
   the '!' line's text — in the live buffer + autosave when the note is
   open, offscreen blob rewrite otherwise (ord = position among the
@@ -231,7 +241,8 @@ sees the new flags.
   func (draw-time, so it rolls over at midnight): overdue red, today
   dark yellow, ahead green — darkened for the striped row backgrounds;
   no-due rows must reset "foreground-set" (shared renderer).
-  `action_items.due` column added by a guarded ALTER migration.
+  `due` is in the CREATE TABLE (so new databases have it immediately)
+  and a guarded ALTER migration backfills existing databases on open.
   `grid_pref` restores list/grid when leaving the view.
 - **Backup/Restore** (File menu): `on_db_backup_to()` uses SQLite's
   online backup API on the live DB; `on_app_restore_database()` closes

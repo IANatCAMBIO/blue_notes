@@ -10,12 +10,13 @@
  *
  * Schema
  * ------
- *   folders   (id, parent_id, name, sort_order, trashed, ai_mode) -- nested via parent_id
+ *   folders   (id, parent_id, name, sort_order, trashed, ai_mode, emoji) -- nested via parent_id
  *   notes     (id, folder_id, title, content BLOB,
  *              sort_order, created_at, updated_at,
  *              pinned, body_text, trashed)
  *   tags      (id, name UNIQUE)
- *   note_tags (note_id, tag_id)                          -- many-to-many
+ *   note_tags    (note_id, tag_id)                       -- many-to-many
+ *   action_items (note_id, ord, text, done, due)         -- queryable mirror of '!' lines
  *
  * A NULL parent_id means "top-level folder"; a NULL folder_id means the
  * note lives at the top level ("Notes" root).
@@ -51,12 +52,15 @@ typedef struct {
  * OnFolder — metadata for one folder row.
  *
  * Fields:
- *   id   — primary key of the folder.
- *   name — display name (owned string).
+ *   id    — primary key of the folder.
+ *   name  — display name (owned string).
+ *   emoji — optional display prefix shown in the sidebar (owned string;
+ *            "" when not set).
  * ------------------------------------------------------------------------- */
 typedef struct {
     gint64  id;
     gchar  *name;
+    gchar  *emoji;
 } OnFolder;
 
 /* ---------------------------------------------------------------------------
@@ -154,6 +158,14 @@ gboolean on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name);
 
 gboolean on_db_folder_set_ai_mode(OnDatabase *db, gint64 id, gint mode);
 gint     on_db_folder_get_ai_mode(OnDatabase *db, gint64 id);
+
+/* Get a folder's display emoji. Returns a new string (g_free() it; never
+ * NULL — "" when not set).                                                   */
+gchar   *on_db_folder_get_emoji(OnDatabase *db, gint64 id);
+
+/* Set a folder's display emoji (pass "" or NULL to clear it). Returns TRUE
+ * on success.                                                                */
+gboolean on_db_folder_set_emoji(OnDatabase *db, gint64 id, const gchar *emoji);
 
 /* Move folder `id` (with its whole subtree, implicitly) under
  * `parent_id` (0 = top level), appending it after that parent's existing

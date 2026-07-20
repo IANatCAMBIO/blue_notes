@@ -382,10 +382,17 @@ add_folder_rows(OnLibrary *lw, gint64 parent_id, GtkTreeIter *parent_iter,
     GList *folders = on_db_folder_list(lw->app->db, parent_id);
     for (GList *l = folders; l != NULL; l = l->next) {
         OnFolder *f = l->data;       /* one child folder                    */
-        gchar *display = lw->app->sidebar_counts    /* name (+ note count)  */
-            ? g_strdup_printf("%s (%d)", f->name,
-                              count_from_map(note_counts, f->id))
-            : g_strdup(f->name);
+        gboolean has_emoji = f->emoji != NULL && *f->emoji != '\0';
+        gint     count     = count_from_map(note_counts, f->id);
+        gchar   *display;            /* name (+ emoji prefix, + count)      */
+        if (lw->app->sidebar_counts)
+            display = has_emoji
+                ? g_strdup_printf("%s  %s (%d)", f->emoji, f->name, count)
+                : g_strdup_printf("%s (%d)", f->name, count);
+        else
+            display = has_emoji
+                ? g_strdup_printf("%s  %s", f->emoji, f->name)
+                : g_strdup(f->name);
         GtkTreeIter iter;
         gtk_tree_store_append(lw->sidebar_store, &iter, parent_iter);
         gtk_tree_store_set(lw->sidebar_store, &iter,
@@ -605,10 +612,17 @@ refresh_sidebar(OnLibrary *lw)
         GList *trashed = on_db_folder_list_trashed(lw->app->db);
         for (GList *l = trashed; l != NULL; l = l->next) {
             OnFolder *f = l->data;   /* one trashed folder                  */
-            gchar *display = lw->app->sidebar_counts
-                ? g_strdup_printf("%s (%d)", f->name,
-                                  count_from_map(note_counts, f->id))
-                : g_strdup(f->name);
+            gboolean has_emoji = f->emoji != NULL && *f->emoji != '\0';
+            gint     count     = count_from_map(note_counts, f->id);
+            gchar   *display;
+            if (lw->app->sidebar_counts)
+                display = has_emoji
+                    ? g_strdup_printf("%s  %s (%d)", f->emoji, f->name, count)
+                    : g_strdup_printf("%s (%d)", f->name, count);
+            else
+                display = has_emoji
+                    ? g_strdup_printf("%s  %s", f->emoji, f->name)
+                    : g_strdup(f->name);
             GtkTreeIter iter;
             gtk_tree_store_append(lw->sidebar_store, &iter, &trash_iter);
             gtk_tree_store_set(lw->sidebar_store, &iter,
@@ -1885,18 +1899,67 @@ current_folder_id(OnLibrary *lw)
 
 /* ---------------------------------------------------------------------------
  * prompt_for_folder() — modal dialog: name entry + Normal/Project/Custom
- * AI mode radios.
- *   lw           — the library window (dialog parent).
- *   title        — dialog title.
- *   initial_name — pre-filled name, or NULL.
- *   initial_mode — ON_AI_MODE_* to pre-select.
- *   ai_mode_out  — receives the chosen ON_AI_MODE_* (may be NULL).
+ * AI mode radios + emoji picker.
+ *   lw            — the library window (dialog parent).
+ *   title         — dialog window title.
+ *   initial_name  — pre-filled name, or NULL.
+ *   initial_mode  — ON_AI_MODE_* to pre-select.
+ *   ai_mode_out   — receives the chosen ON_AI_MODE_* (may be NULL).
+ *   initial_emoji — pre-filled emoji string, or NULL / "".
+ *   emoji_out     — receives the chosen emoji (owned; g_free() it; may be
+ *                   NULL if caller doesn't need it).
  * Returns the entered name (g_free() it), or NULL if cancelled/empty.
  * ------------------------------------------------------------------------- */
+
+/* folder_emoji_chooser_closed() — resize the dialog back to natural size
+ * after the GTK emoji chooser popover closes.                               */
+static void
+folder_emoji_chooser_closed(GtkWidget *chooser, gpointer data)
+{
+    (void)chooser;
+    gtk_window_resize(GTK_WINDOW(data), 1, 1);
+}
+
+/* folder_emoji_open_idle() — deferred: fire the GTK emoji picker on the
+ * emoji entry and hook its closed signal.                                   */
+static gboolean
+folder_emoji_open_idle(gpointer data)
+{
+    GtkWidget *entry = data;
+    g_signal_emit_by_name(entry, "insert-emoji");
+    GtkWidget *chooser =
+        g_object_get_data(G_OBJECT(entry), "gtk-emoji-chooser");
+    if (chooser != NULL &&
+        !g_object_get_data(G_OBJECT(entry), "on-close-hooked")) {
+        GtkWidget *dlg = g_object_get_data(G_OBJECT(entry), "on-dialog");
+        g_signal_connect(chooser, "closed",
+                         G_CALLBACK(folder_emoji_chooser_closed), dlg);
+        g_object_set_data(G_OBJECT(entry), "on-close-hooked",
+                          GINT_TO_POINTER(1));
+    }
+    return G_SOURCE_REMOVE;
+}
+
+/* folder_emoji_pressed() — button-press on the emoji entry: clear it,
+ * grow the dialog to give the popover room, open the picker next idle.      */
+static gboolean
+folder_emoji_pressed(GtkWidget *entry, GdkEventButton *ev, gpointer data)
+{
+    (void)ev;
+    GtkWidget *dlg = data;
+    gtk_entry_set_text(GTK_ENTRY(entry), "");
+    gint w, h;
+    gtk_window_get_size(GTK_WINDOW(dlg), &w, &h);
+    gtk_window_resize(GTK_WINDOW(dlg), MAX(w, 440), 470);
+    g_idle_add(folder_emoji_open_idle, entry);
+    return TRUE;
+}
+
 static gchar *
 prompt_for_folder(OnLibrary *lw, const gchar *title,
                   const gchar *initial_name, gint initial_mode,
-                  gint *ai_mode_out)
+                  gint *ai_mode_out,
+                  const gchar *initial_emoji, gchar **emoji_out)
 {
     GtkWidget *dialog = gtk_dialog_new_with_buttons(
         title, GTK_WINDOW(lw->window),
@@ -1908,26 +1971,60 @@ prompt_for_folder(OnLibrary *lw, const gchar *title,
 
     GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
 
+    /* ── Field grid: labelled emoji + name rows ─────────────────────────── */
+    GtkWidget *field_grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(field_grid), 8);
+    gtk_grid_set_row_spacing(GTK_GRID(field_grid), 6);
+    gtk_widget_set_margin_start(field_grid, 12);
+    gtk_widget_set_margin_end(field_grid, 12);
+    gtk_widget_set_margin_top(field_grid, 12);
+    gtk_widget_set_margin_bottom(field_grid, 10);
+
+    /* Emoji row */
+    GtkWidget *emoji_lbl = gtk_label_new("Emoji (optional):");
+    gtk_label_set_xalign(GTK_LABEL(emoji_lbl), 1.0);
+    gtk_grid_attach(GTK_GRID(field_grid), emoji_lbl, 0, 0, 1, 1);
+
+    GtkWidget *emoji_entry = gtk_entry_new();
+    gtk_entry_set_max_length(GTK_ENTRY(emoji_entry), 4);
+    gtk_entry_set_width_chars(GTK_ENTRY(emoji_entry), 3);
+    gtk_entry_set_alignment(GTK_ENTRY(emoji_entry), 0.5);
+    gtk_widget_set_tooltip_text(emoji_entry,
+                                "Optional emoji \xe2\x80\x94 click to pick");
+    GtkCssProvider *cprov = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(cprov,
+                                    "entry { font-size: 18px; }", -1, NULL);
+    gtk_style_context_add_provider(
+        gtk_widget_get_style_context(emoji_entry),
+        GTK_STYLE_PROVIDER(cprov),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(cprov);
+    if (initial_emoji != NULL && *initial_emoji != '\0')
+        gtk_entry_set_text(GTK_ENTRY(emoji_entry), initial_emoji);
+    gtk_widget_set_halign(emoji_entry, GTK_ALIGN_START);
+    g_object_set_data(G_OBJECT(emoji_entry), "on-dialog", dialog);
+    g_signal_connect(emoji_entry, "button-press-event",
+                     G_CALLBACK(folder_emoji_pressed), dialog);
+    gtk_grid_attach(GTK_GRID(field_grid), emoji_entry, 1, 0, 1, 1);
+
+    /* Folder Name row */
+    GtkWidget *name_lbl = gtk_label_new("Folder Name:");
+    gtk_label_set_xalign(GTK_LABEL(name_lbl), 1.0);
+    gtk_grid_attach(GTK_GRID(field_grid), name_lbl, 0, 1, 1, 1);
+
     GtkWidget *entry = gtk_entry_new();
     gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
     if (initial_name != NULL)
         gtk_entry_set_text(GTK_ENTRY(entry), initial_name);
-    gtk_widget_set_margin_start(entry, 12);
-    gtk_widget_set_margin_end(entry, 12);
-    gtk_widget_set_margin_top(entry, 12);
-    gtk_widget_set_margin_bottom(entry, 4);
-    gtk_box_pack_start(GTK_BOX(box), entry, FALSE, FALSE, 0);
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_grid_attach(GTK_GRID(field_grid), entry, 1, 1, 1, 1);
 
-    /* AI mode row: Normal / Project / Custom                                 */
-    GtkWidget *mode_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    gtk_widget_set_margin_start(mode_row, 12);
-    gtk_widget_set_margin_end(mode_row, 12);
-    gtk_widget_set_margin_bottom(mode_row, 10);
-
+    /* AI summary mode row (row 2 of field_grid — aligns with labels above)   */
     GtkWidget *mode_lbl = gtk_label_new("AI summary mode:");
-    gtk_label_set_xalign(GTK_LABEL(mode_lbl), 0.0);
-    gtk_box_pack_start(GTK_BOX(mode_row), mode_lbl, FALSE, FALSE, 0);
+    gtk_label_set_xalign(GTK_LABEL(mode_lbl), 1.0);
+    gtk_grid_attach(GTK_GRID(field_grid), mode_lbl, 0, 2, 1, 1);
 
+    GtkWidget *radios_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     GtkWidget *normal_radio  = gtk_radio_button_new_with_label(NULL, "Normal");
     GtkWidget *project_radio = gtk_radio_button_new_with_label_from_widget(
         GTK_RADIO_BUTTON(normal_radio), "Project");
@@ -1939,10 +2036,12 @@ prompt_for_folder(OnLibrary *lw, const gchar *title,
     else if (initial_mode == ON_AI_MODE_CUSTOM)
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(custom_radio), TRUE);
 
-    gtk_box_pack_start(GTK_BOX(mode_row), normal_radio,  FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(mode_row), project_radio, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(mode_row), custom_radio,  FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(box), mode_row, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(radios_box), normal_radio,  FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(radios_box), project_radio, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(radios_box), custom_radio,  FALSE, FALSE, 0);
+    gtk_grid_attach(GTK_GRID(field_grid), radios_box, 1, 2, 1, 1);
+
+    gtk_box_pack_start(GTK_BOX(box), field_grid, FALSE, FALSE, 0);
 
     gtk_widget_show_all(dialog);
 
@@ -1962,6 +2061,9 @@ prompt_for_folder(OnLibrary *lw, const gchar *title,
                 else
                     *ai_mode_out = ON_AI_MODE_NORMAL;
             }
+            if (emoji_out != NULL)
+                *emoji_out = g_strstrip(
+                    g_strdup(gtk_entry_get_text(GTK_ENTRY(emoji_entry))));
         } else {
             g_free(text);
         }
@@ -2052,17 +2154,22 @@ on_new_folder(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
-    gint mode = ON_AI_MODE_NORMAL;
-    gchar *name = prompt_for_folder(lw, "New Folder", NULL,
-                                    ON_AI_MODE_NORMAL, &mode);
+    gint   mode  = ON_AI_MODE_NORMAL;
+    gchar *emoji = NULL;
+    gchar *name  = prompt_for_folder(lw, "New Folder", NULL,
+                                     ON_AI_MODE_NORMAL, &mode,
+                                     NULL, &emoji);
     if (name != NULL) {
         gint64 fid = on_db_folder_create(lw->app->db,
                                          current_folder_id(lw), name);
         if (fid && mode != ON_AI_MODE_NORMAL)
             on_db_folder_set_ai_mode(lw->app->db, fid, mode);
+        if (fid && emoji != NULL && *emoji != '\0')
+            on_db_folder_set_emoji(lw->app->db, fid, emoji);
         g_free(name);
         refresh_sidebar(lw);
     }
+    g_free(emoji);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2290,17 +2397,25 @@ on_rename_folder(GtkWidget *widget, gpointer user_data)
     OnLibrary *lw = user_data;       /* owning library window               */
     if (lw->sel_kind != SB_KIND_FOLDER)
         return;
-    gint cur_mode =                  /* pre-fill radios with current setting */
+    gint   cur_mode  =               /* pre-fill radios with current setting */
         on_db_folder_get_ai_mode(lw->app->db, lw->sel_id);
-    gint mode = cur_mode;
-    gchar *name = prompt_for_folder(lw, "Folder Info",
-                                    lw->sel_name, cur_mode, &mode);
+    gchar *cur_emoji =               /* pre-fill emoji with current value    */
+        on_db_folder_get_emoji(lw->app->db, lw->sel_id);
+    gint   mode  = cur_mode;
+    gchar *emoji = NULL;
+    gchar *name  = prompt_for_folder(lw, "Folder Info",
+                                     lw->sel_name, cur_mode, &mode,
+                                     cur_emoji, &emoji);
+    g_free(cur_emoji);
     if (name != NULL) {
         on_db_folder_rename(lw->app->db, lw->sel_id, name);
         on_db_folder_set_ai_mode(lw->app->db, lw->sel_id, mode);
+        on_db_folder_set_emoji(lw->app->db, lw->sel_id,
+                               emoji != NULL ? emoji : "");
         g_free(name);
         refresh_sidebar(lw);
     }
+    g_free(emoji);
 }
 
 /* on_open_search() — sidebar-toolbar Search: open the search window (it

@@ -244,6 +244,10 @@ on_db_open(const gchar *path_override)
                  "ALTER TABLE action_items ADD COLUMN due INTEGER "
                  "NOT NULL DEFAULT 0",
                  NULL, NULL, NULL);
+    sqlite3_exec(db->handle,
+                 "ALTER TABLE folders ADD COLUMN emoji TEXT "
+                 "NOT NULL DEFAULT ''",
+                 NULL, NULL, NULL);
 
     /* The Trash view references the trashed columns, so it is created
      * only after the migrations above have run.                             */
@@ -336,6 +340,35 @@ on_db_folder_get_ai_mode(OnDatabase *db, gint64 id)
 {
     return (gint)query_int64(db,
         "SELECT ai_mode FROM folders WHERE id=?", id);
+}
+
+gchar *
+on_db_folder_get_emoji(OnDatabase *db, gint64 id)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "SELECT COALESCE(emoji,'') FROM folders WHERE id=?");
+    if (stmt == NULL)
+        return g_strdup("");
+    sqlite3_bind_int64(stmt, 1, id);
+    gchar *emoji = NULL;              /* result, empty when no row / null    */
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        emoji = g_strdup((const gchar *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+    return emoji != NULL ? emoji : g_strdup("");
+}
+
+gboolean
+on_db_folder_set_emoji(OnDatabase *db, gint64 id, const gchar *emoji)
+{
+    sqlite3_stmt *stmt = prepare(db,
+        "UPDATE folders SET emoji=? WHERE id=?");
+    if (stmt != NULL) {
+        sqlite3_bind_text(stmt, 1,
+                          emoji != NULL ? emoji : "",
+                          -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, id);
+    }
+    return stmt_done(db, stmt);
 }
 
 gboolean
@@ -444,15 +477,18 @@ on_db_folder_delete(OnDatabase *db, gint64 id)
 }
 
 /* run_folder_query() — collect every row of `stmt` (columns: id, parent,
- * name, sort_order) into a list of OnFolder* and finalize it.               */
+ * name, sort_order, emoji) into a list of OnFolder* and finalize it.        */
 static GList *
 run_folder_query(sqlite3_stmt *stmt)
 {
     GList *out = NULL;                   /* accumulated OnFolder* rows      */
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         OnFolder *f  = g_new0(OnFolder, 1);
-        f->id   = sqlite3_column_int64(stmt, 0);
-        f->name = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
+        f->id    = sqlite3_column_int64(stmt, 0);
+        f->name  = g_strdup((const gchar *)sqlite3_column_text(stmt, 2));
+        f->emoji = g_strdup((const gchar *)sqlite3_column_text(stmt, 4));
+        if (f->emoji == NULL)
+            f->emoji = g_strdup("");
         out = g_list_prepend(out, f);
     }
     sqlite3_finalize(stmt);
@@ -466,7 +502,8 @@ on_db_folder_list(OnDatabase *db, gint64 parent_id)
      * tree (it lives under the Trash section); its untouched descendants
      * never get listed because nothing recurses into it.                    */
     sqlite3_stmt *stmt = prepare(db,
-        "SELECT id, COALESCE(parent_id,0), name, sort_order FROM folders "
+        "SELECT id, COALESCE(parent_id,0), name, sort_order, "
+        "COALESCE(emoji,'') FROM folders "
         "WHERE parent_id IS ? AND trashed=0 "
         "ORDER BY sort_order, name COLLATE NOCASE");
     if (stmt == NULL)
@@ -481,6 +518,7 @@ free_folder(gpointer data)
 {
     OnFolder *f = data;
     g_free(f->name);
+    g_free(f->emoji);
     g_free(f);
 }
 
@@ -1191,7 +1229,8 @@ GList *
 on_db_folder_list_trashed(OnDatabase *db)
 {
     sqlite3_stmt *stmt = prepare(db,
-        "SELECT id, COALESCE(parent_id,0), name, sort_order FROM folders "
+        "SELECT id, COALESCE(parent_id,0), name, sort_order, "
+        "COALESCE(emoji,'') FROM folders "
         "WHERE trashed=1 ORDER BY name COLLATE NOCASE");
     if (stmt == NULL)
         return NULL;
