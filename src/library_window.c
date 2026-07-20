@@ -3554,29 +3554,35 @@ build_ai_pane(OnLibrary *lw)
                        gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
                        FALSE, FALSE, 0);
 
-    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_widget_set_margin_start(header, 8);
-    gtk_widget_set_margin_end(header, 4);
-    gtk_widget_set_margin_top(header, 4);
-    gtk_widget_set_margin_bottom(header, 4);
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_margin_start(header, 6);
+    gtk_widget_set_margin_end(header, 2);
+    gtk_widget_set_margin_top(header, 1);
+    gtk_widget_set_margin_bottom(header, 1);
 
     GtkWidget *title = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(title), "<b>AI Summary</b>");
+    gtk_label_set_markup(GTK_LABEL(title), "<small><b>AI Summary</b></small>");
     gtk_label_set_xalign(GTK_LABEL(title), 0.0);
     gtk_box_pack_start(GTK_BOX(header), title, TRUE, TRUE, 0);
+
+    /* Compact CSS shared by both header buttons.                             */
+    const gchar *btn_css =
+        "button { padding: 0 4px; min-height: 0; font-size: 85%; }";
 
     /* pack_end places items right-to-left, so close (✕) goes first to land  */
     /* at the far right, then copy before it.                                 */
     GtkWidget *close_btn = gtk_button_new_with_label("\xe2\x9c\x95");
     gtk_button_set_relief(GTK_BUTTON(close_btn), GTK_RELIEF_NONE);
     gtk_widget_set_tooltip_text(close_btn, "Close AI summary");
+    on_app_widget_add_css(close_btn, btn_css);
     g_signal_connect_swapped(close_btn, "clicked",
                              G_CALLBACK(gtk_widget_hide), pane);
     gtk_box_pack_end(GTK_BOX(header), close_btn, FALSE, FALSE, 0);
 
-    GtkWidget *copy_btn = gtk_button_new_with_label("\xf0\x9f\x93\x8b");
+    GtkWidget *copy_btn = gtk_button_new_with_label("Copy");
     gtk_button_set_relief(GTK_BUTTON(copy_btn), GTK_RELIEF_NONE);
     gtk_widget_set_tooltip_text(copy_btn, "Copy summary to clipboard");
+    on_app_widget_add_css(copy_btn, btn_css);
     g_signal_connect(copy_btn, "clicked",
                      G_CALLBACK(on_ai_copy_clicked), lw);
     gtk_box_pack_end(GTK_BOX(header), copy_btn, FALSE, FALSE, 0);
