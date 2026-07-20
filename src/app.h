@@ -124,7 +124,7 @@ typedef struct OnApp {
     gboolean         show_done_actions;
     gboolean         ai_enabled;       /* AI features master kill switch       */
     gchar           *ai_command;       /* command path to invoke AI            */
-    gboolean         ai_project_mode;  /* TRUE=project summary, FALSE=normal   */
+    gchar           *ai_custom_prompt; /* prompt text for Custom folder mode   */
     void           (*notify_ai_changed)(struct OnApp *app); /* show/hide btn   */
     gboolean         db_transient;     /* TRUE when the current DB was opened
                                         * for this session only (not default) */

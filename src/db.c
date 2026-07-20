@@ -237,6 +237,10 @@ on_db_open(const gchar *path_override)
                  "NOT NULL DEFAULT 0",
                  NULL, NULL, NULL);
     sqlite3_exec(db->handle,
+                 "ALTER TABLE folders ADD COLUMN ai_mode INTEGER "
+                 "NOT NULL DEFAULT 0",
+                 NULL, NULL, NULL);
+    sqlite3_exec(db->handle,
                  "ALTER TABLE action_items ADD COLUMN due INTEGER "
                  "NOT NULL DEFAULT 0",
                  NULL, NULL, NULL);
@@ -313,6 +317,25 @@ on_db_folder_create(OnDatabase *db, gint64 parent_id, const gchar *name)
         g_warning("db: folder_create: %s", sqlite3_errmsg(db->handle));
     sqlite3_finalize(stmt);
     return new_id;
+}
+
+gboolean
+on_db_folder_set_ai_mode(OnDatabase *db, gint64 id, gint mode)
+{
+    sqlite3_stmt *stmt =
+        prepare(db, "UPDATE folders SET ai_mode=? WHERE id=?");
+    if (stmt != NULL) {
+        sqlite3_bind_int(stmt, 1, mode);
+        sqlite3_bind_int64(stmt, 2, id);
+    }
+    return stmt_done(db, stmt);
+}
+
+gint
+on_db_folder_get_ai_mode(OnDatabase *db, gint64 id)
+{
+    return (gint)query_int64(db,
+        "SELECT ai_mode FROM folders WHERE id=?", id);
 }
 
 gboolean

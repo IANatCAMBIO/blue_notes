@@ -382,6 +382,20 @@ on_ai_enabled_toggled(GtkToggleButton *check, gpointer user_data)
         app->notify_ai_changed(app);
 }
 
+/* on_ai_custom_prompt_changed() — persist the custom AI prompt as it changes.*/
+static void
+on_ai_custom_prompt_changed(GtkTextBuffer *buf, gpointer user_data)
+{
+    OnApp *app = user_data;
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buf, &start, &end);
+    gchar *text = gtk_text_buffer_get_text(buf, &start, &end, FALSE);
+    g_free(app->ai_custom_prompt);
+    app->ai_custom_prompt = (*text != '\0') ? g_strdup(text) : NULL;
+    g_free(text);
+    on_app_config_set("ai_custom_prompt", app->ai_custom_prompt);
+}
+
 /* on_ai_command_changed() — persist the AI command path as the user types.  */
 static void
 on_ai_command_changed(GtkEditable *editable, gpointer user_data)
@@ -395,25 +409,16 @@ on_ai_command_changed(GtkEditable *editable, gpointer user_data)
                       app->ai_command != NULL ? app->ai_command : NULL);
 }
 
-/* on_ai_mode_toggled() — project_radio toggled: update the mode setting.    */
-static void
-on_ai_mode_toggled(GtkToggleButton *radio, gpointer user_data)
-{
-    OnApp *app = user_data;
-    app->ai_project_mode = gtk_toggle_button_get_active(radio);
-    on_app_config_set("ai_project_mode",
-                      app->ai_project_mode ? "1" : "0");
-}
 
 void
 on_settings_window_open(OnApp *app)
 {
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Blue Notes - Settings");
-    gtk_window_set_default_size(GTK_WINDOW(window), 420, -1);
+    gtk_window_set_default_size(GTK_WINDOW(window), 210, -1);
     gtk_window_set_transient_for(GTK_WINDOW(window),
                                  GTK_WINDOW(app->library_window));
-    gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
+    gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_container_set_border_width(GTK_CONTAINER(vbox), 14);
@@ -480,6 +485,8 @@ on_settings_window_open(OnApp *app)
             "with the librsvg loader:\nsudo port install librsvg "
             "(then restart Blue Notes)</i></small>");
         gtk_label_set_xalign(GTK_LABEL(warn), 0.0);
+        gtk_label_set_line_wrap(GTK_LABEL(warn), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(warn), 40);
         gtk_widget_set_margin_start(warn, 12);
         gtk_box_pack_start(GTK_BOX(vbox), warn, FALSE, FALSE, 2);
     }
@@ -573,6 +580,7 @@ on_settings_window_open(OnApp *app)
     dbs->path_label = gtk_label_new(NULL);
     gtk_label_set_xalign(GTK_LABEL(dbs->path_label), 0.0);
     gtk_label_set_line_wrap(GTK_LABEL(dbs->path_label), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(dbs->path_label), 40);
     gtk_widget_set_margin_start(dbs->path_label, 12);
     gtk_box_pack_start(GTK_BOX(vbox), dbs->path_label, FALSE, FALSE, 0);
 
@@ -600,10 +608,12 @@ on_settings_window_open(OnApp *app)
     gtk_label_set_markup(GTK_LABEL(ai_desc),
         "<small>The AI button in the library toolbar generates a summary of "
         "the current folder\xe2\x80\x99s notes using an external AI command. "
-        "This switch is a master kill switch: disabling it hides the button "
-        "and prevents all AI commands from running.</small>");
+        "Normal or Project mode is set per-folder in the New/Rename Folder "
+        "dialog. This switch is a master kill switch: disabling it hides the "
+        "button and prevents all AI commands from running.</small>");
     gtk_label_set_xalign(GTK_LABEL(ai_desc), 0.0);
     gtk_label_set_line_wrap(GTK_LABEL(ai_desc), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(ai_desc), 40);
     gtk_widget_set_margin_start(ai_desc, 12);
     gtk_box_pack_start(GTK_BOX(vbox), ai_desc, FALSE, FALSE, 2);
 
@@ -614,7 +624,7 @@ on_settings_window_open(OnApp *app)
                                  app->ai_enabled);
     gtk_box_pack_start(GTK_BOX(vbox), ai_check, FALSE, FALSE, 0);
 
-    /* Sub-group (command + mode), sensitive only when AI is enabled.        */
+    /* Sub-group (command), sensitive only when AI is enabled.                */
     GtkWidget *ai_sub = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_widget_set_margin_start(ai_sub, 24);
     gtk_widget_set_sensitive(ai_sub, app->ai_enabled);
@@ -640,39 +650,51 @@ on_settings_window_open(OnApp *app)
         "stdin and write the response to stdout.</i></small>");
     gtk_label_set_xalign(GTK_LABEL(cmd_hint), 0.0);
     gtk_label_set_line_wrap(GTK_LABEL(cmd_hint), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(cmd_hint), 40);
     gtk_box_pack_start(GTK_BOX(ai_sub), cmd_hint, FALSE, FALSE, 0);
 
-    GtkWidget *mode_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    GtkWidget *mode_lbl = gtk_label_new("Summary mode:");
-    gtk_label_set_xalign(GTK_LABEL(mode_lbl), 0.0);
-    gtk_box_pack_start(GTK_BOX(mode_row), mode_lbl, FALSE, FALSE, 0);
+    GtkWidget *custom_lbl = gtk_label_new("Custom prompt:");
+    gtk_label_set_xalign(GTK_LABEL(custom_lbl), 0.0);
+    gtk_widget_set_margin_top(custom_lbl, 4);
+    gtk_box_pack_start(GTK_BOX(ai_sub), custom_lbl, FALSE, FALSE, 0);
 
-    GtkWidget *normal_radio =
-        gtk_radio_button_new_with_label(NULL, "Normal");
-    GtkWidget *project_radio =
-        gtk_radio_button_new_with_label_from_widget(
-            GTK_RADIO_BUTTON(normal_radio), "Project");
-    if (app->ai_project_mode)
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(project_radio), TRUE);
-    gtk_box_pack_start(GTK_BOX(mode_row), normal_radio, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(mode_row), project_radio, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(ai_sub), mode_row, FALSE, FALSE, 0);
+    GtkWidget *custom_view = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(custom_view), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(custom_view), 4);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(custom_view), 4);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(custom_view), 4);
+    gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(custom_view), 4);
+    GtkTextBuffer *custom_buf =
+        gtk_text_view_get_buffer(GTK_TEXT_VIEW(custom_view));
+    if (app->ai_custom_prompt != NULL)
+        gtk_text_buffer_set_text(custom_buf, app->ai_custom_prompt, -1);
+    GtkWidget *custom_scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(custom_scroll),
+                                   GTK_POLICY_AUTOMATIC,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_overlay_scrolling(
+        GTK_SCROLLED_WINDOW(custom_scroll), FALSE);
+    gtk_widget_set_size_request(custom_scroll, -1, 72);
+    gtk_container_add(GTK_CONTAINER(custom_scroll), custom_view);
+    gtk_box_pack_start(GTK_BOX(ai_sub), custom_scroll, FALSE, FALSE, 0);
+
+    GtkWidget *custom_hint = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(custom_hint),
+        "<small><i>Used when a folder\xe2\x80\x99s AI mode is set to "
+        "Custom. Notes and action items are appended after this prompt."
+        "</i></small>");
+    gtk_label_set_xalign(GTK_LABEL(custom_hint), 0.0);
+    gtk_label_set_line_wrap(GTK_LABEL(custom_hint), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(custom_hint), 40);
+    gtk_box_pack_start(GTK_BOX(ai_sub), custom_hint, FALSE, FALSE, 0);
 
     g_signal_connect(ai_check, "toggled",
                      G_CALLBACK(on_ai_enabled_toggled), app);
     g_object_set_data(G_OBJECT(ai_check), "on-ai-sub", ai_sub);
     g_signal_connect(cmd_entry, "changed",
                      G_CALLBACK(on_ai_command_changed), app);
-    g_signal_connect(project_radio, "toggled",
-                     G_CALLBACK(on_ai_mode_toggled), app);
-
-    /* --- close button ---------------------------------------------------------*/
-    GtkWidget *close_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    GtkWidget *close_btn = gtk_button_new_with_label("Close");
-    g_signal_connect_swapped(close_btn, "clicked",
-                             G_CALLBACK(gtk_widget_destroy), window);
-    gtk_box_pack_end(GTK_BOX(close_row), close_btn, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox), close_row, FALSE, FALSE, 4);
+    g_signal_connect(custom_buf, "changed",
+                     G_CALLBACK(on_ai_custom_prompt_changed), app);
 
     gtk_widget_show_all(window);
 }

@@ -1884,14 +1884,19 @@ current_folder_id(OnLibrary *lw)
 }
 
 /* ---------------------------------------------------------------------------
- * prompt_for_text() — tiny modal dialog with one text entry.
- *   lw      — the library window (dialog parent).
- *   title   — dialog title.
- *   initial — pre-filled entry text, or NULL.
- * Returns the entered string (g_free() it), or NULL if cancelled/empty.
+ * prompt_for_folder() — modal dialog: name entry + Normal/Project/Custom
+ * AI mode radios.
+ *   lw           — the library window (dialog parent).
+ *   title        — dialog title.
+ *   initial_name — pre-filled name, or NULL.
+ *   initial_mode — ON_AI_MODE_* to pre-select.
+ *   ai_mode_out  — receives the chosen ON_AI_MODE_* (may be NULL).
+ * Returns the entered name (g_free() it), or NULL if cancelled/empty.
  * ------------------------------------------------------------------------- */
 static gchar *
-prompt_for_text(OnLibrary *lw, const gchar *title, const gchar *initial)
+prompt_for_folder(OnLibrary *lw, const gchar *title,
+                  const gchar *initial_name, gint initial_mode,
+                  gint *ai_mode_out)
 {
     GtkWidget *dialog = gtk_dialog_new_with_buttons(
         title, GTK_WINDOW(lw->window),
@@ -1901,27 +1906,65 @@ prompt_for_text(OnLibrary *lw, const gchar *title, const gchar *initial)
         NULL);
     gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
 
+    GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+
     GtkWidget *entry = gtk_entry_new();
     gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
-    if (initial != NULL)
-        gtk_entry_set_text(GTK_ENTRY(entry), initial);
+    if (initial_name != NULL)
+        gtk_entry_set_text(GTK_ENTRY(entry), initial_name);
     gtk_widget_set_margin_start(entry, 12);
     gtk_widget_set_margin_end(entry, 12);
     gtk_widget_set_margin_top(entry, 12);
-    gtk_widget_set_margin_bottom(entry, 12);
-    gtk_box_pack_start(
-        GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))),
-        entry, FALSE, FALSE, 0);
+    gtk_widget_set_margin_bottom(entry, 4);
+    gtk_box_pack_start(GTK_BOX(box), entry, FALSE, FALSE, 0);
+
+    /* AI mode row: Normal / Project / Custom                                 */
+    GtkWidget *mode_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_start(mode_row, 12);
+    gtk_widget_set_margin_end(mode_row, 12);
+    gtk_widget_set_margin_bottom(mode_row, 10);
+
+    GtkWidget *mode_lbl = gtk_label_new("AI summary mode:");
+    gtk_label_set_xalign(GTK_LABEL(mode_lbl), 0.0);
+    gtk_box_pack_start(GTK_BOX(mode_row), mode_lbl, FALSE, FALSE, 0);
+
+    GtkWidget *normal_radio  = gtk_radio_button_new_with_label(NULL, "Normal");
+    GtkWidget *project_radio = gtk_radio_button_new_with_label_from_widget(
+        GTK_RADIO_BUTTON(normal_radio), "Project");
+    GtkWidget *custom_radio  = gtk_radio_button_new_with_label_from_widget(
+        GTK_RADIO_BUTTON(normal_radio), "Custom");
+
+    if (initial_mode == ON_AI_MODE_PROJECT)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(project_radio), TRUE);
+    else if (initial_mode == ON_AI_MODE_CUSTOM)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(custom_radio), TRUE);
+
+    gtk_box_pack_start(GTK_BOX(mode_row), normal_radio,  FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(mode_row), project_radio, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(mode_row), custom_radio,  FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), mode_row, FALSE, FALSE, 0);
+
     gtk_widget_show_all(dialog);
 
-    gchar *result = NULL;            /* entered text, NULL if cancelled     */
+    gchar *result = NULL;
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK) {
-        gchar *text =                /* trimmed copy of the entry text      */
+        gchar *text =
             g_strstrip(g_strdup(gtk_entry_get_text(GTK_ENTRY(entry))));
-        if (*text != '\0')
+        if (*text != '\0') {
             result = text;
-        else
+            if (ai_mode_out != NULL) {
+                if (gtk_toggle_button_get_active(
+                        GTK_TOGGLE_BUTTON(project_radio)))
+                    *ai_mode_out = ON_AI_MODE_PROJECT;
+                else if (gtk_toggle_button_get_active(
+                        GTK_TOGGLE_BUTTON(custom_radio)))
+                    *ai_mode_out = ON_AI_MODE_CUSTOM;
+                else
+                    *ai_mode_out = ON_AI_MODE_NORMAL;
+            }
+        } else {
             g_free(text);
+        }
     }
     gtk_widget_destroy(dialog);
     return result;
@@ -2003,15 +2046,20 @@ on_new_note(GtkWidget *widget, gpointer user_data)
     }
 }
 
-/* on_new_folder() — prompt for a name; create under the current folder.     */
+/* on_new_folder() — prompt for a name and AI mode; create under current.    */
 static void
 on_new_folder(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     OnLibrary *lw = user_data;       /* owning library window               */
-    gchar *name = prompt_for_text(lw, "New Folder", NULL);
+    gint mode = ON_AI_MODE_NORMAL;
+    gchar *name = prompt_for_folder(lw, "New Folder", NULL,
+                                    ON_AI_MODE_NORMAL, &mode);
     if (name != NULL) {
-        on_db_folder_create(lw->app->db, current_folder_id(lw), name);
+        gint64 fid = on_db_folder_create(lw->app->db,
+                                         current_folder_id(lw), name);
+        if (fid && mode != ON_AI_MODE_NORMAL)
+            on_db_folder_set_ai_mode(lw->app->db, fid, mode);
         g_free(name);
         refresh_sidebar(lw);
     }
@@ -2234,7 +2282,7 @@ on_empty_trash(GtkWidget *widget, gpointer user_data)
     }
 }
 
-/* on_rename_folder() — prompt for a new name for the selected folder.       */
+/* on_rename_folder() — "Info…" menu: edit folder name and AI mode.          */
 static void
 on_rename_folder(GtkWidget *widget, gpointer user_data)
 {
@@ -2242,9 +2290,14 @@ on_rename_folder(GtkWidget *widget, gpointer user_data)
     OnLibrary *lw = user_data;       /* owning library window               */
     if (lw->sel_kind != SB_KIND_FOLDER)
         return;
-    gchar *name = prompt_for_text(lw, "Rename Folder", lw->sel_name);
+    gint cur_mode =                  /* pre-fill radios with current setting */
+        on_db_folder_get_ai_mode(lw->app->db, lw->sel_id);
+    gint mode = cur_mode;
+    gchar *name = prompt_for_folder(lw, "Folder Info",
+                                    lw->sel_name, cur_mode, &mode);
     if (name != NULL) {
         on_db_folder_rename(lw->app->db, lw->sel_id, name);
+        on_db_folder_set_ai_mode(lw->app->db, lw->sel_id, mode);
         g_free(name);
         refresh_sidebar(lw);
     }
@@ -2698,7 +2751,7 @@ on_sidebar_button_press(GtkWidget *widget, GdkEventButton *event,
                                              : "New _Folder\xe2\x80\xa6",
                       G_CALLBACK(on_new_folder), lw);
         if (kind == SB_KIND_FOLDER) {
-            add_menu_item(menu, "_Rename\xe2\x80\xa6",
+            add_menu_item(menu, "Info\xe2\x80\xa6",
                           G_CALLBACK(on_rename_folder), lw);
             add_menu_item(menu, "Move to _Trash",
                           G_CALLBACK(on_delete_folder), lw);
@@ -3388,16 +3441,32 @@ run_ai_summary(OnLibrary *lw)
     GHashTable *body_map    = on_db_note_body_map(lw->app->db);
     GString    *prompt      = g_string_new(NULL);
 
-    if (lw->app->ai_project_mode) {
+    /* Use the folder's per-folder AI mode; fall back to Normal for non-folder
+     * selections (All Notes, tags, Pinned).                                  */
+    gint ai_mode = (lw->sel_kind == SB_KIND_FOLDER)
+        ? on_db_folder_get_ai_mode(lw->app->db, lw->sel_id)
+        : ON_AI_MODE_NORMAL;
+
+    if (ai_mode == ON_AI_MODE_PROJECT) {
         g_string_append(prompt,
             "This series of notes chronologically details the progress of a "
             "project. Provide me a summary of them all especially focusing on "
             "the current state and any remaining action items.\n\n");
+    } else if (ai_mode == ON_AI_MODE_CUSTOM) {
+        if (lw->app->ai_custom_prompt == NULL ||
+                *lw->app->ai_custom_prompt == '\0')
+            AI_FAIL("No custom AI prompt configured. Set one in "
+                    "File \xe2\x86\x92 Settings \xe2\x86\x92 AI Features.");
+        g_string_append(prompt, lw->app->ai_custom_prompt);
+        g_string_append(prompt, "\n\n");
     } else {
         g_string_append(prompt,
             "Provide me a brief summary of these notes.\n\n");
     }
 
+    g_string_append(prompt,
+        "Respond in plain text only. Do not use markdown formatting "
+        "such as headers, bold, italics, or bullet symbols.\n\n");
     g_string_append(prompt, "=== Notes ===\n\n");
 
     for (GList *nl = notes; nl != NULL; nl = nl->next) {

@@ -10,7 +10,7 @@
  *
  * Schema
  * ------
- *   folders   (id, parent_id, name, sort_order, trashed) -- nested via parent_id
+ *   folders   (id, parent_id, name, sort_order, trashed, ai_mode) -- nested via parent_id
  *   notes     (id, folder_id, title, content BLOB,
  *              sort_order, created_at, updated_at,
  *              pinned, body_text, trashed)
@@ -146,6 +146,14 @@ gint64 on_db_folder_create(OnDatabase *db, gint64 parent_id, const gchar *name);
 
 /* Rename folder `id` to `name`. Returns TRUE on success.                    */
 gboolean on_db_folder_rename(OnDatabase *db, gint64 id, const gchar *name);
+
+/* ai_mode values stored in folders.ai_mode.                                 */
+#define ON_AI_MODE_NORMAL  0
+#define ON_AI_MODE_PROJECT 1
+#define ON_AI_MODE_CUSTOM  2
+
+gboolean on_db_folder_set_ai_mode(OnDatabase *db, gint64 id, gint mode);
+gint     on_db_folder_get_ai_mode(OnDatabase *db, gint64 id);
 
 /* Move folder `id` (with its whole subtree, implicitly) under
  * `parent_id` (0 = top level), appending it after that parent's existing
