@@ -186,6 +186,9 @@ typedef struct {
     GtkToolItem  *ai_btn;              /* microchip AI toolbar button          */
     GtkWidget    *ai_pane;             /* output pane below the notes stack    */
     GtkWidget    *ai_text;             /* non-editable text view inside it     */
+    guint         ai_throbber_id;       /* g_timeout_add id while AI running    */
+    gint          ai_throbber_step;    /* animation frame counter              */
+    GtkPaned     *notes_paned;         /* vertical paned: stack / AI pane      */
     gboolean      ai_running;          /* TRUE while subprocess is in flight   */
 } OnLibrary;
 
@@ -281,6 +284,8 @@ static void    on_action_toolbar_style_changed(GtkToolbar *toolbar,
                                                gpointer user_data);
 static void    run_ai_summary(OnLibrary *lw);
 static GtkWidget *build_ai_pane(OnLibrary *lw);
+static void    on_ai_copy_clicked(GtkButton *btn, gpointer user_data);
+static gboolean ai_throbber_tick(gpointer user_data);
 
 /* ===========================================================================
  * scroll preservation
@@ -3275,6 +3280,32 @@ typedef struct {
     OnLibrary *lw;
 } AiJobData;
 
+/* ai_throbber_tick() — g_timeout_add callback: cycle the status-bar dots
+ * animation while an AI request is in flight.                                */
+static gboolean
+ai_throbber_tick(gpointer user_data)
+{
+    static const gchar * const frames[] = {
+        "\xe2\xa3\xbe", "\xe2\xa3\xbd", "\xe2\xa3\xbb", "\xe2\xa2\xbf",
+        "\xe2\xa1\xbf", "\xe2\xa3\x9f", "\xe2\xa3\xaf", "\xe2\xa3\xb7"
+    };
+    OnLibrary *lw = user_data;
+    on_app_status(lw->app, "Generating AI Summary %s",
+                  frames[lw->ai_throbber_step % 8]);
+    lw->ai_throbber_step++;
+    return G_SOURCE_CONTINUE;
+}
+
+/* ai_throbber_stop() — cancel the status-bar throbber if running.           */
+static void
+ai_throbber_stop(OnLibrary *lw)
+{
+    if (lw->ai_throbber_id) {
+        g_source_remove(lw->ai_throbber_id);
+        lw->ai_throbber_id = 0;
+    }
+}
+
 /* on_ai_subprocess_done() — GAsyncReadyCallback: the AI subprocess has
  * exited; read its stdout and put it in the text view.                       */
 static void
@@ -3286,6 +3317,8 @@ on_ai_subprocess_done(GObject *source, GAsyncResult *result,
     g_free(job);
 
     lw->ai_running = FALSE;
+    ai_throbber_stop(lw);
+    on_app_status(lw->app, "Summary generation complete");
 
     GBytes  *out   = NULL;             /* stdout bytes from the subprocess    */
     GError  *error = NULL;
@@ -3322,12 +3355,17 @@ run_ai_summary(OnLibrary *lw)
     GtkTextBuffer *buf =               /* the pane's text buffer              */
         gtk_text_view_get_buffer(GTK_TEXT_VIEW(lw->ai_text));
 
-    if (lw->app->ai_command == NULL || *lw->app->ai_command == '\0') {
-        gtk_text_buffer_set_text(buf,
-            "No AI command configured. Please set one in File \xe2\x86\x92"
-            " Settings \xe2\x86\x92 AI Features.", -1);
-        return;
-    }
+/* Macro: show an error in the pane, stop the throbber, and return.          */
+#define AI_FAIL(msg) \
+    do { \
+        gtk_text_buffer_set_text(buf, (msg), -1); \
+        ai_throbber_stop(lw); \
+        return; \
+    } while (0)
+
+    if (lw->app->ai_command == NULL || *lw->app->ai_command == '\0')
+        AI_FAIL("No AI command configured. Please set one in File \xe2\x86\x92"
+                " Settings \xe2\x86\x92 AI Features.");
 
     GList *notes;
     if (lw->sel_kind == SB_KIND_TAG)
@@ -3338,18 +3376,13 @@ run_ai_summary(OnLibrary *lw)
         notes = on_db_note_list_recent(lw->app->db);
     else if (lw->sel_kind == SB_KIND_TRASH ||
              lw->sel_kind == SB_KIND_TRASH_FOLDER ||
-             lw->sel_kind == SB_KIND_ACTIONS) {
-        gtk_text_buffer_set_text(buf,
-            "Select a folder, tag, or All Notes to summarize.", -1);
-        return;
-    } else {
+             lw->sel_kind == SB_KIND_ACTIONS)
+        AI_FAIL("Select a folder, tag, or All Notes to summarize.");
+    else
         notes = on_db_note_list(lw->app->db, lw->sel_id);
-    }
 
-    if (notes == NULL) {
-        gtk_text_buffer_set_text(buf, "No notes to summarize.", -1);
-        return;
-    }
+    if (notes == NULL)
+        AI_FAIL("No notes to summarize.");
 
     GList      *all_actions = on_db_action_list(lw->app->db);
     GHashTable *body_map    = on_db_note_body_map(lw->app->db);
@@ -3436,12 +3469,14 @@ run_ai_summary(OnLibrary *lw)
     if (proc == NULL) {
         gchar *msg = g_strdup_printf("Failed to start AI command: %s",
                                      error->message);
-        gtk_text_buffer_set_text(buf, msg, -1);
-        g_free(msg);
         g_error_free(error);
         g_string_free(prompt, TRUE);
+        gtk_text_buffer_set_text(buf, msg, -1);
+        g_free(msg);
+        ai_throbber_stop(lw);
         return;
     }
+#undef AI_FAIL
 
     lw->ai_running = TRUE;
 
@@ -3458,6 +3493,22 @@ run_ai_summary(OnLibrary *lw)
     g_object_unref(proc);
 }
 
+/* on_ai_copy_clicked() — copy the AI summary text to the clipboard.         */
+static void
+on_ai_copy_clicked(GtkButton *btn, gpointer user_data)
+{
+    (void)btn;
+    OnLibrary     *lw  = user_data;
+    GtkTextBuffer *buf =
+        gtk_text_view_get_buffer(GTK_TEXT_VIEW(lw->ai_text));
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buf, &start, &end);
+    gchar *text = gtk_text_buffer_get_text(buf, &start, &end, FALSE);
+    GtkClipboard *clip = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+    gtk_clipboard_set_text(clip, text, -1);
+    g_free(text);
+}
+
 /* on_ai_button_clicked() — toolbar AI button: show the pane and (re)run the
  * summary; re-clicking while a run is in progress is a no-op.               */
 static void
@@ -3466,21 +3517,34 @@ on_ai_button_clicked(GtkToolButton *btn, gpointer user_data)
     (void)btn;
     OnLibrary *lw = user_data;         /* owning library window               */
 
-    gtk_widget_show(lw->ai_pane);
-
     if (lw->ai_running)
         return;
 
+    /* Set a comfortable initial split the first time the pane opens.         */
+    if (!gtk_widget_get_visible(lw->ai_pane)) {
+        gint total = gtk_widget_get_allocated_height(
+            GTK_WIDGET(lw->notes_paned));
+        if (total > 300)
+            gtk_paned_set_position(GTK_PANED(lw->notes_paned),
+                                   total - 220);
+    }
+    gtk_widget_show(lw->ai_pane);
+
+    /* Clear text and start the status-bar throbber for immediate feedback.   */
     GtkTextBuffer *buf =
         gtk_text_view_get_buffer(GTK_TEXT_VIEW(lw->ai_text));
-    gtk_text_buffer_set_text(buf, "Running AI\xe2\x80\xa6", -1);
+    gtk_text_buffer_set_text(buf, "", -1);
+    lw->ai_throbber_step = 0;
+    on_app_status(lw->app, "Generating AI Summary \xe2\xa3\xbe");
+    lw->ai_throbber_id = g_timeout_add(120, ai_throbber_tick, lw);
 
     run_ai_summary(lw);
 }
 
 /* build_ai_pane() — construct the AI output pane (hidden by default): a
- * header row with a close button, then a scrolled non-editable text view.
- * lw->ai_text is set here.                                                   */
+ * header row with a copy button and close button, then a scrolled
+ * non-editable text view.  lw->ai_text is set here.
+ * Uses no_show_all so gtk_widget_show_all on the window doesn't reveal it.  */
 static GtkWidget *
 build_ai_pane(OnLibrary *lw)
 {
@@ -3501,12 +3565,21 @@ build_ai_pane(OnLibrary *lw)
     gtk_label_set_xalign(GTK_LABEL(title), 0.0);
     gtk_box_pack_start(GTK_BOX(header), title, TRUE, TRUE, 0);
 
+    /* pack_end places items right-to-left, so close (✕) goes first to land  */
+    /* at the far right, then copy before it.                                 */
     GtkWidget *close_btn = gtk_button_new_with_label("\xe2\x9c\x95");
     gtk_button_set_relief(GTK_BUTTON(close_btn), GTK_RELIEF_NONE);
     gtk_widget_set_tooltip_text(close_btn, "Close AI summary");
     g_signal_connect_swapped(close_btn, "clicked",
                              G_CALLBACK(gtk_widget_hide), pane);
     gtk_box_pack_end(GTK_BOX(header), close_btn, FALSE, FALSE, 0);
+
+    GtkWidget *copy_btn = gtk_button_new_with_label("\xf0\x9f\x93\x8b");
+    gtk_button_set_relief(GTK_BUTTON(copy_btn), GTK_RELIEF_NONE);
+    gtk_widget_set_tooltip_text(copy_btn, "Copy summary to clipboard");
+    g_signal_connect(copy_btn, "clicked",
+                     G_CALLBACK(on_ai_copy_clicked), lw);
+    gtk_box_pack_end(GTK_BOX(header), copy_btn, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(pane), header, FALSE, FALSE, 0);
 
@@ -3526,11 +3599,13 @@ build_ai_pane(OnLibrary *lw)
                                    GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_overlay_scrolling(
         GTK_SCROLLED_WINDOW(scroll), FALSE);
-    gtk_widget_set_size_request(scroll, -1, 180);
     gtk_container_add(GTK_CONTAINER(scroll), lw->ai_text);
     gtk_box_pack_start(GTK_BOX(pane), scroll, TRUE, TRUE, 0);
 
     gtk_widget_show_all(pane);
+    /* no_show_all AFTER show_all so children are realized but the pane       */
+    /* itself is excluded from future show_all sweeps.                        */
+    gtk_widget_set_no_show_all(pane, TRUE);
     gtk_widget_hide(pane);             /* starts hidden until AI is clicked   */
     return pane;
 }
@@ -4235,7 +4310,7 @@ build_action_bar(OnLibrary *lw)
 
     lw->ai_btn = on_app_tool_item_new(lw->app, FALSE,
         "microchip", "\xf0\x9f\xa4\x96",
-        "AI Summary", "Summarize notes with AI (uses configured command)");
+        "AI Summary", "Summarize notes with AI");
     g_signal_connect(lw->ai_btn, "clicked",
                      G_CALLBACK(on_ai_button_clicked), lw);
     /* no_show_all: visibility is controlled entirely by ai_enabled; we don't
@@ -4978,10 +5053,14 @@ on_library_window_create(OnApp *app)
     lw->sidebar_paned = paned;
     gtk_paned_pack1(GTK_PANED(paned), sidebar_box, FALSE, FALSE);
     lw->ai_pane = build_ai_pane(lw);
-    GtkWidget *notes_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_pack_start(GTK_BOX(notes_vbox), lw->stack, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(notes_vbox), lw->ai_pane, FALSE, FALSE, 0);
-    gtk_paned_pack2(GTK_PANED(paned), notes_vbox, TRUE, FALSE);
+    /* Vertical paned so the user can drag the divider between the notes list
+     * and the AI summary pane.  GtkPaned collapses the divider automatically
+     * when child2 is hidden.                                                  */
+    GtkWidget *notes_paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    lw->notes_paned = GTK_PANED(notes_paned);
+    gtk_paned_pack1(GTK_PANED(notes_paned), lw->stack, TRUE, FALSE);
+    gtk_paned_pack2(GTK_PANED(notes_paned), lw->ai_pane, FALSE, FALSE);
+    gtk_paned_pack2(GTK_PANED(paned), notes_paned, TRUE, FALSE);
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *menubar = build_menubar(lw);
