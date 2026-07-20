@@ -183,6 +183,10 @@ typedef struct {
     GtkWidget    *status_event;
     GtkWidget    *status_revealer;
     guint         status_timeout;
+    GtkToolItem  *ai_btn;              /* microchip AI toolbar button          */
+    GtkWidget    *ai_pane;             /* output pane below the notes stack    */
+    GtkWidget    *ai_text;             /* non-editable text view inside it     */
+    gboolean      ai_running;          /* TRUE while subprocess is in flight   */
 } OnLibrary;
 
 /* How long a status-bar event message stays before fading out.              */
@@ -275,6 +279,8 @@ static void    about_button_fit_style(GtkToolItem *item,
 static void    on_action_toolbar_style_changed(GtkToolbar *toolbar,
                                                GtkToolbarStyle style,
                                                gpointer user_data);
+static void    run_ai_summary(OnLibrary *lw);
+static GtkWidget *build_ai_pane(OnLibrary *lw);
 
 /* ===========================================================================
  * scroll preservation
@@ -3261,6 +3267,292 @@ library_notify_status(OnApp *app, const gchar *message)
 }
 
 /* ===========================================================================
+ * AI summary
+ * =========================================================================== */
+
+/* AiJobData — context passed to the subprocess completion callback.         */
+typedef struct {
+    OnLibrary *lw;
+} AiJobData;
+
+/* on_ai_subprocess_done() — GAsyncReadyCallback: the AI subprocess has
+ * exited; read its stdout and put it in the text view.                       */
+static void
+on_ai_subprocess_done(GObject *source, GAsyncResult *result,
+                      gpointer user_data)
+{
+    AiJobData     *job    = user_data;  /* context (heap-allocated)           */
+    OnLibrary     *lw     = job->lw;
+    g_free(job);
+
+    lw->ai_running = FALSE;
+
+    GBytes  *out   = NULL;             /* stdout bytes from the subprocess    */
+    GError  *error = NULL;
+    g_subprocess_communicate_finish(G_SUBPROCESS(source),
+                                    result, &out, NULL, &error);
+
+    GtkTextBuffer *buf =               /* the pane's text buffer              */
+        gtk_text_view_get_buffer(GTK_TEXT_VIEW(lw->ai_text));
+
+    if (error != NULL) {
+        gtk_text_buffer_set_text(buf, error->message, -1);
+        g_error_free(error);
+    } else if (out != NULL) {
+        gsize        len  = 0;
+        const gchar *data = g_bytes_get_data(out, &len);
+        gtk_text_buffer_set_text(buf, data != NULL ? data : "", (gint)len);
+        g_bytes_unref(out);
+    } else {
+        gtk_text_buffer_set_text(buf, "(no output)", -1);
+    }
+
+    GtkTextIter start;
+    gtk_text_buffer_get_start_iter(buf, &start);
+    gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(lw->ai_text),
+                                 &start, 0.0, FALSE, 0.0, 0.0);
+}
+
+/* run_ai_summary() — collect note content for the current selection, build
+ * the prompt (project or normal mode), spawn the configured AI command,
+ * and show the output asynchronously.                                        */
+static void
+run_ai_summary(OnLibrary *lw)
+{
+    GtkTextBuffer *buf =               /* the pane's text buffer              */
+        gtk_text_view_get_buffer(GTK_TEXT_VIEW(lw->ai_text));
+
+    if (lw->app->ai_command == NULL || *lw->app->ai_command == '\0') {
+        gtk_text_buffer_set_text(buf,
+            "No AI command configured. Please set one in File \xe2\x86\x92"
+            " Settings \xe2\x86\x92 AI Features.", -1);
+        return;
+    }
+
+    GList *notes;
+    if (lw->sel_kind == SB_KIND_TAG)
+        notes = on_db_notes_by_tag(lw->app->db, lw->sel_id);
+    else if (lw->sel_kind == SB_KIND_PINNED)
+        notes = on_db_note_list_pinned(lw->app->db);
+    else if (lw->sel_kind == SB_KIND_ALL)
+        notes = on_db_note_list_recent(lw->app->db);
+    else if (lw->sel_kind == SB_KIND_TRASH ||
+             lw->sel_kind == SB_KIND_TRASH_FOLDER ||
+             lw->sel_kind == SB_KIND_ACTIONS) {
+        gtk_text_buffer_set_text(buf,
+            "Select a folder, tag, or All Notes to summarize.", -1);
+        return;
+    } else {
+        notes = on_db_note_list(lw->app->db, lw->sel_id);
+    }
+
+    if (notes == NULL) {
+        gtk_text_buffer_set_text(buf, "No notes to summarize.", -1);
+        return;
+    }
+
+    GList      *all_actions = on_db_action_list(lw->app->db);
+    GHashTable *body_map    = on_db_note_body_map(lw->app->db);
+    GString    *prompt      = g_string_new(NULL);
+
+    if (lw->app->ai_project_mode) {
+        g_string_append(prompt,
+            "This series of notes chronologically details the progress of a "
+            "project. Provide me a summary of them all especially focusing on "
+            "the current state and any remaining action items.\n\n");
+    } else {
+        g_string_append(prompt,
+            "Provide me a brief summary of these notes.\n\n");
+    }
+
+    g_string_append(prompt, "=== Notes ===\n\n");
+
+    for (GList *nl = notes; nl != NULL; nl = nl->next) {
+        OnNoteMeta *m  = nl->data;     /* one note's metadata                 */
+        GDateTime  *dt = g_date_time_new_from_unix_local(m->updated_at);
+        gchar      *mod = g_date_time_format(dt, "%Y-%m-%d");
+        g_date_time_unref(dt);
+
+        g_string_append_printf(prompt, "--- %s (modified %s) ---\n",
+                               m->title != NULL ? m->title : "(untitled)",
+                               mod);
+        g_free(mod);
+
+        const gchar *body = g_hash_table_lookup(body_map, &m->id);
+        if (body != NULL && *body != '\0')
+            g_string_append_printf(prompt, "%s\n", body);
+        else
+            g_string_append(prompt, "(empty note)\n");
+
+        gboolean first_action = TRUE;
+        for (GList *al = all_actions; al != NULL; al = al->next) {
+            OnActionItem *it = al->data;
+            if (it->note_id != m->id)
+                continue;
+            if (first_action) {
+                g_string_append(prompt, "\nAction items:\n");
+                first_action = FALSE;
+            }
+            const gchar *status = it->done ? "[done]" : "[    ]";
+            g_string_append_printf(prompt, "  %s %s", status, it->text);
+            if (it->due != 0) {
+                GDateTime *ddt = g_date_time_new_from_unix_local(it->due);
+                gchar     *ds  = g_date_time_format(ddt, "%Y-%m-%d");
+                g_date_time_unref(ddt);
+                g_string_append_printf(prompt, " (due %s)", ds);
+                g_free(ds);
+            }
+            g_string_append_c(prompt, '\n');
+        }
+        g_string_append_c(prompt, '\n');
+    }
+
+    g_hash_table_destroy(body_map);
+    on_db_action_list_free(all_actions);
+    on_db_note_list_free(notes);
+
+    gint    argc_ai = 0;
+    gchar **argv_ai = NULL;
+    GError *error   = NULL;
+    if (!g_shell_parse_argv(lw->app->ai_command, &argc_ai, &argv_ai, &error)) {
+        gchar *msg = g_strdup_printf("Invalid AI command: %s", error->message);
+        gtk_text_buffer_set_text(buf, msg, -1);
+        g_free(msg);
+        g_error_free(error);
+        g_string_free(prompt, TRUE);
+        return;
+    }
+    (void)argc_ai;
+
+    GSubprocessLauncher *launcher = g_subprocess_launcher_new(
+        G_SUBPROCESS_FLAGS_STDIN_PIPE  |
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+        G_SUBPROCESS_FLAGS_STDERR_MERGE);
+    GSubprocess *proc = g_subprocess_launcher_spawnv(
+        launcher, (const gchar * const *)argv_ai, &error);
+    g_strfreev(argv_ai);
+    g_object_unref(launcher);
+
+    if (proc == NULL) {
+        gchar *msg = g_strdup_printf("Failed to start AI command: %s",
+                                     error->message);
+        gtk_text_buffer_set_text(buf, msg, -1);
+        g_free(msg);
+        g_error_free(error);
+        g_string_free(prompt, TRUE);
+        return;
+    }
+
+    lw->ai_running = TRUE;
+
+    gsize  plen        = prompt->len;
+    gchar *pstr        = g_string_free(prompt, FALSE);
+    GBytes *stdin_bytes = g_bytes_new_take(pstr, plen);
+
+    AiJobData *job = g_new(AiJobData, 1);
+    job->lw = lw;
+
+    g_subprocess_communicate_async(proc, stdin_bytes, NULL,
+                                   on_ai_subprocess_done, job);
+    g_bytes_unref(stdin_bytes);
+    g_object_unref(proc);
+}
+
+/* on_ai_button_clicked() — toolbar AI button: show the pane and (re)run the
+ * summary; re-clicking while a run is in progress is a no-op.               */
+static void
+on_ai_button_clicked(GtkToolButton *btn, gpointer user_data)
+{
+    (void)btn;
+    OnLibrary *lw = user_data;         /* owning library window               */
+
+    gtk_widget_show(lw->ai_pane);
+
+    if (lw->ai_running)
+        return;
+
+    GtkTextBuffer *buf =
+        gtk_text_view_get_buffer(GTK_TEXT_VIEW(lw->ai_text));
+    gtk_text_buffer_set_text(buf, "Running AI\xe2\x80\xa6", -1);
+
+    run_ai_summary(lw);
+}
+
+/* build_ai_pane() — construct the AI output pane (hidden by default): a
+ * header row with a close button, then a scrolled non-editable text view.
+ * lw->ai_text is set here.                                                   */
+static GtkWidget *
+build_ai_pane(OnLibrary *lw)
+{
+    GtkWidget *pane = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+
+    gtk_box_pack_start(GTK_BOX(pane),
+                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
+                       FALSE, FALSE, 0);
+
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_margin_start(header, 8);
+    gtk_widget_set_margin_end(header, 4);
+    gtk_widget_set_margin_top(header, 4);
+    gtk_widget_set_margin_bottom(header, 4);
+
+    GtkWidget *title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(title), "<b>AI Summary</b>");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0);
+    gtk_box_pack_start(GTK_BOX(header), title, TRUE, TRUE, 0);
+
+    GtkWidget *close_btn = gtk_button_new_with_label("\xe2\x9c\x95");
+    gtk_button_set_relief(GTK_BUTTON(close_btn), GTK_RELIEF_NONE);
+    gtk_widget_set_tooltip_text(close_btn, "Close AI summary");
+    g_signal_connect_swapped(close_btn, "clicked",
+                             G_CALLBACK(gtk_widget_hide), pane);
+    gtk_box_pack_end(GTK_BOX(header), close_btn, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(pane), header, FALSE, FALSE, 0);
+
+    lw->ai_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(lw->ai_text), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(lw->ai_text), FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(lw->ai_text),
+                                GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(lw->ai_text), 8);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(lw->ai_text), 8);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(lw->ai_text), 4);
+    gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(lw->ai_text), 4);
+
+    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_AUTOMATIC,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_overlay_scrolling(
+        GTK_SCROLLED_WINDOW(scroll), FALSE);
+    gtk_widget_set_size_request(scroll, -1, 180);
+    gtk_container_add(GTK_CONTAINER(scroll), lw->ai_text);
+    gtk_box_pack_start(GTK_BOX(pane), scroll, TRUE, TRUE, 0);
+
+    gtk_widget_show_all(pane);
+    gtk_widget_hide(pane);             /* starts hidden until AI is clicked   */
+    return pane;
+}
+
+/* library_notify_ai_changed() — installed as app->notify_ai_changed;
+ * shows or hides the AI toolbar button based on app->ai_enabled.            */
+static void
+library_notify_ai_changed(OnApp *app)
+{
+    OnLibrary *lw = lw_from_app(app);
+    if (lw == NULL || lw->ai_btn == NULL)
+        return;
+    if (app->ai_enabled) {
+        gtk_widget_show(GTK_WIDGET(lw->ai_btn));
+    } else {
+        gtk_widget_hide(GTK_WIDGET(lw->ai_btn));
+        if (lw->ai_pane != NULL)
+            gtk_widget_hide(lw->ai_pane);
+    }
+}
+
+/* ===========================================================================
  * refresh hook + construction
  * =========================================================================== */
 
@@ -3938,6 +4230,21 @@ build_action_bar(OnLibrary *lw)
                     "Search", "Search notes (Ctrl+F)",
                     G_CALLBACK(on_open_search));
 
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar),
+                       gtk_separator_tool_item_new(), -1);
+
+    lw->ai_btn = on_app_tool_item_new(lw->app, FALSE,
+        "microchip", "\xf0\x9f\xa4\x96",
+        "AI Summary", "Summarize notes with AI (uses configured command)");
+    g_signal_connect(lw->ai_btn, "clicked",
+                     G_CALLBACK(on_ai_button_clicked), lw);
+    /* no_show_all: visibility is controlled entirely by ai_enabled; we don't
+     * want gtk_widget_show_all() on the window to unhide it.                */
+    gtk_widget_set_no_show_all(GTK_WIDGET(lw->ai_btn), TRUE);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), lw->ai_btn, -1);
+    if (lw->app->ai_enabled)
+        gtk_widget_show(GTK_WIDGET(lw->ai_btn));
+
     /* Expanding separator pushes the About button to the right edge.       */
     GtkToolItem *spacer = gtk_separator_tool_item_new();
     gtk_separator_tool_item_set_draw(GTK_SEPARATOR_TOOL_ITEM(spacer),
@@ -4173,6 +4480,7 @@ on_library_window_create(OnApp *app)
     app->notify_notes_changed = library_notify_notes_changed;
     app->notify_note_saved    = library_notify_note_saved;
     app->notify_status        = library_notify_status;
+    app->notify_ai_changed    = library_notify_ai_changed;
 
     g_signal_connect(lw->window, "key-press-event",
                      G_CALLBACK(on_library_key_press), lw);
@@ -4669,7 +4977,11 @@ on_library_window_create(OnApp *app)
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     lw->sidebar_paned = paned;
     gtk_paned_pack1(GTK_PANED(paned), sidebar_box, FALSE, FALSE);
-    gtk_paned_pack2(GTK_PANED(paned), lw->stack, TRUE, FALSE);
+    lw->ai_pane = build_ai_pane(lw);
+    GtkWidget *notes_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_pack_start(GTK_BOX(notes_vbox), lw->stack, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(notes_vbox), lw->ai_pane, FALSE, FALSE, 0);
+    gtk_paned_pack2(GTK_PANED(paned), notes_vbox, TRUE, FALSE);
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *menubar = build_menubar(lw);

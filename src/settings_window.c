@@ -368,6 +368,43 @@ section_label(const gchar *text)
     return label;
 }
 
+/* on_ai_enabled_toggled() — master AI kill switch.                          */
+static void
+on_ai_enabled_toggled(GtkToggleButton *check, gpointer user_data)
+{
+    OnApp *app = user_data;
+    app->ai_enabled = gtk_toggle_button_get_active(check);
+    on_app_config_set("ai_enabled", app->ai_enabled ? "1" : "0");
+    GtkWidget *sub = g_object_get_data(G_OBJECT(check), "on-ai-sub");
+    if (sub != NULL)
+        gtk_widget_set_sensitive(sub, app->ai_enabled);
+    if (app->notify_ai_changed != NULL)
+        app->notify_ai_changed(app);
+}
+
+/* on_ai_command_changed() — persist the AI command path as the user types.  */
+static void
+on_ai_command_changed(GtkEditable *editable, gpointer user_data)
+{
+    OnApp *app = user_data;
+    const gchar *text = gtk_entry_get_text(GTK_ENTRY(editable));
+    g_free(app->ai_command);
+    app->ai_command = (text != NULL && *text != '\0')
+        ? g_strdup(text) : NULL;
+    on_app_config_set("ai_command",
+                      app->ai_command != NULL ? app->ai_command : NULL);
+}
+
+/* on_ai_mode_toggled() — project_radio toggled: update the mode setting.    */
+static void
+on_ai_mode_toggled(GtkToggleButton *radio, gpointer user_data)
+{
+    OnApp *app = user_data;
+    app->ai_project_mode = gtk_toggle_button_get_active(radio);
+    on_app_config_set("ai_project_mode",
+                      app->ai_project_mode ? "1" : "0");
+}
+
 void
 on_settings_window_open(OnApp *app)
 {
@@ -550,6 +587,84 @@ on_settings_window_open(OnApp *app)
     gtk_box_pack_start(GTK_BOX(vbox),
                        bool_check_new(app, BS_STATUSBAR_DB_PATH),
                        FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(vbox),
+                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
+                       FALSE, FALSE, 4);
+
+    /* --- AI features ---------------------------------------------------------*/
+    gtk_box_pack_start(GTK_BOX(vbox), section_label("AI Features"),
+                       FALSE, FALSE, 0);
+
+    GtkWidget *ai_desc = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(ai_desc),
+        "<small>The AI button in the library toolbar generates a summary of "
+        "the current folder\xe2\x80\x99s notes using an external AI command. "
+        "This switch is a master kill switch: disabling it hides the button "
+        "and prevents all AI commands from running.</small>");
+    gtk_label_set_xalign(GTK_LABEL(ai_desc), 0.0);
+    gtk_label_set_line_wrap(GTK_LABEL(ai_desc), TRUE);
+    gtk_widget_set_margin_start(ai_desc, 12);
+    gtk_box_pack_start(GTK_BOX(vbox), ai_desc, FALSE, FALSE, 2);
+
+    GtkWidget *ai_check = gtk_check_button_new_with_label(
+        "Enable AI features");
+    gtk_widget_set_margin_start(ai_check, 12);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ai_check),
+                                 app->ai_enabled);
+    gtk_box_pack_start(GTK_BOX(vbox), ai_check, FALSE, FALSE, 0);
+
+    /* Sub-group (command + mode), sensitive only when AI is enabled.        */
+    GtkWidget *ai_sub = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_margin_start(ai_sub, 24);
+    gtk_widget_set_sensitive(ai_sub, app->ai_enabled);
+    gtk_box_pack_start(GTK_BOX(vbox), ai_sub, FALSE, FALSE, 0);
+
+    GtkWidget *cmd_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *cmd_label = gtk_label_new("AI command:");
+    gtk_label_set_xalign(GTK_LABEL(cmd_label), 0.0);
+    gtk_box_pack_start(GTK_BOX(cmd_row), cmd_label, FALSE, FALSE, 0);
+
+    GtkWidget *cmd_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(cmd_entry),
+                                   "e.g. /usr/local/bin/claude");
+    if (app->ai_command != NULL)
+        gtk_entry_set_text(GTK_ENTRY(cmd_entry), app->ai_command);
+    gtk_box_pack_start(GTK_BOX(cmd_row), cmd_entry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_sub), cmd_row, FALSE, FALSE, 0);
+
+    GtkWidget *cmd_hint = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(cmd_hint),
+        "<small><i>Run <b>which claude</b> in a terminal to find your "
+        "Claude Code command path. The command must read the prompt from "
+        "stdin and write the response to stdout.</i></small>");
+    gtk_label_set_xalign(GTK_LABEL(cmd_hint), 0.0);
+    gtk_label_set_line_wrap(GTK_LABEL(cmd_hint), TRUE);
+    gtk_box_pack_start(GTK_BOX(ai_sub), cmd_hint, FALSE, FALSE, 0);
+
+    GtkWidget *mode_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *mode_lbl = gtk_label_new("Summary mode:");
+    gtk_label_set_xalign(GTK_LABEL(mode_lbl), 0.0);
+    gtk_box_pack_start(GTK_BOX(mode_row), mode_lbl, FALSE, FALSE, 0);
+
+    GtkWidget *normal_radio =
+        gtk_radio_button_new_with_label(NULL, "Normal");
+    GtkWidget *project_radio =
+        gtk_radio_button_new_with_label_from_widget(
+            GTK_RADIO_BUTTON(normal_radio), "Project");
+    if (app->ai_project_mode)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(project_radio), TRUE);
+    gtk_box_pack_start(GTK_BOX(mode_row), normal_radio, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(mode_row), project_radio, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(ai_sub), mode_row, FALSE, FALSE, 0);
+
+    g_signal_connect(ai_check, "toggled",
+                     G_CALLBACK(on_ai_enabled_toggled), app);
+    g_object_set_data(G_OBJECT(ai_check), "on-ai-sub", ai_sub);
+    g_signal_connect(cmd_entry, "changed",
+                     G_CALLBACK(on_ai_command_changed), app);
+    g_signal_connect(project_radio, "toggled",
+                     G_CALLBACK(on_ai_mode_toggled), app);
 
     /* --- close button ---------------------------------------------------------*/
     GtkWidget *close_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);

@@ -122,6 +122,10 @@ typedef struct OnApp {
     gboolean         statusbar_db_path;
     gboolean         statusbar_note_id;
     gboolean         show_done_actions;
+    gboolean         ai_enabled;       /* AI features master kill switch       */
+    gchar           *ai_command;       /* command path to invoke AI            */
+    gboolean         ai_project_mode;  /* TRUE=project summary, FALSE=normal   */
+    void           (*notify_ai_changed)(struct OnApp *app); /* show/hide btn   */
     gboolean         db_transient;     /* TRUE when the current DB was opened
                                         * for this session only (not default) */
     GtkCssProvider  *touch_css;        /* screen CSS hiding the touch aids

@@ -451,6 +451,12 @@ main(int argc, char *argv[])
         on_app_config_get_bool("statusbar_note_id",      FALSE);
     app.show_done_actions =
         on_app_config_get_bool("show_done_actions",      TRUE);
+    app.ai_enabled =
+        on_app_config_get_bool("ai_enabled",             FALSE);
+    app.ai_command =
+        on_app_config_get("ai_command");
+    app.ai_project_mode =
+        on_app_config_get_bool("ai_project_mode",        FALSE);
 
     app.gtk_app = gtk_application_new("org.example.blue-notes",
                                       G_APPLICATION_DEFAULT_FLAGS);
